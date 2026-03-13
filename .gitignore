@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+*.egg
+.eggs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Data (large files — use DVC or store externally)
+data/raw/
+data/processed/
+*.tif
+*.tiff
+*.hdf
+*.hdf5
+*.h5
+*.dss
+*.shp
+*.dbf
+*.shx
+*.prj
+*.geojson
+
+# HEC-RAS project files (keep templates in data/sample/ only)
+*.p0*.hdf
+*.g0*
+*.u0*
+*.f0*
+*.b0*
+*.r0*
+*.O0*
+*.tmp.hdf
+
+# Web
+web/node_modules/
+web/dist/
+web/.next/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Test outputs
+tests/output/
