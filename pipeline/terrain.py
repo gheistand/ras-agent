@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+import requests
 import httpx
 import numpy as np
 import rasterio
@@ -26,6 +27,11 @@ from pyproj import Transformer
 from shapely.geometry import box, mapping
 
 logger = logging.getLogger(__name__)
+
+
+class TerrainError(RuntimeError):
+    """Raised when a terrain or land cover data download or processing step fails."""
+
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -338,6 +344,267 @@ def get_terrain(
         raise RuntimeError("All tile downloads failed.")
 
     return mosaic_tiles(tile_paths, mosaic_path, resolution_m=resolution_m)
+
+
+# ── NLCD Land Cover ───────────────────────────────────────────────────────────
+
+# MRLC WCS endpoints — year-keyed; update when new NLCD releases are published
+NLCD_WCS_URLS: dict[int, str] = {
+    2019: "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2019_Land_Cover_L48/wcs",
+    2021: "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs",
+}
+
+
+def download_nlcd(
+    bbox_wgs84: tuple[float, float, float, float],
+    output_dir: Path,
+    year: int = 2021,
+) -> Path:
+    """
+    Download NLCD land cover raster for a bounding box.
+
+    Args:
+        bbox_wgs84: (west, south, east, north) in WGS84 decimal degrees
+        output_dir: Directory to save downloaded raster
+        year: NLCD year (default 2021; supported: 2019, 2021)
+
+    Returns:
+        Path to downloaded GeoTIFF
+
+    Notes:
+        Uses MRLC WCS endpoint. Adds 0.1-degree buffer to bbox to ensure
+        full watershed coverage. Downloads are idempotent (skips if exists).
+    """
+    if year not in NLCD_WCS_URLS:
+        raise TerrainError(
+            f"Unsupported NLCD year: {year}. Supported: {sorted(NLCD_WCS_URLS)}"
+        )
+
+    west, south, east, north = bbox_wgs84
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Cache key uses the original (unbuffered) bbox
+    fname = output_dir / f"nlcd_{year}_{west:.2f}_{south:.2f}_{east:.2f}_{north:.2f}.tif"
+    if fname.exists():
+        logger.debug(f"NLCD already downloaded: {fname.name}")
+        return fname
+
+    # Expand bbox by 0.1 degrees on each side for WCS request
+    buf = 0.1
+    w, s, e, n = west - buf, south - buf, east + buf, north + buf
+
+    base_url = NLCD_WCS_URLS[year]
+    coverage_id = f"NLCD_{year}_Land_Cover_L48"
+
+    # WCS 2.0.1 requires two SUBSET params — use list of tuples to allow duplication
+    params = [
+        ("SERVICE", "WCS"),
+        ("VERSION", "2.0.1"),
+        ("REQUEST", "GetCoverage"),
+        ("COVERAGEID", coverage_id),
+        ("SUBSET", f"Long({w},{e})"),
+        ("SUBSET", f"Lat({s},{n})"),
+        ("FORMAT", "image/tiff"),
+    ]
+
+    logger.info(
+        f"Downloading NLCD {year} for bbox: "
+        f"({w:.3f},{s:.3f},{e:.3f},{n:.3f}) from MRLC WCS"
+    )
+
+    try:
+        resp = requests.get(base_url, params=params, timeout=120)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise TerrainError(
+            f"NLCD WCS download failed: {exc}\n"
+            f"URL: {base_url}\n"
+            f"SUBSET Long({w:.4f},{e:.4f}) Lat({s:.4f},{n:.4f})"
+        ) from exc
+
+    with open(fname, "wb") as f:
+        f.write(resp.content)
+
+    logger.info(f"Downloaded NLCD: {fname.name} ({fname.stat().st_size / 1e6:.1f} MB)")
+    return fname
+
+
+def reproject_nlcd(
+    nlcd_path: Path,
+    target_crs: CRS,
+    output_path: Path = None,
+    resampling: str = "nearest",
+) -> Path:
+    """
+    Reproject NLCD raster to target CRS (EPSG:5070 for pipeline use).
+    Preserves integer dtype (uint8) — use nearest neighbor resampling.
+
+    Args:
+        nlcd_path:   Input NLCD GeoTIFF
+        target_crs:  Target CRS (e.g. EPSG:5070)
+        output_path: Output path; defaults to nlcd_path stem + "_epsg<N>.tif"
+        resampling:  Resampling algorithm name (default: "nearest")
+
+    Returns:
+        output_path
+    """
+    nlcd_path = Path(nlcd_path)
+    if output_path is None:
+        epsg = target_crs.to_epsg() or "reprojected"
+        output_path = nlcd_path.with_name(f"{nlcd_path.stem}_epsg{epsg}.tif")
+    output_path = Path(output_path)
+
+    if output_path.exists():
+        logger.debug(f"Reprojected NLCD already exists: {output_path.name}")
+        return output_path
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    resamp = getattr(Resampling, resampling)
+
+    with rasterio.open(nlcd_path) as src:
+        transform, width, height = calculate_default_transform(
+            src.crs, target_crs,
+            src.width, src.height,
+            *src.bounds,
+        )
+
+        profile = src.meta.copy()
+        profile.update({
+            "crs": target_crs,
+            "transform": transform,
+            "width": width,
+            "height": height,
+            "dtype": "uint8",
+            "nodata": 0,
+            "compress": "lzw",
+            "tiled": True,
+            "blockxsize": 256,
+            "blockysize": 256,
+        })
+
+        with rasterio.open(output_path, "w", **profile) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=target_crs,
+                    resampling=resamp,
+                )
+
+    logger.info(
+        f"Reprojected NLCD: {output_path.name} "
+        f"({width}×{height} px, CRS: EPSG:{target_crs.to_epsg()})"
+    )
+    return output_path
+
+
+def clip_nlcd_to_watershed(
+    nlcd_path: Path,
+    watershed_geom,
+    output_path: Path = None,
+    buffer_m: float = 500.0,
+) -> Path:
+    """
+    Clip NLCD raster to watershed geometry with buffer.
+    watershed_geom must be in same CRS as nlcd_path.
+
+    Args:
+        nlcd_path:      Input NLCD GeoTIFF
+        watershed_geom: Shapely geometry or GeoDataFrame (same CRS as nlcd_path)
+        output_path:    Output path; defaults to nlcd_path stem + "_clipped.tif"
+        buffer_m:       Buffer distance in map units (meters for EPSG:5070)
+
+    Returns:
+        output_path
+    """
+    from rasterio.mask import mask as rio_mask
+
+    nlcd_path = Path(nlcd_path)
+    if output_path is None:
+        output_path = nlcd_path.with_name(f"{nlcd_path.stem}_clipped.tif")
+    output_path = Path(output_path)
+
+    if output_path.exists():
+        logger.debug(f"Clipped NLCD already exists: {output_path.name}")
+        return output_path
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Accept GeoDataFrame — extract first geometry
+    if hasattr(watershed_geom, "geometry"):
+        geom = watershed_geom.geometry.iloc[0]
+    else:
+        geom = watershed_geom
+
+    buffered = geom.buffer(buffer_m)
+
+    with rasterio.open(nlcd_path) as src:
+        out_image, out_transform = rio_mask(
+            src, [mapping(buffered)], crop=True, nodata=0
+        )
+        out_meta = src.meta.copy()
+        out_meta.update({
+            "height": out_image.shape[1],
+            "width": out_image.shape[2],
+            "transform": out_transform,
+            "nodata": 0,
+            "dtype": "uint8",
+            "compress": "lzw",
+        })
+
+    with rasterio.open(output_path, "w", **out_meta) as dst:
+        dst.write(out_image)
+
+    logger.info(f"Clipped NLCD: {output_path.name}")
+    return output_path
+
+
+def get_nlcd(
+    bbox_wgs84: tuple[float, float, float, float],
+    output_dir: Path,
+    watershed_geom=None,
+    target_crs: CRS = None,
+    year: int = 2021,
+) -> Path:
+    """
+    Full NLCD pipeline: download → reproject → clip (if watershed_geom provided).
+
+    This is the primary entry point for NLCD data acquisition.
+
+    Args:
+        bbox_wgs84:     (west, south, east, north) in WGS84 decimal degrees
+        output_dir:     Working directory for downloaded and processed files
+        watershed_geom: Shapely geometry or GeoDataFrame; if provided, clip output
+                        to watershed (must be in target_crs)
+        target_crs:     Reproject to this CRS; defaults to EPSG:5070 (Albers)
+        year:           NLCD year (default 2021; supported: 2019, 2021)
+
+    Returns:
+        Path to processed NLCD GeoTIFF ready for model_builder.py
+    """
+    output_dir = Path(output_dir)
+
+    if target_crs is None:
+        target_crs = TARGET_CRS
+
+    # Step 1: Download raw WGS84 raster
+    raw_path = download_nlcd(bbox_wgs84, output_dir / "nlcd_raw", year=year)
+
+    # Step 2: Reproject to target CRS (nearest-neighbor — categorical data)
+    epsg = target_crs.to_epsg() or "reprojected"
+    reprojected_path = output_dir / f"nlcd_{year}_epsg{epsg}.tif"
+    reprojected = reproject_nlcd(raw_path, target_crs, reprojected_path)
+
+    # Step 3: Clip to watershed if geometry provided
+    if watershed_geom is not None:
+        clipped_path = output_dir / f"nlcd_{year}_watershed.tif"
+        return clip_nlcd_to_watershed(reprojected, watershed_geom, clipped_path)
+
+    return reprojected
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
