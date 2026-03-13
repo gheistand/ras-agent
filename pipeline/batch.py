@@ -212,6 +212,7 @@ def run_batch(
     ras_exe_dir: Optional[Path] = None,
     resume: bool = True,
     dry_run: bool = False,
+    notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
 ) -> BatchResult:
     """
     Run full pipeline for each watershed in input_file.
@@ -231,6 +232,7 @@ def run_batch(
         ras_exe_dir:    Path to RasUnsteady binary dir; None = mock mode
         resume:         Skip watersheds with existing completed output
         dry_run:        Load + validate specs, print plan, exit without running
+        notify_config:  Optional NotifyConfig for per-watershed + batch notifications
 
     Returns:
         BatchResult with per-watershed results and summary CSV path
@@ -314,6 +316,13 @@ def run_batch(
         )
         dur = time.monotonic() - t_start
         _write_run_metadata(spec, result, dur)
+        if (
+            notify_config is not None
+            and notify_config.on_complete
+            and result.status == "complete"
+        ):
+            import notify as _notify  # lazy import — avoids circular dependency
+            _notify.notify_run_complete(result, notify_config)
         logger.info(
             f"[{spec.name}] Complete in {dur:.1f}s [status={result.status}]"
         )
@@ -363,6 +372,11 @@ def run_batch(
         f"{batch_result.failed} failed, "
         f"{batch_result.skipped} skipped"
     )
+
+    if notify_config is not None:
+        import notify as _notify  # lazy import — avoids circular dependency
+        _notify.notify_batch_complete(batch_result, notify_config)
+
     return batch_result
 
 
@@ -459,7 +473,19 @@ if __name__ == "__main__":
     parser.add_argument("--no-resume", action="store_true",
                         help="Re-run even if output exists")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--webhook", default=None,
+                        help="Webhook URL for completion notification")
+    parser.add_argument("--notify-email", default=None,
+                        help="Email address for completion notification")
     args = parser.parse_args()
+
+    notify_config = None
+    if args.webhook or args.notify_email:
+        import notify as _notify
+        notify_config = _notify.NotifyConfig(
+            webhook_url=args.webhook,
+            email_to=args.notify_email,
+        )
 
     result = run_batch(
         args.input_file,
@@ -468,6 +494,7 @@ if __name__ == "__main__":
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         resume=not args.no_resume,
         dry_run=args.dry_run,
+        notify_config=notify_config,
     )
     print(
         f"Batch complete: {result.completed} done, "

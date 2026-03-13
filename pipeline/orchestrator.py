@@ -121,6 +121,7 @@ def run_watershed(
     max_parallel: int = 2,
     name: Optional[str] = None,
     write_report: bool = True,
+    notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
 ) -> OrchestratorResult:
     """
     Run the full RAS Agent pipeline for a pour point.
@@ -137,6 +138,7 @@ def run_watershed(
         max_parallel:      Maximum simultaneous HEC-RAS jobs
         name:              Run name; defaults to "watershed_{lon}_{lat}"
         write_report:      If True and status != "failed", generate HTML report
+        notify_config:     Optional NotifyConfig for webhook/email on completion
 
     Returns:
         OrchestratorResult with full provenance and output paths
@@ -392,6 +394,11 @@ def run_watershed(
         except Exception as exc:
             logger.warning(f"[Report] Report generation failed (non-fatal): {exc}")
 
+    # ── Notification ──────────────────────────────────────────────────────────
+    if notify_config is not None:
+        import notify as _notify  # lazy import — avoids circular dependency
+        _notify.notify_run_complete(result, notify_config)
+
     return result
 
 
@@ -422,7 +429,19 @@ if __name__ == "__main__":
                         help="Run in mock mode (no HEC-RAS needed)")
     parser.add_argument("--name", default=None,
                         help="Run name (default: watershed_{lon}_{lat})")
+    parser.add_argument("--webhook", default=None,
+                        help="Webhook URL for completion notification")
+    parser.add_argument("--notify-email", default=None,
+                        help="Email address for completion notification")
     args = parser.parse_args()
+
+    notify_config = None
+    if args.webhook or args.notify_email:
+        import notify as _notify
+        notify_config = _notify.NotifyConfig(
+            webhook_url=args.webhook,
+            email_to=args.notify_email,
+        )
 
     result = run_watershed(
         pour_point_lon=args.lon,
@@ -433,6 +452,7 @@ if __name__ == "__main__":
         mesh_strategy=args.strategy,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         name=args.name,
+        notify_config=notify_config,
     )
     print(f"Status:   {result.status}")
     print(f"Duration: {result.duration_sec:.1f}s")
