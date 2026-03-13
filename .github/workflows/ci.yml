@@ -22,7 +22,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
-          GDAL_VERSION=$(gdal-config --version) pip install gdal==$GDAL_VERSION
+          pip install gdal==$(gdal-config --version)
           pip install -r pipeline/requirements.txt
       - name: Run pipeline tests
         run: |
