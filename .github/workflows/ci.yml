@@ -15,8 +15,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install dependencies
+      - name: Install system geospatial libraries
         run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libgdal-dev gdal-bin libgeos-dev libproj-dev
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          GDAL_VERSION=$(gdal-config --version) pip install gdal==$GDAL_VERSION
           pip install -r pipeline/requirements.txt
       - name: Run pipeline tests
         run: |
