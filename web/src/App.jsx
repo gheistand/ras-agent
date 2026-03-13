@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { fetchJobs, fetchStats, submitJob, deleteJob, fetchHealth } from './api.js'
 
 const STATUS_COLORS = {
   queued:    'bg-gray-100 text-gray-600',
@@ -26,7 +27,7 @@ function StatusBadge({ status }) {
   )
 }
 
-function JobCard({ job }) {
+function JobCard({ job, onDelete }) {
   const [expanded, setExpanded] = useState(false)
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
@@ -34,11 +35,20 @@ function JobCard({ job }) {
         <div>
           <h3 className="font-semibold text-navy">{job.name}</h3>
           <p className="text-sm text-gray-500 mt-0.5">
-            {job.watershed_area_mi2?.toFixed(1)} mi² · Pour point: {job.lat?.toFixed(4)}N {job.lon?.toFixed(4)}W
+            {job.project_dir} · return period: {job.return_period_yr ?? '—'}yr
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <StatusBadge status={job.status} />
+          {job.status === 'queued' && (
+            <button
+              onClick={() => onDelete(job.id)}
+              title="Delete queued job"
+              className="text-xs text-red-400 hover:text-red-600 transition-colors"
+            >
+              🗑️
+            </button>
+          )}
           <button
             onClick={() => setExpanded(e => !e)}
             className="text-xs text-teal hover:underline"
@@ -77,6 +87,12 @@ function JobCard({ job }) {
               </div>
             ))}
           </div>
+          <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-xs text-gray-500">
+            <div>Created: {job.created_at ? new Date(job.created_at).toLocaleString() : '—'}</div>
+            {job.started_at && <div>Started: {new Date(job.started_at).toLocaleString()}</div>}
+            {job.completed_at && <div>Completed: {new Date(job.completed_at).toLocaleString()}</div>}
+            {job.error_msg && <div className="col-span-2 text-red-500">Error: {job.error_msg}</div>}
+          </div>
           {job.results && (
             <div className="mt-3 flex gap-2 flex-wrap">
               {job.results.shapefile && (
@@ -104,8 +120,11 @@ function JobCard({ job }) {
 
 function SubmitJobForm({ onSubmit }) {
   const [form, setForm] = useState({
-    name: '', lat: '', lon: '',
-    return_periods: [100], resolution_m: 3,
+    name: '',
+    project_dir: '',
+    plan_hdf: '',
+    geom_ext: 'g01',
+    return_period_yr: 100,
   })
   const [loading, setLoading] = useState(false)
 
@@ -114,7 +133,7 @@ function SubmitJobForm({ onSubmit }) {
     setLoading(true)
     try {
       await onSubmit(form)
-      setForm({ name: '', lat: '', lon: '', return_periods: [100], resolution_m: 3 })
+      setForm({ name: '', project_dir: '', plan_hdf: '', geom_ext: 'g01', return_period_yr: 100 })
     } finally {
       setLoading(false)
     }
@@ -135,58 +154,44 @@ function SubmitJobForm({ onSubmit }) {
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Pour Point Latitude</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Project Directory</label>
           <input
-            type="number" step="0.0001"
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal"
-            placeholder="40.0254"
-            value={form.lat}
-            onChange={e => setForm(f => ({ ...f, lat: e.target.value }))}
+            placeholder="/path/to/hecras/project"
+            value={form.project_dir}
+            onChange={e => setForm(f => ({ ...f, project_dir: e.target.value }))}
             required
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Pour Point Longitude</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Plan HDF File</label>
           <input
-            type="number" step="0.0001"
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal"
-            placeholder="-88.5741"
-            value={form.lon}
-            onChange={e => setForm(f => ({ ...f, lon: e.target.value }))}
+            placeholder="project.p01.hdf"
+            value={form.plan_hdf}
+            onChange={e => setForm(f => ({ ...f, plan_hdf: e.target.value }))}
             required
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Return Periods</label>
-          <div className="flex flex-wrap gap-2 mt-1">
-            {[2, 10, 25, 50, 100, 500].map(rp => (
-              <label key={rp} className="flex items-center gap-1 text-sm cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.return_periods.includes(rp)}
-                  onChange={e => setForm(f => ({
-                    ...f,
-                    return_periods: e.target.checked
-                      ? [...f.return_periods, rp].sort((a, b) => a - b)
-                      : f.return_periods.filter(r => r !== rp)
-                  }))}
-                  className="accent-teal"
-                />
-                {rp}-yr
-              </label>
-            ))}
-          </div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Geometry Extension</label>
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal"
+            placeholder="g01"
+            value={form.geom_ext}
+            onChange={e => setForm(f => ({ ...f, geom_ext: e.target.value }))}
+          />
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">DEM Resolution (m)</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Return Period (yr)</label>
           <select
             className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal"
-            value={form.resolution_m}
-            onChange={e => setForm(f => ({ ...f, resolution_m: Number(e.target.value) }))}
+            value={form.return_period_yr}
+            onChange={e => setForm(f => ({ ...f, return_period_yr: Number(e.target.value) }))}
           >
-            <option value={1}>1m (LiDAR high-res)</option>
-            <option value={3}>3m (1/3 arc-sec — recommended)</option>
-            <option value={10}>10m (faster, lower detail)</option>
+            {[2, 5, 10, 25, 50, 100, 500].map(rp => (
+              <option key={rp} value={rp}>{rp}-yr</option>
+            ))}
           </select>
         </div>
       </div>
@@ -203,59 +208,73 @@ function SubmitJobForm({ onSubmit }) {
   )
 }
 
-// ── Sample data for UI development ───────────────────────────────────────────
-const SAMPLE_JOBS = [
-  {
-    id: '1', name: 'Sangamon River at Monticello — 100yr',
-    status: 'complete', lat: 40.0254, lon: -88.5741,
-    watershed_area_mi2: 847.3,
-    phases: { terrain: 'complete', watershed: 'complete', streamstats: 'complete',
-               hydrograph: 'complete', mesh: 'complete', model_build: 'complete',
-               run: 'complete', results: 'complete' },
-    results: { shapefile: '#', geopackage: '#', depth_grid: '#' },
-  },
-  {
-    id: '2', name: 'Salt Fork River at Urbana — 100yr',
-    status: 'running', lat: 40.1106, lon: -88.2073,
-    watershed_area_mi2: 312.6,
-    phases: { terrain: 'complete', watershed: 'complete', streamstats: 'complete',
-               hydrograph: 'complete', mesh: 'running', model_build: 'queued',
-               run: 'queued', results: 'queued' },
-  },
-  {
-    id: '3', name: 'Embarras River at Camargo — 100yr',
-    status: 'queued', lat: 39.8017, lon: -88.1673,
-    watershed_area_mi2: 1204.1,
-    phases: { terrain: 'queued', watershed: 'queued', streamstats: 'queued',
-               hydrograph: 'queued', mesh: 'queued', model_build: 'queued',
-               run: 'queued', results: 'queued' },
-  },
-]
-
 // ── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [jobs, setJobs] = useState(SAMPLE_JOBS)
+  const [jobs, setJobs] = useState([])
+  const [stats, setStats] = useState({ total: 0, queued: 0, running: 0, complete: 0, error: 0 })
+  const [apiOnline, setApiOnline] = useState(null)   // null = unknown, true/false
+  const [fetchError, setFetchError] = useState(false)
+
+  const loadJobs = useCallback(async () => {
+    try {
+      const data = await fetchJobs()
+      setJobs(data)
+      setFetchError(false)
+    } catch {
+      setFetchError(true)
+    }
+  }, [])
+
+  const loadStats = useCallback(async () => {
+    try {
+      const data = await fetchStats()
+      setStats(data)
+    } catch {
+      // stats failure is non-critical; keep last known values
+    }
+  }, [])
+
+  const checkHealth = useCallback(async () => {
+    try {
+      await fetchHealth()
+      setApiOnline(true)
+    } catch {
+      setApiOnline(false)
+    }
+  }, [])
+
+  // Initial load + polling every 10s
+  useEffect(() => {
+    loadJobs()
+    loadStats()
+    const interval = setInterval(() => {
+      loadJobs()
+      loadStats()
+    }, 10_000)
+    return () => clearInterval(interval)
+  }, [loadJobs, loadStats])
+
+  // Health check every 30s
+  useEffect(() => {
+    checkHealth()
+    const interval = setInterval(checkHealth, 30_000)
+    return () => clearInterval(interval)
+  }, [checkHealth])
 
   const handleSubmit = async (form) => {
-    const newJob = {
-      id: String(Date.now()),
-      name: form.name,
-      status: 'queued',
-      lat: parseFloat(form.lat),
-      lon: parseFloat(form.lon),
-      watershed_area_mi2: null,
-      phases: Object.fromEntries(Object.keys(PHASE_LABELS).map(k => [k, 'queued'])),
-    }
-    setJobs(j => [newJob, ...j])
-    // TODO: POST to /api/jobs when backend is live
+    await submitJob(form)
+    await Promise.all([loadJobs(), loadStats()])
   }
 
-  const counts = {
-    total:    jobs.length,
-    running:  jobs.filter(j => j.status === 'running').length,
-    complete: jobs.filter(j => j.status === 'complete').length,
-    queued:   jobs.filter(j => j.status === 'queued').length,
+  const handleDelete = async (jobId) => {
+    try {
+      await deleteJob(jobId)
+      setJobs(j => j.filter(job => job.id !== jobId))
+      loadStats()
+    } catch (err) {
+      alert(`Could not delete job: ${err.message}`)
+    }
   }
 
   return (
@@ -269,19 +288,41 @@ export default function App() {
             <p className="text-xs text-blue-200 mt-0.5">Automated 2D HEC-RAS Modeling Pipeline</p>
           </div>
         </div>
-        <div className="text-xs text-blue-200">
-          CHAMP · Illinois State Water Survey
+        <div className="flex items-center gap-4">
+          {/* Connection status */}
+          <div className="flex items-center gap-1.5 text-xs">
+            {apiOnline === null ? (
+              <span className="w-2 h-2 rounded-full bg-gray-400 inline-block" />
+            ) : apiOnline ? (
+              <span className="w-2 h-2 rounded-full bg-green-400 inline-block" />
+            ) : (
+              <>
+                <span className="w-2 h-2 rounded-full bg-red-400 inline-block" />
+                <span className="text-red-300">API offline</span>
+              </>
+            )}
+          </div>
+          <div className="text-xs text-blue-200">
+            CHAMP · Illinois State Water Survey
+          </div>
         </div>
       </header>
 
       <main className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+        {/* API error banner */}
+        {fetchError && (
+          <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 text-sm px-4 py-3 rounded-lg">
+            Could not reach API — showing cached data
+          </div>
+        )}
+
         {/* Stats row */}
         <div className="grid grid-cols-4 gap-4">
           {[
-            { label: 'Total Jobs',  value: counts.total,    color: 'text-navy' },
-            { label: 'Running',     value: counts.running,  color: 'text-blue-600' },
-            { label: 'Complete',    value: counts.complete, color: 'text-teal' },
-            { label: 'Queued',      value: counts.queued,   color: 'text-gray-500' },
+            { label: 'Total Jobs',  value: stats.total,    color: 'text-navy' },
+            { label: 'Running',     value: stats.running,  color: 'text-blue-600' },
+            { label: 'Complete',    value: stats.complete, color: 'text-teal' },
+            { label: 'Queued',      value: stats.queued,   color: 'text-gray-500' },
           ].map(({ label, value, color }) => (
             <div key={label} className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 text-center">
               <div className={`text-3xl font-bold ${color}`}>{value}</div>
@@ -300,7 +341,9 @@ export default function App() {
             {jobs.length === 0 ? (
               <p className="text-sm text-gray-400 text-center py-8">No jobs yet. Submit one above.</p>
             ) : (
-              jobs.map(job => <JobCard key={job.id} job={job} />)
+              jobs.map(job => (
+                <JobCard key={job.id} job={job} onDelete={handleDelete} />
+              ))
             )}
           </div>
         </div>
