@@ -109,12 +109,13 @@ def test_patch_job_results_dir(client):
     assert data["results_dir"] == mock_dir
     assert data["flood_extent_available"] is True   # mock path contains "mock"
 
-    # GET /flood-extent should return sample GeoJSON for mock path
+    # GET /flood-extent should return sample GeoJSON for mock path.
+    # Default (return_periods=all) now returns 3 features (10, 50, 100yr).
     extent_res = client.get(f"/api/jobs/{job_id}/results/flood-extent")
     assert extent_res.status_code == 200
     geojson = extent_res.json()
     assert geojson["type"] == "FeatureCollection"
-    assert len(geojson["features"]) == 1
+    assert len(geojson["features"]) == 3
     feat = geojson["features"][0]
     assert feat["geometry"]["type"] == "Polygon"
     assert feat["properties"]["job_id"] == job_id

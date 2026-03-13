@@ -117,15 +117,33 @@ class JobPatch(BaseModel):
 
 # ── Mock GeoJSON (used for jobs with results_dir containing "mock") ────────────
 
-# ~5 km² square polygon centered on (-89.5, 40.0) in WGS84
-# delta_lon = 0.024°, delta_lat = 0.022°  →  ~2.04 km × ~2.44 km ≈ 4.98 km²
-_MOCK_FLOOD_POLYGON_COORDS = [[
-    [-89.512, 39.989],
-    [-89.488, 39.989],
-    [-89.488, 40.011],
-    [-89.512, 40.011],
-    [-89.512, 39.989],
-]]
+# Nested square polygons centered on (-89.5, 40.0) for three return periods.
+# Sizes scale with return period: 10yr ~2km radius, 50yr ~4km, 100yr ~6km.
+# delta_lon uses cos(40°) ≈ 0.766: 2km→0.024°, 4km→0.047°, 6km→0.071°
+# delta_lat: 2km→0.018°, 4km→0.036°, 6km→0.054°
+_MOCK_FLOOD_FEATURES = {
+    10: [[
+        [-89.524, 39.982],
+        [-89.476, 39.982],
+        [-89.476, 40.018],
+        [-89.524, 40.018],
+        [-89.524, 39.982],
+    ]],
+    50: [[
+        [-89.547, 39.964],
+        [-89.453, 39.964],
+        [-89.453, 40.036],
+        [-89.547, 40.036],
+        [-89.547, 39.964],
+    ]],
+    100: [[
+        [-89.571, 39.946],
+        [-89.429, 39.946],
+        [-89.429, 40.054],
+        [-89.571, 40.054],
+        [-89.571, 39.946],
+    ]],
+}
 
 
 # ── Results helpers ───────────────────────────────────────────────────────────
@@ -391,12 +409,21 @@ def get_job_results(job_id: str):
 @app.get("/api/jobs/{job_id}/results/flood-extent")
 def get_flood_extent(
     job_id: str,
-    return_period: Optional[int] = Query(None, description="Return period in years"),
+    return_period: Optional[int] = Query(None, description="Return period in years (single, legacy)"),
+    return_periods: Optional[str] = Query(
+        None,
+        description="Return periods to include: 'all' or comma-separated list (e.g. '10,50,100')",
+    ),
 ):
     """
     Return flood extent as GeoJSON FeatureCollection.
 
-    For mock jobs returns a sample polygon over central Illinois.
+    When return_periods='all' or a comma-separated list, returns one Feature per
+    return period (each with properties.return_period_yr set).  When a single
+    return period is requested (or the legacy return_period param is used),
+    returns a single-feature FeatureCollection.  Defaults to all return periods.
+
+    For mock jobs returns sample nested polygons over central Illinois.
     For real jobs reads flood_extent.gpkg via geopandas.
     Returns 404 if flood extent data is not available.
     """
@@ -410,28 +437,76 @@ def get_flood_extent(
     if not results_dir_str:
         raise HTTPException(status_code=404, detail="Flood extent not available for this job")
 
-    rp = return_period or job.get("return_period_yr")
+    # Parse requested return periods -----------------------------------------
+    # rp_list=None means "all available"; rp_list=[n] means single RP.
+    if return_periods is not None:
+        rp_str = return_periods.strip().lower()
+        if rp_str == "all":
+            rp_list: Optional[list[int]] = None
+        else:
+            rp_list = [int(x.strip()) for x in rp_str.split(",") if x.strip()]
+    elif return_period is not None:
+        rp_list = [return_period]
+    else:
+        rp_list = None  # default: all available
 
-    # Mock jobs: return sample polygon
+    multi_mode = rp_list is None or len(rp_list) > 1
+
+    # Mock jobs ----------------------------------------------------------------
     if "mock" in results_dir_str:
-        return {
-            "type": "FeatureCollection",
-            "features": [{
+        requested = list(rp_list) if rp_list is not None else sorted(_MOCK_FLOOD_FEATURES.keys())
+        features = []
+        for rp in requested:
+            coords = _MOCK_FLOOD_FEATURES.get(rp)
+            if coords is None:
+                continue
+            features.append({
                 "type": "Feature",
-                "geometry": {
-                    "type": "Polygon",
-                    "coordinates": _MOCK_FLOOD_POLYGON_COORDS,
-                },
+                "geometry": {"type": "Polygon", "coordinates": coords},
                 "properties": {
                     "return_period_yr": rp,
                     "job_id": job_id,
                     "job_name": job.get("name"),
                 },
-            }],
-        }
+            })
+        if not features:
+            raise HTTPException(status_code=404, detail="Flood extent not available for this job")
+        return {"type": "FeatureCollection", "features": features}
 
-    # Real jobs: read gpkg
+    # Real jobs: read gpkg(s) --------------------------------------------------
     results_dir = Path(results_dir_str)
+
+    if multi_mode:
+        # Collect one feature set per return period found in results_dir
+        detected = _detect_return_periods(results_dir) if rp_list is None else rp_list
+        all_features = []
+        for rp in detected:
+            gpkg_path = _flood_extent_path(results_dir, rp)
+            if gpkg_path is None:
+                continue
+            try:
+                gdf = gpd.read_file(str(gpkg_path))
+                if gdf.empty:
+                    continue
+                gdf_wgs84 = gdf.to_crs(epsg=4326)
+                for _, row in gdf_wgs84.iterrows():
+                    all_features.append({
+                        "type": "Feature",
+                        "geometry": row.geometry.__geo_interface__,
+                        "properties": {
+                            "return_period_yr": rp,
+                            "job_id": job_id,
+                            "job_name": job.get("name"),
+                        },
+                    })
+            except Exception as exc:
+                logger.warning(f"Skipping RP {rp} for job {job_id}: {exc}")
+        if not all_features:
+            raise HTTPException(status_code=404, detail="Flood extent not available for this job")
+        return {"type": "FeatureCollection", "features": all_features}
+
+    # Single return period
+    rp = rp_list[0] if rp_list else job.get("return_period_yr")
     gpkg_path = _flood_extent_path(results_dir, rp)
     if gpkg_path is None:
         raise HTTPException(status_code=404, detail="Flood extent not available for this job")
@@ -445,13 +520,8 @@ def get_flood_extent(
     if gdf.empty:
         raise HTTPException(status_code=404, detail="Flood extent not available for this job")
 
-    # Reproject to WGS84 for GeoJSON
     gdf_wgs84 = gdf.to_crs(epsg=4326)
-
-    geojson = {
-        "type": "FeatureCollection",
-        "features": [],
-    }
+    geojson: dict = {"type": "FeatureCollection", "features": []}
     for _, row in gdf_wgs84.iterrows():
         geojson["features"].append({
             "type": "Feature",
