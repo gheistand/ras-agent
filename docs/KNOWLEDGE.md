@@ -11,8 +11,8 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** Phase 0+1 complete (commit `c4e0e26`), Phase 2 next
-- **Cloudflare Git connection:** NOT YET DONE — Glenn needs to connect in dashboard (Workers & Pages → ras-agent → Settings → Build & Deployments → Connect to Git → gheistand/ras-agent, build cmd: `cd web && npm ci && npm run build`, output: `web/dist`)
+- **Status:** Phases 0–5 complete, Phase 6 (orchestrator + NLCD) building now
+- **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main
 
 ---
 
@@ -123,10 +123,14 @@ Web (Cloudflare Pages):
 |-------|-------------|--------|-----------|
 | 0 | Foundation — repo, CI/CD, web scaffold | ✅ Done | README, LICENSE, .gitignore, ci.yml, wrangler.toml |
 | 1 | Data pipeline | ✅ Done | terrain.py, watershed.py, streamstats.py, hydrograph.py |
-| 2 | Model builder | 📋 Next | model_builder.py (RAS Commander) |
-| 3 | Execution engine | 📋 Planned | runner.py, job queue |
-| 4 | Results pipeline | 📋 Planned | results.py (h5py → GIS) |
-| 5 | Web dashboard | 📋 Planned | App.jsx expansion, map viewer |
+| 2 | Model builder | ✅ Done | model_builder.py |
+| 3 | Execution engine | ✅ Done | runner.py |
+| 4 | Results pipeline | ✅ Done | results.py |
+| 5 | FastAPI + live dashboard | ✅ Done | api.py, web/src/api.js, App.jsx |
+| 6 | Orchestrator + NLCD | 🔨 Building | orchestrator.py, terrain.py (NLCD layer) |
+
+**Test count: 69/69 passing** (as of 2026-03-13)
+**Latest commit:** `99128ae` — Phase 2: model_builder.py
 
 ---
 
@@ -251,31 +255,61 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 
 ---
 
-## Phase 3 Spec (runner.py) — planned
+## Phase 3 — runner.py (DONE)
 
-- Job queue: SQLite-backed (joblib or simple custom), states: queued/running/complete/error
-- Execute `RasUnsteady` on Linux via subprocess: `LD_LIBRARY_PATH=../libs:... RasUnsteady <plan.tmp.hdf> x01`
-- Before run: dos2unix on .b## and .g## files; strip Results group from .hdf → create .tmp.hdf
-- After run: rename .p##.tmp.hdf → .p##.hdf
-- Parallel execution: multiple RasUnsteady processes for different return periods or watersheds
-- Timeout: 4-hour hard limit per run; retry once on failure
-- Progress tracking via HDF5 file size growth (proxy for simulation progress)
+- SQLite job queue at `data/jobs.db` — states: queued/running/complete/error
+- `enqueue_job()`, `get_job()`, `list_jobs()`, `run_job()`, `run_queue()`
+- Pre-run prep: dos2unix all .b##/.g## files; strip Results group from .hdf → .tmp.hdf
+- Invocation: `LD_LIBRARY_PATH=../libs:../libs/mkl:../libs/rhel_8 RasUnsteady <plan.tmp.hdf> <geom_ext>`
+- After success: rename .tmp.hdf → .hdf
+- Parallel: `max_parallel` kwarg, runs multiple RasUnsteady processes
+- **Mock mode:** `mock=True` skips real binary, creates fake output HDF → all tests pass without HEC-RAS
+- Timeout: 4hr per job; retry once on failure
+- 6 tests in `tests/test_runner.py`
 
 ---
 
-## Phase 4 Spec (results.py) — planned
+## Phase 4 — results.py (DONE)
 
-- Read HEC-RAS output HDF5 via h5py
-- Key HDF paths in HEC-RAS 6.x output:
+- `get_2d_area_names(hdf_path)` — lists 2D flow areas from HDF
+- `extract_max_depth()`, `extract_max_wse()` — (cell_centers_xy, max_values) from HDF time series
+- `cells_to_raster()` — scipy griddata interpolation → COG GeoTIFF (LZW, tiled 256x256, overviews)
+- `extract_flood_extent()` — cells > threshold → union → GeoDataFrame polygon
+- `export_results()` — full pipeline: depth_grid.tif, wse_grid.tif, flood_extent.gpkg, flood_extent.shp
+- Key HDF paths confirmed in implementation:
+  - `/Geometry/2D Flow Areas/<name>/Cells Center Coordinate`
   - `/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Depth`
   - `/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Water Surface`
-  - `/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Velocity`
-  - `/Geometry/2D Flow Areas/<name>/Cells Center Coordinate`
-- Export max depth grid → GeoTIFF (Cloud-Optimized)
-- Export flood extent polygon → Shapefile + GeoPackage
-- Export velocity grid → GeoTIFF
-- Store results to Cloudflare R2 (S3-compatible)
-- pyHMT2D is a useful reference: https://github.com/psu-efd/pyHMT2D
+- COG: BIGTIFF=IF_SAFER, nodata=-9999, overviews [2,4,8,16]
+- 5 tests in `tests/test_results.py` (synthetic HDF fixture, no HEC-RAS needed)
+
+---
+
+## Phase 5 — FastAPI backend + live dashboard (DONE)
+
+### pipeline/api.py
+- FastAPI app with CORS middleware
+- `POST /api/jobs` — submit job (returns 201)
+- `GET /api/jobs` — list jobs (optional ?status= filter)
+- `GET /api/jobs/{id}` — single job
+- `DELETE /api/jobs/{id}` — cancel queued job
+- `GET /api/stats` — {total, queued, running, complete, error}
+- `GET /api/health` — {"status":"ok","version":"0.1.0"}
+- DB path via `JOBS_DB_PATH` env var (default: `data/jobs.db`)
+- Run: `python3 pipeline/api.py` → localhost:8000
+
+### web/src/api.js
+- Thin fetch-based client; `VITE_API_URL` env var (default: http://localhost:8000)
+- `fetchJobs()`, `fetchJob()`, `submitJob()`, `deleteJob()`, `fetchStats()`, `fetchHealth()`
+
+### web/src/App.jsx (updated)
+- Polls jobs + stats every 10 seconds
+- Health check every 30s → green/red dot in header
+- 🗑️ delete button on queued jobs
+- Error banner when API unreachable
+- Form submits to real API
+
+- 10 tests in `tests/test_api.py` (FastAPI TestClient, temp DB per test)
 
 ---
 
@@ -317,10 +351,16 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 
 ## Pending Actions
 
-1. Connect Cloudflare Pages to GitHub (dashboard step — Glenn to do)
-2. Send OTM email (Glenn to do — draft ready in session history)
-3. Phase 2: spawn Claude Code → implement model_builder.py
-4. Phase 3: runner.py + job queue
-5. Phase 4: results.py (h5py → GIS)
-6. Acquire HEC-RAS 6.6 Linux build and install on Mac/Linux for testing
-7. Phase 5: web dashboard expansion (map viewer, real API connection)
+1. ~~Connect Cloudflare Pages to GitHub~~ ✅ Done (ras-agent.pages.dev live + Git-connected)
+2. Send OTM email (Glenn to do — draft ready; email to otm@illinois.edu from heistand@illinois.edu)
+3. ~~Phase 2–5~~ ✅ All done
+4. **Phase 6 (building now):** orchestrator.py + NLCD download in terrain.py
+5. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
+6. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
+7. **Docker smoke test:** Start Docker Desktop → Rocky 8 x86 → download HEC-RAS 6.6 Linux build → run Muncie test case via runner.py mock=False
+8. **Cloud VM:** Set up x86 Linux VM (AWS/Azure) for production-scale runs
+
+## CI Status
+- ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
+- Then: `pip install gdal==$(gdal-config --version)` before `pip install -r requirements.txt`
+- CI workflow updated accordingly (commit `5243607`)
