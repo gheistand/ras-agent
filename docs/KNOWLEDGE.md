@@ -129,11 +129,15 @@ Web (Cloudflare Pages):
 | 5 | FastAPI + live dashboard | ✅ Done | api.py, web/src/api.js, App.jsx |
 | 6a | Orchestrator | ✅ Done | orchestrator.py |
 | 6b | NLCD terrain layer | ✅ Done | terrain.py (get_nlcd, download_nlcd, reproject_nlcd, clip_nlcd_to_watershed) |
-| 7a | Batch mode | 🔨 Building | batch.py |
-| 7b | HTML run report | 🔨 Building | report.py |
+| 7a | Batch mode | ✅ Done | batch.py |
+| 7b | HTML run report | ✅ Done | report.py |
+| 8 | Web map viewer | ✅ Done | MapViewer.jsx, api.py results endpoints |
+| 9a | Docker + docker-compose | 🔨 Building | Dockerfile, docker-compose.yml |
+| 9b | RAS Commander wiring | 🔨 Building | model_builder.py (actual RC calls) |
+| 9c | Webhook/email notifications | 🔨 Building | notify.py, batch.py, orchestrator.py |
 
-**Test count: 78/78 passing** (as of 2026-03-13)
-**Latest commit:** `3b19ffc` — Phase 6a: orchestrator.py
+**Test count: 96/96 passing** (as of 2026-03-13)
+**Latest commit:** `3cc0002` — Phase 8: web map viewer
 
 ---
 
@@ -371,17 +375,45 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 - NLCD source: MRLC WCS `https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs`
 - 3 tests in `tests/test_terrain.py` (mocked HTTP, no real network calls)
 
+## Phase 7a — batch.py (DONE, commit d2d0c3f)
+- `run_batch(input_file, output_dir, max_workers=3, resume=True, dry_run=False)`
+- CSV or JSON watershed spec input; idempotent resume (skips completed runs)
+- ThreadPoolExecutor parallel execution; per-watershed error isolation
+- `run_metadata.json` written per run with full provenance + git commit
+- `write_summary_csv()` — one row per watershed with drainage area, Q100, flood extent
+- CLI: `python3 pipeline/batch.py watersheds.csv output/ --workers 3 --mock`
+- 8 tests in `tests/test_batch.py`
+
+## Phase 7b — report.py (DONE, commit ed269bc)
+- `generate_report(result, output_path, include_plots=True)` → self-contained HTML
+- Sections: header, basin characteristics, peak flow table, hydrograph plots, results summary, flood extent preview, data provenance, footer
+- `_plot_hydrographs()` / `_plot_flood_extents()` → base64-encoded PNG inline
+- No external dependencies (no Jinja2) — pure Python string formatting, inline CSS
+- `orchestrator.run_watershed()` calls `generate_report()` by default (`write_report=True`)
+- CHAMP/FEMA-quality: suitable for attaching to memos
+- 6 tests in `tests/test_report.py`
+
+## Phase 8 — Map Viewer (DONE, commit 3cc0002)
+- `GET /api/jobs/{id}/results` — available result files + return periods
+- `GET /api/jobs/{id}/results/flood-extent?return_period=100` → GeoJSON
+- `GET /api/jobs/{id}/results/depth-stats` → max depth, flood area, file list
+- `PATCH /api/jobs/{id}` → update results_dir
+- `runner.py`: `results_dir TEXT` column + `update_job_results_dir()`
+- `MapViewer.jsx`: MapLibre GL JS (CDN), OSM base tiles, flood extent overlay, fitBounds
+- `App.jsx`: selectedJob state, JobCard click highlight, MapViewer below job list
+- Mock jobs return sample Illinois polygon — demo-ready without HEC-RAS
+- 4 tests in `tests/test_results_api.py`
+
 ## Pending Actions
 
-1. ~~Connect Cloudflare Pages to GitHub~~ ✅ Done
-2. ~~Phases 2–6~~ ✅ All done (78/78 tests)
-3. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-4. **Phase 7 (building now):** batch.py + report.py
-5. **Next after 7:** Web map viewer (Leaflet/MapLibre in dashboard)
-6. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
-7. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
-8. **Docker smoke test:** Start Docker Desktop → Rocky 8 x86 → HEC-RAS 6.6 Linux → Muncie test case
-9. **Cloud VM:** AWS/Azure x86 Linux for production runs
+1. ~~Phases 2–8~~ ✅ All done (96/96 tests)
+2. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
+3. **Phase 9 (building now):** Docker/docker-compose + RAS Commander wiring + notifications
+4. **After 9:** Cloudflare R2 results storage + multi-return-period map layers (E + G)
+5. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
+6. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
+7. **Docker smoke test:** Start Docker Desktop → Rocky 8 x86 → HEC-RAS 6.6 Linux → Muncie test case
+8. **Cloud VM:** AWS/Azure x86 Linux for production runs
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
