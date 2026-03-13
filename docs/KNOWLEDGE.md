@@ -162,52 +162,92 @@ Web (Cloudflare Pages):
 
 ---
 
-## Phase 2 Spec (model_builder.py) — for Claude Code
+## Phase 2 Spec (model_builder.py) — REVISED after SimTheory feedback (2026-03-13)
 
-### What it needs to do:
-Accept `WatershedResult` (from watershed.py) + `HydrographSet` (from hydrograph.py) and build a complete HEC-RAS 6.6 project directory using RAS Commander.
+### Critical Finding: RAS Commander Cannot Create Greenfield 2D Projects
+RAS Commander (as of v0.52) assumes an EXISTING project/geometry. It cannot:
+- Define new 2D flow areas from scratch
+- Draw/generate a new computational mesh
+- Write initial geometry HDF5 from nothing
 
-### Key RAS Commander classes to use:
-- `RasPrj` — project management
-- `RasGeo` — geometry file (.g##)
-- `RasUnsteadyFlow` — unsteady flow file (.u##)
-- `RasPlan` — plan file (.p##)
-- RAS Commander docs: https://ras-commander.readthedocs.io/
+It CAN (on existing projects):
+- Clone projects and modify ASCII plan/geometry/flow files
+- Update Manning's n, infiltration, boundary conditions
+- Parse and extract 2D results (depths, velocities, WSE from HDF5)
+- Manage and execute simulations
 
-### Outputs required:
-- `<project_name>.prj` — HEC-RAS project file
-- `<project_name>.g01` — geometry (2D flow area referencing the mesh .hdf)
-- `<project_name>.u01` — unsteady flow (inflow hydrographs, downstream BC)
-- `<project_name>.p01` — plan file (references g01, u01; simulation time settings)
-- `<project_name>.p01.tmp.hdf` — pre-processed geometry HDF (if geom preprocessing is run)
+Source: SimTheory assistant analysis of RAS Commander docs/PyPI, 2026-03-13
 
-### Boundary conditions:
-- **Upstream:** Flow hydrograph at inlet (from hydrograph.py output)
-- **Downstream:** Normal depth BC (friction slope = channel slope)
-- **Manning's n:** Lookup from NLCD land cover class → standard n table
+### Three Mesh Strategy Paths
 
-### Manning's n table (standard values for IL streams):
+**Path A: Template + Clone (implement now)**
+- Build 3 archetype HEC-RAS 2D template projects on Windows (small ~50 mi², medium ~200 mi², large ~800 mi² IL watershed)
+- RAS Commander clones template → swaps terrain reference → updates BCs/hydrograph/Manning's n → writes plan
+- Limitation: mesh perimeter/cell structure inherited from template — won't perfectly fit every watershed
+- Status: implement in Phase 2 weekend build
+
+**Path B: Direct HDF5 Construction (future)**
+- Write HEC-RAS geometry HDF5 files directly with h5py
+- True greenfield: define 2D flow area perimeter from watershed polygon, generate mesh cells programmatically
+- Effort: 2-3 weeks focused work
+- Status: planned after Path A is proven
+
+**Path C: RAS2025 API (future)**
+- RAS2025's new public API handles mesh generation programmatically
+- Still alpha, no Linux build, API may change
+- Status: 6-12 months out
+
+### Interface Design (path-agnostic from day one)
+```python
+def build_model(watershed: WatershedResult,
+                hydro_set: HydrographSet,
+                mesh_strategy: str = "template_clone") -> HecRasProject:
+    if mesh_strategy == "template_clone":
+        return _build_from_template(watershed, hydro_set)
+    elif mesh_strategy == "hdf5_direct":
+        return _build_hdf5_direct(watershed, hydro_set)   # stub
+    elif mesh_strategy == "ras2025":
+        return _build_ras2025(watershed, hydro_set)        # stub
+```
+
+### Open Question (awaiting Bill Katzenmeyer's input)
+Can RAS Commander update the 2D flow area perimeter polygon on a cloned project, or is the mesh geometry fixed at clone time? This determines how closely the template mesh needs to match each watershed's shape.
+
+### Template Projects Needed (Glenn to build on Windows)
+- `templates/small_watershed/`  — ~50 mi², low-relief IL agricultural
+- `templates/medium_watershed/` — ~200 mi², mixed land cover
+- `templates/large_watershed/`  — ~800 mi², river corridor
+
+### What model_builder.py Does (Path A implementation)
+1. Select closest template by drainage area
+2. RAS Commander clones template to new project directory
+3. Update terrain reference to point to watershed DEM (clipped GeoTIFF from terrain.py)
+4. Update 2D flow area Manning's n from NLCD lookup table
+5. Write unsteady flow file with hydrographs from hydrograph.py
+6. Set downstream BC: normal depth (slope = main channel slope from watershed.py)
+7. Update simulation time window (warm-up 12hr + hydrograph duration)
+8. Return project path ready for runner.py
+
+### Manning's n Table (NLCD classes → standard IL values)
 - Open water: 0.035
 - Developed low intensity: 0.080
 - Developed medium intensity: 0.100
 - Developed high intensity: 0.120
 - Barren land: 0.030
-- Deciduous forest: 0.120
-- Evergreen forest: 0.120
-- Mixed forest: 0.120
+- Deciduous/Evergreen/Mixed forest: 0.120
 - Shrub/scrub: 0.060
 - Grassland/herbaceous: 0.035
 - Pasture/hay: 0.033
 - Cultivated crops: 0.037
 - Woody wetlands: 0.075
 - Herbaceous wetlands: 0.075
-- Default (unknown): 0.040
+- Default: 0.040
 
-### Simulation settings:
-- Computation interval: 10-30 seconds (adaptive, based on mesh cell size)
+### Simulation Settings
+- Computation interval: 10-30 sec (adaptive, based on mesh cell size)
 - Mapping output interval: 1 hour
 - Hydrograph output interval: 15 minutes
-- Warm-up period: 12 hours at baseflow before hydrograph
+- Warm-up: 12 hours at baseflow before hydrograph start
 
 ---
 
