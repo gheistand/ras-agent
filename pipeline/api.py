@@ -31,6 +31,7 @@ from typing import Optional
 import geopandas as gpd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,17 @@ _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB = _REPO_ROOT / "data" / "jobs.db"
 
 VERSION = "0.1.0"
+
+# Loaded at startup via _startup(); None if R2 env vars not set
+R2_CONFIG = None
+
+
+def _get_storage():
+    """Lazy import of storage module (avoids hard boto3 dependency at load time)."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    import storage
+    return storage
 
 
 def _db_path() -> Path:
@@ -91,6 +103,7 @@ class StatsResponse(BaseModel):
     running: int
     complete: int
     error: int
+    r2_configured: bool
 
 
 class HealthResponse(BaseModel):
@@ -172,9 +185,13 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup():
     """Ensure the jobs table exists on startup."""
+    global R2_CONFIG
     runner = _get_runner()
     runner._init_db(_db_path())
-    logger.info(f"RAS Agent API v{VERSION} started. DB: {_db_path()}")
+    storage = _get_storage()
+    R2_CONFIG = storage.r2_config_from_env()
+    r2_status = "configured" if R2_CONFIG else "not configured"
+    logger.info(f"RAS Agent API v{VERSION} started. DB: {_db_path()}. R2: {r2_status}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -247,6 +264,7 @@ def stats():
         running=counts["running"],
         complete=counts["complete"],
         error=counts["error"],
+        r2_configured=R2_CONFIG is not None,
     )
 
 
@@ -445,6 +463,45 @@ def get_flood_extent(
             },
         })
     return geojson
+
+
+@app.get("/api/jobs/{job_id}/results/download/{filename}")
+def download_result_file(job_id: str, filename: str):
+    """
+    Download a result file for a job.
+
+    If R2 is configured, returns a 302 redirect to a presigned R2 URL.
+    Otherwise streams the file directly from local disk.
+    Returns 404 if the job or file is not found.
+    """
+    runner = _get_runner()
+    db = _db_path()
+    job = runner.get_job(job_id, db_path=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    results_dir_str = job.get("results_dir")
+    if not results_dir_str:
+        raise HTTPException(status_code=404, detail="No results directory for this job")
+
+    results_dir = Path(results_dir_str)
+    local_file = results_dir / filename
+
+    if not local_file.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+    if R2_CONFIG is not None:
+        run_name = results_dir.name
+        prefix = R2_CONFIG.prefix.rstrip("/")
+        key = f"{prefix}/{run_name}/{filename}" if prefix else f"{run_name}/{filename}"
+        try:
+            storage = _get_storage()
+            url = storage.get_presigned_url(key, R2_CONFIG)
+            return RedirectResponse(url=url, status_code=302)
+        except Exception as exc:
+            logger.warning(f"R2 presigned URL failed for {filename}: {exc}; falling back to local")
+
+    return FileResponse(path=str(local_file), filename=filename)
 
 
 @app.get("/api/jobs/{job_id}/results/depth-stats")

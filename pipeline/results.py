@@ -335,6 +335,7 @@ def export_results(
     output_dir: Path,
     crs: CRS = None,
     resolution_m: float = 3.0,
+    r2_config=None,
 ) -> dict[str, Path]:
     """
     Run the full results export pipeline for all 2D areas in an HDF file.
@@ -411,6 +412,16 @@ def export_results(
     logger.info(f"Results export complete → {output_dir}")
     for name, path in outputs.items():
         logger.info(f"  {name}: {path}")
+
+    # Optional R2 upload
+    if r2_config is not None:
+        try:
+            from pipeline.storage import upload_results_dir
+            run_name = output_dir.name
+            r2_urls = upload_results_dir(output_dir, run_name, r2_config)
+            logger.info(f"Uploaded {len(r2_urls)} result files to R2")
+        except Exception as e:
+            logger.warning(f"R2 upload failed (results still saved locally): {e}")
 
     return outputs
 
