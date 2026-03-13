@@ -120,6 +120,7 @@ def run_watershed(
     ras_exe_dir: Optional[Path] = None,
     max_parallel: int = 2,
     name: Optional[str] = None,
+    write_report: bool = True,
 ) -> OrchestratorResult:
     """
     Run the full RAS Agent pipeline for a pour point.
@@ -135,6 +136,7 @@ def run_watershed(
         ras_exe_dir:       Path to RasUnsteady binary dir; None = mock mode
         max_parallel:      Maximum simultaneous HEC-RAS jobs
         name:              Run name; defaults to "watershed_{lon}_{lat}"
+        write_report:      If True and status != "failed", generate HTML report
 
     Returns:
         OrchestratorResult with full provenance and output paths
@@ -381,6 +383,14 @@ def run_watershed(
     if result.errors:
         for err in result.errors:
             logger.warning(f"  Non-fatal error: {err}")
+
+    # ── Report generation ─────────────────────────────────────────────────────
+    if write_report and result.status != "failed":
+        try:
+            import report as _report  # lazy import — avoids circular dependency
+            _report.generate_report(result)
+        except Exception as exc:
+            logger.warning(f"[Report] Report generation failed (non-fatal): {exc}")
 
     return result
 
