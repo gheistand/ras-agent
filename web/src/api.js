@@ -49,3 +49,16 @@ export async function fetchStats() {
 export async function fetchHealth() {
   return _request("GET", "/api/health")
 }
+
+export async function fetchJobResults(jobId) {
+  return _request("GET", `/api/jobs/${encodeURIComponent(jobId)}/results`)
+}
+
+export async function fetchFloodExtent(jobId, returnPeriod = null) {
+  const qs = returnPeriod != null ? `?return_period=${returnPeriod}` : ""
+  return _request("GET", `/api/jobs/${encodeURIComponent(jobId)}/results/flood-extent${qs}`)
+}
+
+export async function fetchDepthStats(jobId) {
+  return _request("GET", `/api/jobs/${encodeURIComponent(jobId)}/results/depth-stats`)
+}

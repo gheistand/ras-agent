@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     completed_at TEXT,
     error_msg TEXT,
     log_path TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0
+    attempts INTEGER NOT NULL DEFAULT 0,
+    results_dir TEXT          -- set after results.export_results() completes
 );
 """
 
@@ -70,9 +71,14 @@ def _get_conn(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 
 def _init_db(db_path: Optional[Path] = None) -> None:
-    """Create the jobs table if it does not exist."""
+    """Create the jobs table if it does not exist, and migrate schema."""
     with _get_conn(db_path) as conn:
         conn.executescript(_DDL)
+        # Migrate: add results_dir column to existing databases
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        if "results_dir" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN results_dir TEXT")
+            conn.commit()
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -180,6 +186,16 @@ def _update_job(job_id: str, db_path: Optional[Path], **fields) -> None:
     with _get_conn(db_path) as conn:
         conn.execute(f"UPDATE jobs SET {set_clause} WHERE id = ?", values)
         conn.commit()
+
+
+def update_job_results_dir(
+    job_id: str,
+    results_dir: Path,
+    db_path: Optional[Path] = None,
+) -> None:
+    """Store the results directory path on the job record after export."""
+    _update_job(job_id, db_path, results_dir=str(results_dir))
+    logger.info(f"Job {job_id}: results_dir set to {results_dir}")
 
 
 # ── Pre-run Preparation ───────────────────────────────────────────────────────
@@ -326,9 +342,11 @@ def run_job(
         if mock:
             try:
                 _run_mock(job, _logs_dir)
+                mock_results = Path(tempfile.gettempdir()) / "mock_results" / job_id
                 _update_job(job_id, db_path,
                             status="complete",
-                            completed_at=_now_iso())
+                            completed_at=_now_iso(),
+                            results_dir=str(mock_results))
                 logger.info(f"Job {job_id} complete (mock)")
                 return True
             except Exception as exc:

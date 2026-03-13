@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { fetchJobs, fetchStats, submitJob, deleteJob, fetchHealth } from './api.js'
+import MapViewer from './MapViewer'
 
 const STATUS_COLORS = {
   queued:    'bg-gray-100 text-gray-600',
@@ -27,10 +28,13 @@ function StatusBadge({ status }) {
   )
 }
 
-function JobCard({ job, onDelete }) {
+function JobCard({ job, onDelete, onSelect, selected }) {
   const [expanded, setExpanded] = useState(false)
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+    <div
+      className={`bg-white rounded-xl border shadow-sm p-4 cursor-pointer transition-colors ${selected ? 'border-blue-400 ring-2 ring-blue-200' : 'border-gray-200'}`}
+      onClick={() => onSelect(job)}
+    >
       <div className="flex items-start justify-between gap-4">
         <div>
           <h3 className="font-semibold text-navy">{job.name}</h3>
@@ -42,7 +46,7 @@ function JobCard({ job, onDelete }) {
           <StatusBadge status={job.status} />
           {job.status === 'queued' && (
             <button
-              onClick={() => onDelete(job.id)}
+              onClick={e => { e.stopPropagation(); onDelete(job.id) }}
               title="Delete queued job"
               className="text-xs text-red-400 hover:text-red-600 transition-colors"
             >
@@ -50,7 +54,7 @@ function JobCard({ job, onDelete }) {
             </button>
           )}
           <button
-            onClick={() => setExpanded(e => !e)}
+            onClick={e => { e.stopPropagation(); setExpanded(ex => !ex) }}
             className="text-xs text-teal hover:underline"
           >
             {expanded ? 'hide' : 'details'}
@@ -215,6 +219,7 @@ export default function App() {
   const [stats, setStats] = useState({ total: 0, queued: 0, running: 0, complete: 0, error: 0 })
   const [apiOnline, setApiOnline] = useState(null)   // null = unknown, true/false
   const [fetchError, setFetchError] = useState(false)
+  const [selectedJob, setSelectedJob] = useState(null)
 
   const loadJobs = useCallback(async () => {
     try {
@@ -342,10 +347,21 @@ export default function App() {
               <p className="text-sm text-gray-400 text-center py-8">No jobs yet. Submit one above.</p>
             ) : (
               jobs.map(job => (
-                <JobCard key={job.id} job={job} onDelete={handleDelete} />
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  onDelete={handleDelete}
+                  onSelect={setSelectedJob}
+                  selected={selectedJob?.id === job.id}
+                />
               ))
             )}
           </div>
+        </div>
+
+        {/* Map viewer */}
+        <div className="mt-6">
+          <MapViewer selectedJob={selectedJob} />
         </div>
       </main>
 

@@ -6,12 +6,16 @@ Designed to be called by the React dashboard (Cloudflare Pages) or any
 HTTP client.  No HEC-RAS installation is required to run this service.
 
 Endpoints:
-    POST   /api/jobs              Submit a new job
-    GET    /api/jobs              List jobs (optional ?status= filter)
-    GET    /api/jobs/{job_id}     Get a single job by ID
-    DELETE /api/jobs/{job_id}     Cancel/delete a queued job
-    GET    /api/health            Health check
-    GET    /api/stats             Queue summary statistics
+    POST   /api/jobs                              Submit a new job
+    GET    /api/jobs                              List jobs (optional ?status= filter)
+    GET    /api/jobs/{job_id}                     Get a single job by ID
+    PATCH  /api/jobs/{job_id}                     Update job fields (e.g. results_dir)
+    DELETE /api/jobs/{job_id}                     Cancel/delete a queued job
+    GET    /api/jobs/{job_id}/results             Results metadata and availability
+    GET    /api/jobs/{job_id}/results/flood-extent  Flood extent GeoJSON
+    GET    /api/jobs/{job_id}/results/depth-stats  Depth stats and output file list
+    GET    /api/health                            Health check
+    GET    /api/stats                             Queue summary statistics
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -19,10 +23,12 @@ Apache License 2.0
 
 import logging
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
+import geopandas as gpd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -90,6 +96,60 @@ class StatsResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+
+
+class JobPatch(BaseModel):
+    results_dir: Optional[str] = None
+
+
+# ── Mock GeoJSON (used for jobs with results_dir containing "mock") ────────────
+
+# ~5 km² square polygon centered on (-89.5, 40.0) in WGS84
+# delta_lon = 0.024°, delta_lat = 0.022°  →  ~2.04 km × ~2.44 km ≈ 4.98 km²
+_MOCK_FLOOD_POLYGON_COORDS = [[
+    [-89.512, 39.989],
+    [-89.488, 39.989],
+    [-89.488, 40.011],
+    [-89.512, 40.011],
+    [-89.512, 39.989],
+]]
+
+
+# ── Results helpers ───────────────────────────────────────────────────────────
+
+def _detect_return_periods(results_dir: Path) -> list[int]:
+    """Scan results_dir for subdirectories named {n}yr and return sorted list."""
+    rps = []
+    if results_dir.is_dir():
+        for d in results_dir.iterdir():
+            if d.is_dir():
+                m = re.match(r"^(\d+)yr$", d.name)
+                if m:
+                    rps.append(int(m.group(1)))
+    return sorted(rps)
+
+
+def _flood_extent_path(results_dir: Path, return_period: Optional[int]) -> Optional[Path]:
+    """
+    Resolve the flood_extent.gpkg path given a results_dir and optional return period.
+
+    Checks return-period subdirectory first, then results_dir root.
+    Returns the Path if the file exists, otherwise None.
+    """
+    candidates = []
+    if return_period is not None:
+        candidates.append(results_dir / f"{return_period}yr" / "flood_extent.gpkg")
+    candidates.append(results_dir / "flood_extent.gpkg")
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def _output_files_list(results_dir: Path) -> list[str]:
+    """Return names of known output files present in results_dir."""
+    known = ["depth_grid.tif", "wse_grid.tif", "flood_extent.gpkg", "flood_extent.shp"]
+    return [f for f in known if (results_dir / f).exists()]
 
 
 # ── App setup ─────────────────────────────────────────────────────────────────
@@ -250,6 +310,179 @@ def delete_job_endpoint(job_id: str):
             detail="Only queued jobs can be deleted. This job is already running or finished.",
         )
     # 204 No Content — no response body
+
+
+@app.patch("/api/jobs/{job_id}", status_code=204)
+def patch_job_endpoint(job_id: str, body: JobPatch):
+    """Update job fields. Currently supports: results_dir."""
+    runner = _get_runner()
+    db = _db_path()
+    job = runner.get_job(job_id, db_path=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+    if body.results_dir is not None:
+        runner.update_job_results_dir(job_id, Path(body.results_dir), db_path=db)
+        logger.info(f"PATCH job {job_id}: results_dir={body.results_dir}")
+    # 204 No Content
+
+
+@app.get("/api/jobs/{job_id}/results")
+def get_job_results(job_id: str):
+    """Return results metadata and file availability for a job."""
+    runner = _get_runner()
+    db = _db_path()
+    job = runner.get_job(job_id, db_path=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    results_dir_str = job.get("results_dir")
+    if not results_dir_str:
+        return {
+            "job_id": job_id,
+            "results_dir": None,
+            "flood_extent_available": False,
+            "depth_grid_available": False,
+            "return_periods": [],
+        }
+
+    results_dir = Path(results_dir_str)
+    # Mock jobs: treat as available with sample data
+    is_mock = "mock" in results_dir_str
+    if is_mock:
+        return {
+            "job_id": job_id,
+            "results_dir": results_dir_str,
+            "flood_extent_available": True,
+            "depth_grid_available": True,
+            "return_periods": [],
+        }
+
+    return_periods = _detect_return_periods(results_dir)
+    flood_available = _flood_extent_path(results_dir, None) is not None
+    depth_available = (results_dir / "depth_grid.tif").exists()
+
+    return {
+        "job_id": job_id,
+        "results_dir": results_dir_str,
+        "flood_extent_available": flood_available,
+        "depth_grid_available": depth_available,
+        "return_periods": return_periods,
+    }
+
+
+@app.get("/api/jobs/{job_id}/results/flood-extent")
+def get_flood_extent(
+    job_id: str,
+    return_period: Optional[int] = Query(None, description="Return period in years"),
+):
+    """
+    Return flood extent as GeoJSON FeatureCollection.
+
+    For mock jobs returns a sample polygon over central Illinois.
+    For real jobs reads flood_extent.gpkg via geopandas.
+    Returns 404 if flood extent data is not available.
+    """
+    runner = _get_runner()
+    db = _db_path()
+    job = runner.get_job(job_id, db_path=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    results_dir_str = job.get("results_dir")
+    if not results_dir_str:
+        raise HTTPException(status_code=404, detail="Flood extent not available for this job")
+
+    rp = return_period or job.get("return_period_yr")
+
+    # Mock jobs: return sample polygon
+    if "mock" in results_dir_str:
+        return {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": _MOCK_FLOOD_POLYGON_COORDS,
+                },
+                "properties": {
+                    "return_period_yr": rp,
+                    "job_id": job_id,
+                    "job_name": job.get("name"),
+                },
+            }],
+        }
+
+    # Real jobs: read gpkg
+    results_dir = Path(results_dir_str)
+    gpkg_path = _flood_extent_path(results_dir, rp)
+    if gpkg_path is None:
+        raise HTTPException(status_code=404, detail="Flood extent not available for this job")
+
+    try:
+        gdf = gpd.read_file(str(gpkg_path))
+    except Exception as exc:
+        logger.error(f"Failed to read flood extent for job {job_id}: {exc}")
+        raise HTTPException(status_code=500, detail=f"Failed to read flood extent: {exc}")
+
+    if gdf.empty:
+        raise HTTPException(status_code=404, detail="Flood extent not available for this job")
+
+    # Reproject to WGS84 for GeoJSON
+    gdf_wgs84 = gdf.to_crs(epsg=4326)
+
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [],
+    }
+    for _, row in gdf_wgs84.iterrows():
+        geojson["features"].append({
+            "type": "Feature",
+            "geometry": row.geometry.__geo_interface__,
+            "properties": {
+                "return_period_yr": rp,
+                "job_id": job_id,
+                "job_name": job.get("name"),
+            },
+        })
+    return geojson
+
+
+@app.get("/api/jobs/{job_id}/results/depth-stats")
+def get_depth_stats(
+    job_id: str,
+    return_period: Optional[int] = Query(None, description="Return period in years"),
+):
+    """Return depth statistics and output file list for a job."""
+    runner = _get_runner()
+    db = _db_path()
+    job = runner.get_job(job_id, db_path=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    rp = return_period or job.get("return_period_yr")
+    results_dir_str = job.get("results_dir")
+
+    # Mock jobs: return sample values
+    if results_dir_str and "mock" in results_dir_str:
+        return {
+            "job_id": job_id,
+            "return_period_yr": rp,
+            "max_depth_m": 2.3,
+            "flood_area_km2": 12.5,
+            "output_files": ["depth_grid.tif", "wse_grid.tif", "flood_extent.gpkg", "flood_extent.shp"],
+        }
+
+    output_files = []
+    if results_dir_str:
+        output_files = _output_files_list(Path(results_dir_str))
+
+    return {
+        "job_id": job_id,
+        "return_period_yr": rp,
+        "max_depth_m": None,      # future: read from raster stats
+        "flood_area_km2": None,   # future: compute from polygon area
+        "output_files": output_files,
+    }
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
