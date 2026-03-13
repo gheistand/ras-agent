@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data        # persist job queue + logs
+      - ./output:/app/output    # persist pipeline outputs
+    environment:
+      - JOBS_DB_PATH=/app/data/jobs.db
+    restart: unless-stopped
+
+  # Optional: run the web dev server locally (frontend only)
+  # For production, deploy web/ to Cloudflare Pages
+  web:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./web:/app
+    ports:
+      - "5173:5173"
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    profiles:
+      - dev   # only starts with: docker-compose --profile dev up

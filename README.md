@@ -6,6 +6,49 @@ Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois
 
 ---
 
+## Quick Start
+
+### Option 1: Docker (recommended)
+
+```bash
+# Clone and start the API server
+git clone https://github.com/gheistand/ras-agent
+cd ras-agent
+docker-compose up api
+
+# In another terminal — run a test watershed in mock mode
+docker-compose run --rm api python3 pipeline/orchestrator.py \
+  --lon -88.578 --lat 40.021 --output /app/output/test --mock
+
+# Open the dashboard
+open https://ras-agent.pages.dev
+```
+
+### Option 2: Local (Python 3.11+)
+
+```bash
+# Install system deps (macOS)
+brew install gdal geos proj
+
+# Install Python deps
+cd pipeline
+pip install gdal==$(gdal-config --version)
+pip install -r requirements.txt
+
+# Run API server
+python3 pipeline/api.py
+
+# Run a test watershed
+python3 pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output ./output/test --mock
+```
+
+### Running Tests
+```bash
+python3 -m pytest tests/ -v
+```
+
+---
+
 ## What It Does
 
 RAS Agent automates the full HEC-RAS 2D modeling workflow:
