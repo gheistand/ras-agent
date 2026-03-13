@@ -127,10 +127,13 @@ Web (Cloudflare Pages):
 | 3 | Execution engine | ✅ Done | runner.py |
 | 4 | Results pipeline | ✅ Done | results.py |
 | 5 | FastAPI + live dashboard | ✅ Done | api.py, web/src/api.js, App.jsx |
-| 6 | Orchestrator + NLCD | 🔨 Building | orchestrator.py, terrain.py (NLCD layer) |
+| 6a | Orchestrator | ✅ Done | orchestrator.py |
+| 6b | NLCD terrain layer | ✅ Done | terrain.py (get_nlcd, download_nlcd, reproject_nlcd, clip_nlcd_to_watershed) |
+| 7a | Batch mode | 🔨 Building | batch.py |
+| 7b | HTML run report | 🔨 Building | report.py |
 
-**Test count: 69/69 passing** (as of 2026-03-13)
-**Latest commit:** `99128ae` — Phase 2: model_builder.py
+**Test count: 78/78 passing** (as of 2026-03-13)
+**Latest commit:** `3b19ffc` — Phase 6a: orchestrator.py
 
 ---
 
@@ -349,16 +352,36 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 
 ---
 
+## Phase 6 — orchestrator.py (DONE, commit 3b19ffc)
+
+- `run_watershed(pour_point_lon, pour_point_lat, output_dir, ...)` — chains all 7 stages
+- `OrchestratorResult` dataclass with full provenance (terrain, watershed, peak_flows, hydro_set, project, job_ids, results, duration_sec, status, errors)
+- Per-stage INFO logging: `[Stage N/7] ...`
+- Graceful partial-failure: non-fatal errors append to `result.errors`, set `status="partial"`
+- CLI: `python3 pipeline/orchestrator.py --lon X --lat Y --output DIR --mock`
+- Per-run `jobs.db` at `output_dir/jobs.db` to avoid DB conflicts across runs
+- 5 tests in `tests/test_orchestrator.py`
+
+## Phase 6b — terrain.py NLCD layer (DONE, commit a06b466)
+
+- `download_nlcd(bbox_wgs84, output_dir, year=2021)` — WCS request to MRLC, idempotent
+- `reproject_nlcd(nlcd_path, target_crs, output_path, resampling="nearest")` — preserves uint8
+- `clip_nlcd_to_watershed(nlcd_path, watershed_geom, output_path, buffer_m=500)` — rasterio mask
+- `get_nlcd(bbox_wgs84, output_dir, watershed_geom, target_crs, year)` — full pipeline entry
+- NLCD source: MRLC WCS `https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs`
+- 3 tests in `tests/test_terrain.py` (mocked HTTP, no real network calls)
+
 ## Pending Actions
 
-1. ~~Connect Cloudflare Pages to GitHub~~ ✅ Done (ras-agent.pages.dev live + Git-connected)
-2. Send OTM email (Glenn to do — draft ready; email to otm@illinois.edu from heistand@illinois.edu)
-3. ~~Phase 2–5~~ ✅ All done
-4. **Phase 6 (building now):** orchestrator.py + NLCD download in terrain.py
-5. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
-6. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
-7. **Docker smoke test:** Start Docker Desktop → Rocky 8 x86 → download HEC-RAS 6.6 Linux build → run Muncie test case via runner.py mock=False
-8. **Cloud VM:** Set up x86 Linux VM (AWS/Azure) for production-scale runs
+1. ~~Connect Cloudflare Pages to GitHub~~ ✅ Done
+2. ~~Phases 2–6~~ ✅ All done (78/78 tests)
+3. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
+4. **Phase 7 (building now):** batch.py + report.py
+5. **Next after 7:** Web map viewer (Leaflet/MapLibre in dashboard)
+6. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
+7. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
+8. **Docker smoke test:** Start Docker Desktop → Rocky 8 x86 → HEC-RAS 6.6 Linux → Muncie test case
+9. **Cloud VM:** AWS/Azure x86 Linux for production runs
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
