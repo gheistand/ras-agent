@@ -356,6 +356,118 @@ def _update_terrain_reference(geom_hdf_path: Path, new_terrain_path: Path) -> No
         logger.warning(f"Could not open geometry HDF {geom_hdf_path}: {exc}")
 
 
+# ── RAS Commander Utilities ───────────────────────────────────────────────────
+
+# RAS Commander — optional dependency, imported lazily
+# Install: pip install ras-commander
+
+
+def check_ras_commander() -> dict:
+    """
+    Check RAS Commander installation status.
+    Returns dict with: installed (bool), version (str or None), capabilities (list[str])
+    """
+    result = {"installed": False, "version": None, "capabilities": []}
+    try:
+        import ras_commander
+        result["installed"] = True
+        result["version"] = getattr(ras_commander, "__version__", "unknown")
+        from ras_commander import RasPrj
+        caps = []
+        if hasattr(RasPrj, "clone_project"):
+            caps.append("clone_project")
+        if hasattr(RasPrj, "set_mannings_n") or hasattr(RasPrj, "update_mannings"):
+            caps.append("mannings_n")
+        result["capabilities"] = caps
+    except ImportError:
+        pass
+    return result
+
+
+def _clone_project(template_dir: Path, output_dir: Path, project_name: str) -> Path:
+    """
+    Clone a HEC-RAS template project to a new directory.
+    Uses RAS Commander if available, falls back to shutil.copytree.
+    Returns path to cloned project directory.
+    """
+    dest = output_dir / project_name
+    try:
+        from ras_commander import RasPrj
+        prj = RasPrj(str(template_dir))
+        prj.clone_project(str(dest))
+        logger.info(f"Cloned project via RAS Commander: {dest}")
+    except ImportError:
+        logger.warning("ras-commander not installed — using shutil.copytree fallback")
+        shutil.copytree(template_dir, dest)
+    except Exception as e:
+        logger.warning(f"RAS Commander clone failed ({e}) — using shutil.copytree fallback")
+        shutil.copytree(template_dir, dest)
+    return dest
+
+
+def _update_mannings_n_hdf5(project_dir: Path, mannings_n: float) -> bool:
+    """
+    Fallback: update Manning's n directly in geometry HDF5.
+    Looks for .g01.hdf or .g02.hdf in project_dir.
+    HDF path: /Geometry/2D Flow Areas/{area_name}/Mann
+    Returns True if updated.
+    """
+    import h5py
+    import numpy as np
+    geom_hdfs = list(project_dir.glob("*.g??.hdf"))
+    if not geom_hdfs:
+        logger.warning(f"No geometry HDF found in {project_dir} — Manning's n not updated")
+        return False
+    for geom_hdf in geom_hdfs:
+        with h5py.File(geom_hdf, "a") as f:
+            fa_group = f.get("Geometry/2D Flow Areas")
+            if fa_group is None:
+                continue
+            for area_name in fa_group.keys():
+                mann_path = f"Geometry/2D Flow Areas/{area_name}/Mann"
+                if mann_path in f:
+                    # Mann dataset: shape (N, 3) — [region_id, n_value, calibration]
+                    # Update column 1 (n_value) for all rows
+                    mann = f[mann_path][:]
+                    mann[:, 1] = mannings_n
+                    f[mann_path][:] = mann
+                    logger.info(
+                        f"Updated Manning's n to {mannings_n} in {geom_hdf.name}/{area_name}"
+                    )
+    return True
+
+
+def _update_mannings_n(project_dir: Path, mannings_n: float) -> bool:
+    """
+    Update Manning's n value for all 2D flow areas in the project.
+    Uses RAS Commander if available.
+    Returns True if updated, False if skipped (no RC or not supported).
+    """
+    try:
+        from ras_commander import RasPrj
+        prj = RasPrj(str(project_dir))
+        if hasattr(prj, "set_mannings_n"):
+            prj.set_mannings_n(mannings_n)
+            logger.info(f"Updated Manning's n to {mannings_n} via RAS Commander")
+            return True
+        elif hasattr(prj, "update_mannings"):
+            prj.update_mannings(mannings_n)
+            logger.info(f"Updated Manning's n to {mannings_n} via RAS Commander")
+            return True
+        else:
+            logger.warning(
+                "RAS Commander installed but Manning's n update method not found — "
+                "using HDF5 fallback"
+            )
+            return _update_mannings_n_hdf5(project_dir, mannings_n)
+    except ImportError:
+        logger.warning("ras-commander not installed — using HDF5 fallback for Manning's n")
+        return _update_mannings_n_hdf5(project_dir, mannings_n)
+    except Exception as e:
+        logger.warning(f"RAS Commander Manning's n update failed ({e}) — using HDF5 fallback")
+        return _update_mannings_n_hdf5(project_dir, mannings_n)
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
@@ -401,7 +513,7 @@ def _build_from_template(
     if project_dir.exists():
         logger.warning(f"Project directory already exists, removing: {project_dir}")
         shutil.rmtree(project_dir)
-    shutil.copytree(template.template_dir, project_dir)
+    _clone_project(template.template_dir, Path(output_dir), project_name)
     logger.info(f"Cloned template '{template.name}' → {project_dir}")
 
     # ── Discover key files in cloned project
@@ -427,6 +539,7 @@ def _build_from_template(
     else:
         mannings_n = DEFAULT_MANNINGS_N
         logger.info(f"No NLCD raster provided; using default Manning's n = {mannings_n}")
+    _update_mannings_n(project_dir, mannings_n)
 
     # ── 4. TODO: Update 2D flow area perimeter polygon
     # TODO (AWAITING BILL KATZENMEYER RESPONSE): Can RAS Commander update the

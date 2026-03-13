@@ -216,3 +216,70 @@ def test_build_ras2025_raises(tmp_path):
     hydro_set = _make_hydro_set()
     with pytest.raises(NotImplementedError):
         mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="ras2025")
+
+
+# ── Tests: RAS Commander wiring ───────────────────────────────────────────────
+
+def test_check_ras_commander_returns_dict():
+    result = mb.check_ras_commander()
+    assert isinstance(result, dict)
+    assert "installed" in result
+    assert "version" in result
+    assert "capabilities" in result
+    assert isinstance(result["installed"], bool)
+    assert isinstance(result["capabilities"], list)
+
+
+def test_clone_project_shutil_fallback(tmp_path, monkeypatch):
+    """When ras-commander is not importable, _clone_project falls back to shutil.copytree."""
+    template_dir = tmp_path / "template"
+    template_dir.mkdir()
+    (template_dir / "project.prj").write_text("HEC-RAS Version=6.60\n")
+    (template_dir / "project.g01").write_text("Geom Title=Test\n")
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+
+    # Track whether shutil.copytree was called
+    copied = []
+    real_copytree = shutil.copytree
+
+    def mock_copytree(src, dst, **kwargs):
+        copied.append((src, dst))
+        return real_copytree(src, dst, **kwargs)
+
+    # Make ras_commander unimportable
+    monkeypatch.setitem(sys.modules, "ras_commander", None)
+    monkeypatch.setattr(shutil, "copytree", mock_copytree)
+
+    result = mb._clone_project(template_dir, output_dir, "cloned_project")
+
+    assert result == output_dir / "cloned_project"
+    assert len(copied) == 1
+    assert Path(copied[0][1]) == output_dir / "cloned_project"
+    assert (result / "project.prj").exists()
+
+
+def test_update_mannings_n_hdf5_fallback(tmp_path):
+    """_update_mannings_n_hdf5 updates the Mann dataset column 1 in a geometry HDF."""
+    import h5py
+
+    geom_hdf = tmp_path / "test_project.g01.hdf"
+    original_n = 0.040
+    new_n = 0.060
+    n_rows = 5
+
+    # Create minimal geometry HDF with Mann dataset
+    with h5py.File(geom_hdf, "w") as f:
+        mann_data = np.zeros((n_rows, 3), dtype=float)
+        mann_data[:, 0] = 0          # region_id
+        mann_data[:, 1] = original_n  # n_value
+        mann_data[:, 2] = 1.0        # calibration
+        f.create_dataset("Geometry/2D Flow Areas/MainArea/Mann", data=mann_data)
+
+    result = mb._update_mannings_n_hdf5(tmp_path, new_n)
+
+    assert result is True
+    with h5py.File(geom_hdf, "r") as f:
+        mann = f["Geometry/2D Flow Areas/MainArea/Mann"][:]
+    assert np.allclose(mann[:, 1], new_n)

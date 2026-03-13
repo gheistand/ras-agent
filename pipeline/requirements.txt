@@ -8,7 +8,7 @@ fiona>=1.9
 pyproj>=3.6
 
 # HEC-RAS automation
-ras-commander>=0.50
+ras-commander>=0.52
 h5py>=3.9
 
 # USGS data
