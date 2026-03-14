@@ -8,8 +8,11 @@ fiona>=1.9
 pyproj>=3.6
 
 # HEC-RAS automation
-ras-commander>=0.52
+ras-commander>=0.89   # 0.89+ includes Windows→Linux preprocessing, RasProcess inundation boundary, headless Linux execution
 h5py>=3.9
+
+# Post-processing — cloud-native GIS export (optional)
+ras2cng>=0.1          # HEC-RAS → GeoParquet + PMTiles + DuckDB (replaces/complements results.py rasterio path)
 
 # USGS data
 streamstats-access>=0.1
