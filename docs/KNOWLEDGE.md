@@ -132,12 +132,14 @@ Web (Cloudflare Pages):
 | 7a | Batch mode | ✅ Done | batch.py |
 | 7b | HTML run report | ✅ Done | report.py |
 | 8 | Web map viewer | ✅ Done | MapViewer.jsx, api.py results endpoints |
-| 9a | Docker + docker-compose | 🔨 Building | Dockerfile, docker-compose.yml |
-| 9b | RAS Commander wiring | 🔨 Building | model_builder.py (actual RC calls) |
-| 9c | Webhook/email notifications | 🔨 Building | notify.py, batch.py, orchestrator.py |
+| 9a | Docker + docker-compose | ✅ Done | Dockerfile, docker-compose.yml, docker/ scripts |
+| 9b | RAS Commander wiring | ✅ Done | model_builder.py (RC clone + Manning's n + HDF5 fallback) |
+| 9c | Webhook/email notifications | ✅ Done | notify.py, orchestrator.py, batch.py |
+| 10a | Cloudflare R2 storage | ✅ Done | storage.py, results.py, api.py |
+| 10b | Multi-RP map layers | ✅ Done | MapViewer.jsx (toggle UI), api.py, api.js |
 
-**Test count: 96/96 passing** (as of 2026-03-13)
-**Latest commit:** `3cc0002` — Phase 8: web map viewer
+**Test count: 112/112 passing** (as of 2026-03-13)
+**Latest commit:** `95ba892` — Phase 10b: multi-return-period map layers
 
 ---
 
@@ -404,16 +406,49 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 - Mock jobs return sample Illinois polygon — demo-ready without HEC-RAS
 - 4 tests in `tests/test_results_api.py`
 
+## Phase 9a — Docker (DONE, commit 530e629)
+- `Dockerfile`: python:3.11-slim + libgdal-dev + pipeline source; exposes port 8000
+- `docker-compose.yml`: api service (port 8000, data/ + output/ volumes) + optional web dev service (profile=dev)
+- `.dockerignore`: excludes data/, output/, HDF/GeoTIFF, tests/
+- `docker/run-pipeline.sh` + `docker/run-batch.sh`: convenience wrappers
+- `README.md`: Quick Start section with Docker and local options
+
+## Phase 9b — RAS Commander wiring (DONE, commit 464dcc8)
+- `_clone_project()`: tries RasPrj.clone_project(), falls back to shutil.copytree
+- `_update_mannings_n()`: tries RasPrj.set_mannings_n()/update_mannings(), falls back to HDF5 direct
+- `_update_mannings_n_hdf5()`: writes to `/Geometry/2D Flow Areas/{name}/Mann` dataset (col 1)
+- `check_ras_commander()`: probes installation + capabilities dict
+- All RC usage gracefully degrades — never hard-requires ras-commander
+
+## Phase 9c — Notifications (DONE, commit f29a173)
+- `notify.py`: `NotifyConfig` dataclass, `notify_run_complete()`, `notify_batch_complete()`
+- Webhook: POST JSON payload; optional HMAC-SHA256 signature (X-RAS-Agent-Signature)
+- Email: smtplib plain text with peak flows + output paths
+- `orchestrator.run_watershed()`: `notify_config` param
+- `batch.run_batch()`: per-watershed + batch-level notifications
+- CLI: `--webhook` and `--notify-email` flags
+
+## Phase 10a — R2 Storage (DONE, commit 1d0c6f3)
+- `storage.py`: `R2Config`, `upload_file()`, `upload_results_dir()`, `get_presigned_url()`, `r2_config_from_env()`
+- R2 endpoint: `https://{account_id}.r2.cloudflarestorage.com`
+- `results.py`: optional `r2_config` param — upload after local write, warning-only on failure
+- `api.py`: R2_CONFIG loaded at startup; `GET /api/jobs/{id}/results/download/{filename}` (presigned URL or FileResponse); `r2_configured` in /api/stats
+- Env vars: R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME, R2_PUBLIC_URL, R2_PREFIX
+
+## Phase 10b — Multi-RP Map Layers (DONE, commit 95ba892)
+- `api.py`: flood-extent endpoint supports `?return_periods=all|10,50,100`; mock jobs return 3 features (10/50/100yr, nested polygon sizes)
+- `api.js`: `fetchFloodExtent(jobId, returnPeriods="all")`
+- `MapViewer.jsx`: per-RP MapLibre sources/layers; toggle legend panel (top-right checkboxes + color swatches); click popup; cursor change on hover; fitBounds to all visible layers
+
 ## Pending Actions
 
-1. ~~Phases 2–8~~ ✅ All done (96/96 tests)
+1. ~~Phases 2–10~~ ✅ All done (112/112 tests, 20 commits)
 2. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-3. **Phase 9 (building now):** Docker/docker-compose + RAS Commander wiring + notifications
-4. **After 9:** Cloudflare R2 results storage + multi-return-period map layers (E + G)
-5. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
-6. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
-7. **Docker smoke test:** Start Docker Desktop → Rocky 8 x86 → HEC-RAS 6.6 Linux → Muncie test case
-8. **Cloud VM:** AWS/Azure x86 Linux for production runs
+3. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
+4. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
+5. **Docker smoke test:** Start Docker Desktop → `docker-compose up api` → run Muncie test case
+6. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
+7. **Next features (when ready):** FIRM validation, stream network batch from NHD, user auth for API
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
