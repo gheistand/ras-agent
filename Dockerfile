@@ -16,7 +16,7 @@ RUN pip install --upgrade pip && \
 
 # Copy pipeline source
 COPY pipeline/ pipeline/
-COPY docs/ docs/
+# docs/ excluded — development artifact, not needed at runtime
 
 # Data directory for SQLite job queue
 RUN mkdir -p data/logs
