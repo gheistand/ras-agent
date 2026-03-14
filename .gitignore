@@ -64,6 +64,7 @@ tests/output/
 .claude/settings.local.json
 .claude/outputs/*
 !.claude/outputs/.gitkeep
+!.claude/outputs/expert-liaison/questions-queue.md
 
 # Agent tasks user state
 agent_tasks/.agent/STATE.md
