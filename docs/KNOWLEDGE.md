@@ -11,8 +11,8 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** Phases 0–5 complete, Phase 6 (orchestrator + NLCD) building now
-- **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main
+- **Status:** All phases complete (0–10b), 112/112 tests, 21 commits
+- **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
 
 ---
 
