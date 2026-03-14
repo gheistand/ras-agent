@@ -812,6 +812,67 @@ def _build_ras2025(
 
 # ── Main Interface ────────────────────────────────────────────────────────────
 
+def _build_mock_project(
+    watershed,
+    hydro_set,
+    output_dir: Path,
+    return_periods: list,
+) -> HecRasProject:
+    """
+    Create a dummy HEC-RAS project directory with placeholder files for mock mode.
+    No templates required — allows full orchestrator pipeline in mock/Docker testing.
+    """
+    import h5py
+
+    project_name = "mock_project"
+    project_dir = output_dir / project_name
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    # Placeholder ASCII files
+    prj_file = project_dir / f"{project_name}.prj"
+    geom_file = project_dir / f"{project_name}.g01"
+    flow_file = project_dir / f"{project_name}.u01"
+    plan_file = project_dir / f"{project_name}.p01"
+    plan_hdf = project_dir / f"{project_name}.p01.tmp.hdf"
+
+    prj_file.write_text(f"Proj Title={project_name}\nProgram Version=6.60\n")
+    geom_file.write_text(
+        f"Geom Title=Mock Geometry\nProgram Version=6.60\n"
+        f"2D Flow Area= MockArea  ,0\n"
+        f"2D Flow Area Perimeter=  5\n"
+        f"     300000.000,4400000.000\n     300500.000,4400000.000\n"
+        f"     300500.000,4400500.000\n     300000.000,4400500.000\n"
+        f"     300000.000,4400000.000\n"
+        f"2D Flow Area Cell Size=  100.0\n"
+    )
+    flow_file.write_text(f"Flow Title=Mock Flows\nProgram Version=6.60\n")
+    plan_file.write_text(
+        f"Plan Title=Mock Plan\nProgram Version=6.60\n"
+        f"Geom File=g01\nFlow File=u01\n"
+    )
+
+    # Minimal HDF required by runner.py pre-run prep
+    with h5py.File(plan_hdf, "w") as f:
+        f.attrs["File Type"] = "HEC-RAS Results"
+        f.create_group("Plan Data")
+
+    logger.info(f"[mock] Created dummy HEC-RAS project at {project_dir}")
+
+    return HecRasProject(
+        project_dir=project_dir,
+        project_name=project_name,
+        prj_file=prj_file,
+        geometry_file=geom_file,
+        flow_file=flow_file,
+        plan_file=plan_file,
+        plan_hdf=plan_hdf,
+        geom_ext="g01",
+        mesh_strategy="mock",
+        return_periods=return_periods,
+        metadata={"mock": True},
+    )
+
+
 def build_model(
     watershed,
     hydro_set,
@@ -819,6 +880,7 @@ def build_model(
     return_periods: Optional[list] = None,
     mesh_strategy: str = "template_clone",
     nlcd_raster_path: Optional[Path] = None,
+    mock: bool = False,
     **kwargs,
 ) -> HecRasProject:
     """
@@ -856,6 +918,9 @@ def build_model(
         f"area={watershed.characteristics.drainage_area_mi2:.1f} mi², "
         f"return_periods={return_periods}"
     )
+
+    if mock:
+        return _build_mock_project(watershed, hydro_set, output_dir, return_periods)
 
     if mesh_strategy == "template_clone":
         return _build_from_template(

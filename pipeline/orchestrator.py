@@ -382,6 +382,7 @@ def run_watershed(
             return_periods=return_periods,
             mesh_strategy=mesh_strategy,
             nlcd_raster_path=nlcd_raster_path,
+            mock=mock,
         )
         result.project = project
         logger.info(
