@@ -11,7 +11,7 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–11), 117/117 tests, 22 commits
+- **Status:** All phases complete (0–10b), 112/112 tests, 21 commits
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
 
 ---
@@ -137,10 +137,10 @@ Web (Cloudflare Pages):
 | 9c | Webhook/email notifications | ✅ Done | notify.py, orchestrator.py, batch.py |
 | 10a | Cloudflare R2 storage | ✅ Done | storage.py, results.py, api.py |
 | 10b | Multi-RP map layers | ✅ Done | MapViewer.jsx (toggle UI), api.py, api.js |
-| 11 | ASCII .g## perimeter update | ✅ Done | model_builder.py (_write_perimeter_to_geometry_file, _get_2d_area_name_from_geometry_file) |
 
 **Test count: 117/117 passing** (as of 2026-03-13)
-**Latest commit:** Phase 11: _write_perimeter_to_geometry_file() — ASCII .g## perimeter update
+**Latest commit:** `fc9e7b5` — fix: add g++ to Dockerfile for GDAL Python bindings
+**Docker:** ✅ Confirmed working — `docker-compose up api --build` compiles cleanly
 
 ---
 
@@ -224,20 +224,8 @@ def build_model(watershed: WatershedResult,
         return _build_ras2025(watershed, hydro_set)        # stub
 ```
 
-### Perimeter Update — RESOLVED (2026-03-13)
-
-Bill Katzenmeyer (CLB Engineering / RAS Commander) confirmed:
-- RAS Commander CAN update 2D flow area perimeter via the plain text .g## geometry file
-- HEC-RAS regenerates geometry HDF automatically on next save/open — no direct HDF5 writes needed
-- Mesh regeneration after perimeter change is the hard part — requires RASMapper GUI or automation
-- Ajith Sundarraj (CLB Engineering) is building RASMapper automation for mesh regeneration
-- Coordinate call with Bill + Ajith scheduled for early week of 2026-03-16
-
-### Revised Workflow (Path A — Template Clone)
-1. Clone template → update perimeter in .g## ASCII file (implemented in model_builder.py)
-2. Run RASMapper to regenerate mesh after perimeter change (Ajith's automation — pending)
-3. Export geometry HDF → copy to Linux → run RasUnsteady
-4. Post-process with results.py → export depth grids + flood extents
+### Open Question (awaiting Bill Katzenmeyer's input)
+Can RAS Commander update the 2D flow area perimeter polygon on a cloned project, or is the mesh geometry fixed at clone time? This determines how closely the template mesh needs to match each watershed's shape.
 
 ### Template Projects Needed (Glenn to build on Windows)
 - `templates/small_watershed/`  — ~50 mi², low-relief IL agricultural
@@ -419,12 +407,15 @@ Bill Katzenmeyer (CLB Engineering / RAS Commander) confirmed:
 - Mock jobs return sample Illinois polygon — demo-ready without HEC-RAS
 - 4 tests in `tests/test_results_api.py`
 
-## Phase 9a — Docker (DONE, commit 530e629)
-- `Dockerfile`: python:3.11-slim + libgdal-dev + pipeline source; exposes port 8000
+## Phase 9a — Docker (DONE, confirmed working 2026-03-13)
+- `Dockerfile`: python:3.11-slim + libgdal-dev + g++ + pipeline source; exposes port 8000
 - `docker-compose.yml`: api service (port 8000, data/ + output/ volumes) + optional web dev service (profile=dev)
-- `.dockerignore`: excludes data/, output/, HDF/GeoTIFF, tests/
+- `.dockerignore`: excludes data/, output/, HDF/GeoTIFF, tests/, docs/
 - `docker/run-pipeline.sh` + `docker/run-batch.sh`: convenience wrappers
 - `README.md`: Quick Start section with Docker and local options
+- **Build fixes applied:** removed `COPY docs/` (excluded by .dockerignore); added `g++` for GDAL Python bindings compilation
+- **Confirmed:** `docker-compose up api --build` compiles and starts cleanly (2026-03-13 21:22 CDT)
+- **Latest Dockerfile commit:** `fc9e7b5`
 
 ## Phase 9b — RAS Commander wiring (DONE, commit 464dcc8)
 - `_clone_project()`: tries RasPrj.clone_project(), falls back to shutil.copytree
@@ -457,7 +448,7 @@ Bill Katzenmeyer (CLB Engineering / RAS Commander) confirmed:
 
 1. ~~Phases 2–10~~ ✅ All done (112/112 tests, 20 commits)
 2. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-3. ~~**Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?~~ ✅ Resolved — write to .g## ASCII file (Phase 11)
+3. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
 4. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
 5. **Docker smoke test:** Start Docker Desktop → `docker-compose up api` → run Muncie test case
 6. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
