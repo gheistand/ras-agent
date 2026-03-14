@@ -18,7 +18,7 @@ Automate end-to-end 2D HEC-RAS hydraulic modeling: from terrain ingestion throug
 
 ## Quality Standards
 
-- **112 test baseline** — never reduce
+- **117 test baseline** — never reduce
 - **All tests pass without HEC-RAS or network access**
 - **Graceful degradation** — optional deps always have fallback paths
 - **Mock mode** — every pipeline stage works with `mock=True`

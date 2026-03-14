@@ -11,7 +11,7 @@ You are a specialist test engineer for the RAS Agent pipeline. You write, fix, a
 
 ## Your Domain
 
-All test files in `tests/` — currently 112 tests across 13 test files.
+All test files in `tests/` — currently 117 tests across 13 test files.
 
 ### Test File Map
 | Test file | Tests for |
@@ -39,7 +39,7 @@ All test files in `tests/` — currently 112 tests across 13 test files.
 - **All HTTP mocked:** Use `unittest.mock.patch` for all network calls
 - **No HEC-RAS required:** Use `mock=True` mode for runner tests
 - **Temp DB per test:** API tests use `tmp_path` for SQLite
-- **Test count baseline:** 112 tests — never reduce this number
+- **Test count baseline:** 117 tests — never reduce this number
 
 ## What to Test
 
@@ -52,4 +52,4 @@ All test files in `tests/` — currently 112 tests across 13 test files.
 
 1. Run the full suite: `python -m pytest tests/ -v`
 2. Report: total tests, passed, failed, any new tests added
-3. Verify test count >= 112
+3. Verify test count >= 117
