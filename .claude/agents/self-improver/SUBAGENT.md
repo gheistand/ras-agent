@@ -38,11 +38,55 @@ Run up to 3 improvement iterations:
    - Check Docker/CI files
 4. Identify discrepancies:
    - Module counts wrong in agents/rules?
-   - Test baseline outdated?
+   - Test baseline outdated? (current: 117)
    - Missing modules in agent domain descriptions?
    - Stale references to removed files?
    - Convention changes not captured in rules?
    - Hook scripts referencing wrong paths?
+   - New agents registered in settings.json?
+   - New skills listed in skills/README.md?
+
+### Current Agent Inventory (as of Phase C, 2026-03-14)
+- `pipeline-dev` — pipeline module implementation
+- `web-dev` — React dashboard
+- `test-engineer` — test suite (baseline: 117 tests)
+- `devops` — Docker, CI, deployment
+- `hydro-reviewer` — proactive scientific review (auto-triggered on hydro-sensitive changes)
+- `self-improver` — recursive config self-improvement
+- `qaqc-validator` — post-stage output validation (Phase B)
+- `expert-liaison` — HITL question routing via HITLConfig (Phase A)
+
+### Current Rule Inventory (as of Phase C, 2026-03-14)
+- `orchestrator.md` — delegation protocol
+- `subagent-output-pattern.md` — output file conventions
+- `pipeline.md` — Python pipeline conventions
+- `web.md` — React dashboard conventions
+- `testing.md` — test suite conventions (baseline: 117)
+- `devops.md` — infrastructure conventions
+- `human-in-the-loop.md` — HITL decision tree + HITLConfig (Phase A)
+- `scientific-validation.md` — engineering bounds tables (Phase A)
+- `transparency.md` — [CALC] logging standard (Phase A)
+- `qaqc.md` — autonomous QAQC protocol (Phase A)
+
+### Current Skill Inventory (as of Phase C, 2026-03-14)
+- `/run-tests` — run pytest suite
+- `/check-ci` — local CI verification
+- `/run-pipeline` — mock pipeline execution
+- `/pipeline-status` — module overview
+- `/add-module` — scaffold new module + test
+- `/module-map` — pipeline data flow diagram
+- `/improve` — recursive self-improvement
+- `/self-audit` — quick config consistency check
+- `/ask-expert` — formalize domain questions via HITLConfig (Phase B)
+- `/validate-run` — post-run QAQC validation (Phase B)
+
+### Current Hook Inventory (as of Phase C, 2026-03-14)
+- `pre-commit-remind.sh` — remind to run /check-ci before commit
+- `qaqc-pipeline-edit.sh` — QAQC reminder + hydro-reviewer trigger (updated Phase C)
+- `qaqc-test-guard.sh` — warn if test count drops below baseline
+- `self-improve-detect.sh` — suggest /self-audit after .claude/ edits
+- `calculation-transparency.sh` — remind about [CALC] logs on hydro module edits (Phase C)
+- `range-guard.sh` — remind about bounds checks on pipeline edits (Phase C)
 
 ### Iteration 2: Fix
 5. Apply fixes to configuration files:

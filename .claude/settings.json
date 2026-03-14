@@ -31,6 +31,16 @@
           },
           {
             "type": "command",
+            "command": "bash .claude/hooks/calculation-transparency.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/range-guard.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash .claude/hooks/self-improve-detect.sh",
             "timeout": 5
           }

@@ -1,6 +1,6 @@
 # CLAUDE.md — tests/
 
-112 tests, all pass without HEC-RAS or network access.
+117 tests, all pass without HEC-RAS or network access.
 
 ## Running Tests
 

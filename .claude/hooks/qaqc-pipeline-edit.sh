@@ -1,26 +1,34 @@
 #!/bin/bash
-# PostToolUse hook: QAQC reminder after editing pipeline files
-# Receives JSON on stdin with tool_input.file_path
+# PostToolUse hook: QAQC reminder + proactive hydro-reviewer trigger on pipeline edits
+# Triggered on Edit/Write to pipeline files
 
-INPUT=$(cat)
-FILE_PATH=$(echo "$INPUT" | python3 -c "
-import sys, json
-try:
-    data = json.load(sys.stdin)
-    fp = data.get('tool_input', {}).get('file_path', '')
-    print(fp)
-except: print('')
-" 2>/dev/null)
+FILE_PATH="${CLAUDE_TOOL_INPUT_FILE_PATH:-}"
 
 # Only trigger for pipeline Python files
-if echo "$FILE_PATH" | grep -q 'pipeline/.*\.py$'; then
+case "$FILE_PATH" in
+  *pipeline/*.py)
     MODULE=$(basename "$FILE_PATH" .py)
     cat <<EOF
-[QAQC] Pipeline module '${MODULE}' was modified.
+[QAQC] Pipeline module '$MODULE' was modified.
 - Run tests: python -m pytest tests/test_${MODULE}.py -v (if test file exists)
-- If scientific logic changed (Manning's n, hydrology, equations), consider launching hydro-reviewer agent
-- Verify mock mode still works if you changed data flow
+- Verify mock mode: changes must work with --mock flag
+- Verify test count >= 117 after any test changes
 EOF
-fi
+
+    # Proactive hydro-reviewer trigger for scientifically sensitive modules
+    case "$FILE_PATH" in
+      *pipeline/hydrograph.py | *pipeline/streamstats.py | \
+      *pipeline/model_builder.py | *pipeline/watershed.py)
+        cat <<EOF
+[HYDRO-REVIEWER] Hydro-sensitive module '$MODULE' changed.
+- Launch hydro-reviewer agent to verify scientific correctness before committing
+- Key checks: formula correctness, units, parameter bounds, [CALC] transparency logs
+- If Manning's n, Tc, or peak flow logic changed -> HITL may be required
+- See .claude/rules/human-in-the-loop.md for decision tree
+EOF
+        ;;
+    esac
+    ;;
+esac
 
 exit 0
