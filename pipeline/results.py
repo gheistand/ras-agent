@@ -72,12 +72,30 @@ def get_2d_area_names(hdf_path: Path) -> list[str]:
     """
     List all 2D flow area names defined in the geometry section.
 
+    Uses ras-commander HdfMesh.get_mesh_area_names() if available,
+    falls back to direct h5py.
+
     Args:
         hdf_path: Path to a HEC-RAS plan or geometry HDF file.
 
     Returns:
         List of area name strings (e.g. ['Perimeter 1', 'TestArea']).
     """
+    # Try ras-commander first (skip if result is empty — may be mock HDF without
+    # the Attributes dataset that RC expects)
+    try:
+        from ras_commander.hdf import HdfMesh
+        names = HdfMesh.get_mesh_area_names(hdf_path)
+        if names:
+            logger.debug(f"Found {len(names)} 2D area(s) via RC in {hdf_path.name}: {names}")
+            return names
+        # RC returned empty — fall through to h5py which handles simpler HDF layouts
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug(f"RC get_mesh_area_names failed ({e}), falling back to h5py")
+
+    # Fallback: direct h5py
     with h5py.File(str(hdf_path), "r") as hf:
         grp = hf.get("Geometry/2D Flow Areas")
         if grp is None:
@@ -150,6 +168,9 @@ def extract_max_wse(
     """
     Extract the maximum water-surface elevation for each 2D mesh cell.
 
+    Uses ras-commander HdfResultsMesh.get_mesh_max_ws() if available,
+    falls back to direct h5py.
+
     Args:
         hdf_path:  Path to the HEC-RAS output HDF file.
         area_name: Name of the 2D flow area to extract.
@@ -162,6 +183,31 @@ def extract_max_wse(
     Raises:
         KeyError: If water surface data is not found for the specified area.
     """
+    # Try ras-commander first (may fail on mock HDF files without full structure)
+    try:
+        from ras_commander.hdf import HdfResultsMesh
+        gdf = HdfResultsMesh.get_mesh_max_ws(hdf_path)
+        if gdf is not None and len(gdf) > 0:
+            # Filter to requested area if mesh_name column exists
+            if "mesh_name" in gdf.columns:
+                area_gdf = gdf[gdf["mesh_name"] == area_name]
+                if len(area_gdf) == 0:
+                    area_gdf = gdf  # Fall through if no match
+            else:
+                area_gdf = gdf
+            xy = np.column_stack([area_gdf.geometry.x, area_gdf.geometry.y])
+            max_wse = area_gdf["maximum_water_surface"].values.astype(np.float32)
+            logger.debug(
+                f"extract_max_wse({area_name}) via RC: "
+                f"{len(xy)} cells, peak max_wse={max_wse.max():.2f} m"
+            )
+            return xy, max_wse
+    except ImportError:
+        pass
+    except Exception:
+        pass  # Fall through to h5py
+
+    # Fallback: direct h5py
     with h5py.File(str(hdf_path), "r") as hf:
         xy = _load_cell_centers(hf, area_name)
         path = _WSE_PATH.format(area=area_name)

@@ -373,12 +373,30 @@ def check_ras_commander() -> dict:
         import ras_commander
         result["installed"] = True
         result["version"] = getattr(ras_commander, "__version__", "unknown")
-        from ras_commander import RasPrj
         caps = []
-        if hasattr(RasPrj, "clone_project"):
-            caps.append("clone_project")
-        if hasattr(RasPrj, "set_mannings_n") or hasattr(RasPrj, "update_mannings"):
-            caps.append("mannings_n")
+        # HDF results extraction (replaces raw h5py in results.py)
+        try:
+            from ras_commander.hdf import HdfResultsMesh, HdfMesh
+            if hasattr(HdfResultsMesh, "get_mesh_max_ws"):
+                caps.append("hdf_results")
+            if hasattr(HdfMesh, "get_mesh_area_names"):
+                caps.append("mesh_areas")
+        except ImportError:
+            pass
+        # Utility methods
+        try:
+            from ras_commander import RasUtils
+            if hasattr(RasUtils, "ignore_windows_reserved"):
+                caps.append("windows_reserved_filter")
+        except ImportError:
+            pass
+        # Manning's n via HDF (P2 will add GeomLandCover.set_2d_mannings_n_hdf)
+        try:
+            from ras_commander.geom import GeomLandCover
+            if hasattr(GeomLandCover, "set_2d_mannings_n_hdf"):
+                caps.append("mannings_n_hdf")
+        except ImportError:
+            pass
         result["capabilities"] = caps
     except ImportError:
         pass
@@ -388,21 +406,20 @@ def check_ras_commander() -> dict:
 def _clone_project(template_dir: Path, output_dir: Path, project_name: str) -> Path:
     """
     Clone a HEC-RAS template project to a new directory.
-    Uses RAS Commander if available, falls back to shutil.copytree.
+    Uses shutil.copytree with Windows reserved name filtering when available.
     Returns path to cloned project directory.
     """
     dest = output_dir / project_name
+    # Use RasUtils.ignore_windows_reserved if ras-commander is installed
+    # to safely skip Windows virtual device names (CON, NUL, etc.)
+    ignore_func = None
     try:
-        from ras_commander import RasPrj
-        prj = RasPrj(str(template_dir))
-        prj.clone_project(str(dest))
-        logger.info(f"Cloned project via RAS Commander: {dest}")
+        from ras_commander import RasUtils
+        ignore_func = RasUtils.ignore_windows_reserved
     except ImportError:
-        logger.warning("ras-commander not installed — using shutil.copytree fallback")
-        shutil.copytree(template_dir, dest)
-    except Exception as e:
-        logger.warning(f"RAS Commander clone failed ({e}) — using shutil.copytree fallback")
-        shutil.copytree(template_dir, dest)
+        pass
+    shutil.copytree(template_dir, dest, ignore=ignore_func)
+    logger.info(f"Cloned template project: {dest}")
     return dest
 
 
@@ -441,32 +458,28 @@ def _update_mannings_n_hdf5(project_dir: Path, mannings_n: float) -> bool:
 def _update_mannings_n(project_dir: Path, mannings_n: float) -> bool:
     """
     Update Manning's n value for all 2D flow areas in the project.
-    Uses RAS Commander if available.
-    Returns True if updated, False if skipped (no RC or not supported).
+    Uses RC GeomLandCover.set_2d_mannings_n_hdf() if available (P2),
+    otherwise falls back to direct HDF5 write.
+    Returns True if updated, False if no geometry HDF found.
     """
+    # Try RC method first (added in P2 of ras-agent integration)
     try:
-        from ras_commander import RasPrj
-        prj = RasPrj(str(project_dir))
-        if hasattr(prj, "set_mannings_n"):
-            prj.set_mannings_n(mannings_n)
-            logger.info(f"Updated Manning's n to {mannings_n} via RAS Commander")
+        from ras_commander.geom import GeomLandCover
+        if hasattr(GeomLandCover, "set_2d_mannings_n_hdf"):
+            geom_hdfs = list(project_dir.glob("*.g??.hdf"))
+            if not geom_hdfs:
+                logger.warning(f"No geometry HDF found in {project_dir}")
+                return False
+            for geom_hdf in geom_hdfs:
+                GeomLandCover.set_2d_mannings_n_hdf(geom_hdf, mannings_n)
+                logger.info(f"Updated Manning's n to {mannings_n} via RC: {geom_hdf.name}")
             return True
-        elif hasattr(prj, "update_mannings"):
-            prj.update_mannings(mannings_n)
-            logger.info(f"Updated Manning's n to {mannings_n} via RAS Commander")
-            return True
-        else:
-            logger.warning(
-                "RAS Commander installed but Manning's n update method not found — "
-                "using HDF5 fallback"
-            )
-            return _update_mannings_n_hdf5(project_dir, mannings_n)
     except ImportError:
-        logger.warning("ras-commander not installed — using HDF5 fallback for Manning's n")
-        return _update_mannings_n_hdf5(project_dir, mannings_n)
+        pass
     except Exception as e:
-        logger.warning(f"RAS Commander Manning's n update failed ({e}) — using HDF5 fallback")
-        return _update_mannings_n_hdf5(project_dir, mannings_n)
+        logger.warning(f"RC Manning's n update failed ({e}) — using HDF5 fallback")
+    # Fallback: direct HDF5 write
+    return _update_mannings_n_hdf5(project_dir, mannings_n)
 
 
 # ── Geometry File (ASCII .g##) Utilities ──────────────────────────────────────
