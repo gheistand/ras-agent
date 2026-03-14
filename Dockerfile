@@ -3,7 +3,7 @@ FROM python:3.11-slim
 # Install system geospatial deps (same as CI)
 RUN apt-get update && apt-get install -y \
     libgdal-dev gdal-bin libgeos-dev libproj-dev \
-    dos2unix git \
+    g++ dos2unix git \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
