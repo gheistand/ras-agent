@@ -59,3 +59,17 @@ Thumbs.db
 
 # Test outputs
 tests/output/
+
+# Claude Code local config
+.claude/settings.local.json
+.claude/outputs/*
+!.claude/outputs/.gitkeep
+
+# Agent tasks user state
+agent_tasks/.agent/STATE.md
+agent_tasks/.agent/BACKLOG.md
+agent_tasks/.agent/PROGRESS.md
+agent_tasks/.agent/LEARNINGS.md
+agent_tasks/tasks/*/
+agent_tasks/.old/*/
+agent_tasks/plans/
