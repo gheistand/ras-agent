@@ -473,15 +473,119 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 - **Call scheduled:** early week of 2026-03-16 with Bill + Ajith
 - Email sent from gheistand@baseflood.com to bill@clbengineering.com, cc: ajith@clbengineering.com
 
+---
+
+## Bill Katzenmeyer — Contributor (CLB Engineering)
+
+**Bill Katzenmeyer, PE, CFM** (bill@clbengineering.com) was added as a GitHub collaborator
+on 2026-03-14. He is the author of [RAS Commander](https://github.com/gpt-cmdr/ras-commander)
+(Apache 2.0), the ras-commander Python library this project depends on.
+
+**Bill's contributions to ras-agent:**
+
+### PR #1 — ras-commander API integration + Claude Code agent infrastructure
+Merged 2026-03-14.
+- Updated `model_builder.py` and `results.py` to use newer RC APIs:
+  `HdfResultsMesh`, `HdfMesh`, `GeomLandCover`, `RasUtils.ignore_windows_reserved`
+- Added `.claude/` multi-agent infrastructure:
+  - 6 specialist agents (pipeline-dev, web-dev, test-engineer, devops, hydro-reviewer, self-improver)
+  - 8 skills, 6 rules, 4 QAQC hooks
+  - Three-tier orchestrator/specialist/advisor architecture
+- Added `CLAUDE.md` orientation files at root, pipeline/, tests/, web/
+- Added `agent_tasks/` session state tracking templates
+
+**Bill's ras-commander library updates (as of 2026-03-14):**
+- Windows → Linux preprocessing workflow built-in and tested (TNTech example notebooks)
+- RasProcess for inundation boundary creation (matches RASMapper behavior)
+- Headless Linux execution improvements
+- Library version: 0.90.0 on PyPI; project now pins `>=0.89`
+
+**Pending contribution topics (call week of 2026-03-16):**
+- Which ras-commander function handles Windows→Linux preprocessing?
+- Does RasProcess replace the RASMapper mesh regen step or work alongside it?
+- ras2cng integration into results.py (Bill introduced this tool)
+
+---
+
+## ras2cng — Cloud-Native GIS Post-Processing
+
+**ras2cng** (https://ras2cng.readthedocs.io) is a CLI/library for exporting HEC-RAS results
+to cloud-native formats. Added as optional dependency 2026-03-14 (PR #5, `>=0.1`).
+
+**What it does:**
+- Input: HEC-RAS model files (`.g??.hdf`, `.p??.hdf`)
+- Uses ras-commander for HDF parsing (consistent with our RC-first approach)
+- Output: GeoParquet (columnar, Arrow-native), PMTiles (serverless vector tiles),
+  DuckDB (in-process spatial SQL), PostGIS
+
+**Why it matters:**
+- PMTiles = direct upgrade to MapLibre web dashboard — serverless, no tile server needed
+- GeoParquet = better than GeoPackage for analytical workflows
+- Replaces or complements current `results.py` rasterio/h5py export path
+- Integration planned as Phase 12 after call with Bill
+
+---
+
+## HITL / QAQC Architecture — Phases A–C (2026-03-14)
+
+PRs #2, #3, #4 — merged 2026-03-14.
+
+Built by Glenn + BaseBot (AI assistant), informed by SimTheory architectural review.
+
+### Phase A — Foundation (PR #2)
+- **4 new rules:** `human-in-the-loop.md`, `scientific-validation.md`, `transparency.md`, `qaqc.md`
+- **expert-liaison agent** with `HITLConfig` abstraction:
+  - Modes: `blocking` | `async` | `abort`
+  - Channels: `stdin` (default, zero-config) | `file` | `webhook` | `email` | `telegram` | `api`
+  - Reference deployment (Glenn): `blocking + telegram` via env vars
+- **Expert liaison questions queue** pre-seeded with 3 confirmed decisions
+- **pipeline/CLAUDE.md** updated with full IL hydrology domain knowledge
+
+### Phase B — Validation Engine (PR #3)
+- **qaqc-validator agent:** per-stage bounds checks for all 7 stages, PASS/WARN/HITL
+- **/ask-expert skill:** formalizes domain questions, checks existing answers first
+- **/validate-run skill:** post-run QAQC validation, generates report
+
+### Phase C — Proactive Review + Hooks (PR #4)
+- **hydro-reviewer updated:** auto-triggered on hydrograph.py, streamstats.py, model_builder.py, watershed.py changes; HITL-aware; per-module checklists
+- **2 new hooks:** `calculation-transparency.sh`, `range-guard.sh` (lightweight reminders, no JSON parsing)
+- **Updated:** `qaqc-pipeline-edit.sh` adds hydro-reviewer trigger; self-improver has full inventory
+- **Test baseline corrected:** 112 → 117 in 4 files
+
+### HITLConfig Design Principle
+The HITL channel is **never baked into agent definitions** — always resolved from config.
+This keeps the repo portable for any H&H engineer who clones it.
+Glenn's instance uses Telegram (existing OpenClaw integration); zero-config default is stdin.
+
+---
+
+## Dependency Versions (as of 2026-03-14)
+
+| Package | Pin | Notes |
+|---------|-----|-------|
+| ras-commander | `>=0.89` | 0.89+ has Windows→Linux preprocessing, RasProcess |
+| ras2cng | `>=0.1` | Optional; cloud-native GIS post-processing |
+| rasterio | `>=1.3` | |
+| pysheds | `>=0.4` | |
+| geopandas | `>=0.14` | |
+| h5py | `>=3.9` | HDF5 fallback when RC unavailable |
+| fastapi | `>=0.110` | |
+| boto3 | `>=1.34` | Optional R2 cloud storage |
+
+---
+
 ## Pending Actions
 
-1. ~~Phases 2–11~~ ✅ All done (117/117 tests, 25 commits)
-2. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-3. **Docker smoke test:** `docker-compose run --rm api python3 pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output /app/output/test --mock`
-4. **Call with Bill + Ajith** early week of 2026-03-16 — mesh regeneration workflow
-5. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed)
-6. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
-7. **Next features:** FIRM validation, NHD batch input generator, user auth for API
+1. ~~Phases 0–11~~ ✅ All done (117/117 tests)
+2. ~~HITL/QAQC architecture (Phases A–C)~~ ✅ Done (PRs #2–4)
+3. ~~Bump ras-commander version pin~~ ✅ Done (PR #5, >=0.89)
+4. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
+5. **Call with Bill + Ajith** early week of 2026-03-16 — mesh regen + RC 0.89 API questions
+6. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²)
+7. **Docker smoke test with real run** once Windows template exists
+8. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
+9. **Phase 12:** ras2cng integration into results.py (post-call)
+10. **Future:** FIRM validation, NHD batch input generator, user auth for API
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
