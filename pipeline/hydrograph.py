@@ -23,6 +23,9 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+# numpy.trapz removed in NumPy 2.0 — use trapezoid with fallback
+_trapz = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
 logger = logging.getLogger(__name__)
 
 
@@ -96,7 +99,7 @@ class HydrographResult:
         # Trapezoidal integration; subtract baseflow
         net_flows = np.maximum(self.flows_cfs - self.baseflow_cfs, 0)
         dt_sec = self.time_step_hr * 3600
-        volume_cfs_s = np.trapz(net_flows, dx=dt_sec)
+        volume_cfs_s = _trapz(net_flows, dx=dt_sec)
         return volume_cfs_s / 43560  # cfs·s to acre-ft
 
 
@@ -203,7 +206,7 @@ def nrcs_unit_hydrograph(
         f"NRCS hydrograph: Qp={peak_flow_cfs:.0f} cfs, "
         f"Tp={Tp_hr:.2f} hr, Tc={Tc_hr:.2f} hr, "
         f"duration={duration_hr:.1f} hr, "
-        f"volume={np.trapz(flows_cfs - baseflow_cfs, dx=time_step_hr*3600)/43560:.1f} ac-ft"
+        f"volume={_trapz(flows_cfs - baseflow_cfs, dx=time_step_hr*3600)/43560:.1f} ac-ft"
     )
 
     return HydrographResult(
