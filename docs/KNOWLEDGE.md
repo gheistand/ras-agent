@@ -139,8 +139,9 @@ Web (Cloudflare Pages):
 | 10b | Multi-RP map layers | ✅ Done | MapViewer.jsx (toggle UI), api.py, api.js |
 
 **Test count: 117/117 passing** (as of 2026-03-13)
-**Latest commit:** `fc9e7b5` — fix: add g++ to Dockerfile for GDAL Python bindings
+**Latest commit:** `7bef053` — fix: remove obsolete version attribute from docker-compose.yml
 **Docker:** ✅ Confirmed working — `docker-compose up api --build` compiles cleanly
+**Mock mode:** ✅ Fixed — `--mock` now short-circuits all network calls in stages 1-3 (commit `16f2f2b`)
 
 ---
 
@@ -444,15 +445,43 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 - `api.js`: `fetchFloodExtent(jobId, returnPeriods="all")`
 - `MapViewer.jsx`: per-RP MapLibre sources/layers; toggle legend panel (top-right checkboxes + color swatches); click popup; cursor change on hover; fitBounds to all visible layers
 
+## Phase 11 — Perimeter Writing (DONE, commit 46d5edb)
+- `_write_perimeter_to_geometry_file(geometry_file, area_name, perimeter_coords, cell_size_m)` — regex-based .g## perimeter block replacement
+- Creates .bak backup before modifying; auto-closes polygon; updates Cell Size field
+- `_get_2d_area_name_from_geometry_file(geometry_file)` — parses first 2D flow area name
+- `_build_from_template()` wires it: watershed boundary → EPSG:5070 → .g## ASCII; adaptive cell size 30-300m
+- Confirmed by Bill K. (2026-03-13): write to ASCII .g## file; HEC-RAS regenerates HDF on next save/open
+- 5 new tests; KNOWLEDGE.md updated with resolved open question
+
+## Docker Fixes (commits e0e428d, fc9e7b5, 7bef053)
+- Removed `COPY docs/` (docs/ excluded by .dockerignore)
+- Added `g++` to apt-get for GDAL Python bindings compilation
+- Removed obsolete `version: "3.9"` from docker-compose.yml
+- **Confirmed:** `docker-compose up api --build` compiles and starts cleanly
+
+## Mock Mode Fix (commit 16f2f2b)
+- `--mock` now short-circuits stages 1-3 — NO external HTTP calls
+- `_mock_terrain()`: 20x20 synthetic GeoTIFF EPSG:5070 (rasterio, no download)
+- `_mock_watershed()`: WatershedResult ~50mi² square basin (geopandas/shapely)
+- `_mock_peak_flows()`: hardcoded central IL flows (Q100=9400 cfs)
+- Docker smoke test: `docker-compose run --rm api python3 pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output /app/output/test --mock`
+
+## Bill Katzenmeyer Response (2026-03-13)
+- **Perimeter update: CONFIRMED** — RAS Commander writes to plain text .g## file; HEC-RAS regenerates HDF on next open/save
+- **Mesh regeneration** is the hard part — Ajith Sundarraj (CLB Engineering) building RASMapper automation
+- **Workflow:** clone → update .g## perimeter → RASMapper regenerates mesh → export HDF → Linux compute
+- **Call scheduled:** early week of 2026-03-16 with Bill + Ajith
+- Email sent from gheistand@baseflood.com to bill@clbengineering.com, cc: ajith@clbengineering.com
+
 ## Pending Actions
 
-1. ~~Phases 2–10~~ ✅ All done (112/112 tests, 20 commits)
+1. ~~Phases 2–11~~ ✅ All done (117/117 tests, 25 commits)
 2. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-3. **Awaiting Bill K.:** Can RAS Commander update 2D flow area perimeter on cloned project?
-4. **Glenn to build:** 3 template HEC-RAS projects on Windows (small/medium/large IL watershed)
-5. **Docker smoke test:** Start Docker Desktop → `docker-compose up api` → run Muncie test case
+3. **Docker smoke test:** `docker-compose run --rm api python3 pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output /app/output/test --mock`
+4. **Call with Bill + Ajith** early week of 2026-03-16 — mesh regeneration workflow
+5. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed)
 6. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
-7. **Next features (when ready):** FIRM validation, stream network batch from NHD, user auth for API
+7. **Next features:** FIRM validation, NHD batch input generator, user auth for API
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
