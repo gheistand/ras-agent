@@ -451,6 +451,15 @@ def run_watershed(
 
             rp_output_dir = output_dir / "results" / f"{rp}yr"
             output_hdf = Path(job["plan_hdf"])
+
+            if mock:
+                # Skip real HDF export in mock mode — placeholder files have no geometry
+                rp_output_dir.mkdir(parents=True, exist_ok=True)
+                result.results[rp] = {"mock": rp_output_dir}
+                n_files_total += 1
+                logger.info(f"[mock] Results export skipped for T={rp}yr (mock mode)")
+                continue
+
             try:
                 exported = _results.export_results(
                     hdf_path=output_hdf,
