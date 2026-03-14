@@ -21,6 +21,8 @@ from typing import Optional
 
 from loguru import logger
 
+import numpy as np
+
 import terrain as _terrain
 import watershed as _watershed
 import streamstats as _streamstats
@@ -29,7 +31,7 @@ import model_builder as _model_builder
 import runner as _runner
 import results as _results
 
-from watershed import WatershedResult
+from watershed import WatershedResult, BasinCharacteristics
 from streamstats import PeakFlowEstimates
 from hydrograph import HydrographSet
 from model_builder import HecRasProject
@@ -107,6 +109,81 @@ def _plan_hdf_for_rp(project: HecRasProject, rp_index: int) -> Path:
     return project.project_dir / f"{prj_base}.p{rp_index:02d}.hdf"
 
 
+# ── Mock Data Generators ─────────────────────────────────────────────────────
+
+def _mock_terrain(output_dir: Path, lon: float, lat: float) -> "TerrainResult":
+    """Generate a tiny synthetic DEM for mock mode (no network calls)."""
+    import rasterio
+    from rasterio.transform import from_bounds
+    from rasterio.crs import CRS
+
+    terrain_dir = output_dir / "terrain"
+    terrain_dir.mkdir(parents=True, exist_ok=True)
+    dem_path = terrain_dir / "dem_mock.tif"
+
+    if not dem_path.exists():
+        # 20x20 grid, slight slope from NW to SE, centered on pour point
+        data = np.linspace(290, 270, 400, dtype=np.float32).reshape(20, 20)
+        # Rough EPSG:5070 coords near pour point
+        from pyproj import Transformer
+        t = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+        cx, cy = t.transform(lon, lat)
+        half = 5000  # 5km half-extent
+        transform = from_bounds(cx - half, cy - half, cx + half, cy + half, 20, 20)
+        with rasterio.open(
+            dem_path, "w", driver="GTiff", height=20, width=20,
+            count=1, dtype="float32", crs=CRS.from_epsg(5070),
+            transform=transform, nodata=-9999,
+        ) as dst:
+            dst.write(data, 1)
+    return TerrainResult(dem_path=dem_path)
+
+
+def _mock_watershed(lon: float, lat: float) -> "WatershedResult":
+    """Generate a synthetic WatershedResult for mock mode (no DEM needed)."""
+    import geopandas as gpd
+    from shapely.geometry import box, Point
+    from pyproj import Transformer
+
+    # ~50 mi² square basin in WGS84, converted to EPSG:5070 for GeoDataFrame
+    basin_wgs84 = box(lon - 0.15, lat - 0.15, lon + 0.15, lat + 0.15)
+    basin_gdf = gpd.GeoDataFrame(geometry=[basin_wgs84], crs="EPSG:4326").to_crs("EPSG:5070")
+    streams_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:5070")
+
+    t = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    cx, cy = t.transform(lon, lat)
+    pour_pt = Point(cx, cy)
+
+    chars = BasinCharacteristics(
+        drainage_area_km2=130.0,
+        drainage_area_mi2=50.2,
+        mean_elevation_m=285.0,
+        relief_m=35.0,
+        main_channel_length_km=22.0,
+        main_channel_slope_m_per_m=0.0015,
+        centroid_lon=lon,
+        centroid_lat=lat,
+        pour_point_lon=lon,
+        pour_point_lat=lat,
+    )
+    return WatershedResult(basin=basin_gdf, streams=streams_gdf,
+                           pour_point=pour_pt, characteristics=chars,
+                           dem_clipped=None)
+
+
+def _mock_peak_flows(lon: float, lat: float) -> "PeakFlowEstimates":
+    """Generate synthetic peak flows for mock mode (central IL agricultural)."""
+    return PeakFlowEstimates(
+        pour_point_lon=lon,
+        pour_point_lat=lat,
+        drainage_area_mi2=50.2,
+        source="mock",
+        workspace_id=None,
+        Q2=1800, Q5=3100, Q10=4200, Q25=6000,
+        Q50=7600, Q100=9400, Q500=13800,
+    )
+
+
 # ── Core Orchestrator ─────────────────────────────────────────────────────────
 
 def run_watershed(
@@ -177,19 +254,23 @@ def run_watershed(
 
     # ── Stage 1: Terrain ──────────────────────────────────────────────────────
     logger.info(
-        f"[Stage 1/7] Fetching terrain for pour point "
+        f"[Stage 1/7] {'(mock) ' if mock else ''}Fetching terrain for pour point "
         f"({pour_point_lon:.4f}, {pour_point_lat:.4f}) …"
     )
     try:
-        bbox = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
-        terrain_dir = output_dir / "terrain"
-        dem_path = _terrain.get_terrain(bbox, terrain_dir, resolution_m)
-        result.terrain = TerrainResult(dem_path=dem_path)
-        size_mb = dem_path.stat().st_size / 1e6 if dem_path.exists() else 0
-        logger.info(
-            f"[Stage 1/7] Terrain complete — DEM at {dem_path} "
-            f"({size_mb:.1f} MB)"
-        )
+        if mock:
+            result.terrain = _mock_terrain(output_dir, pour_point_lon, pour_point_lat)
+            logger.info("[Stage 1/7] Terrain complete — synthetic DEM (mock mode)")
+        else:
+            bbox = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
+            terrain_dir = output_dir / "terrain"
+            dem_path = _terrain.get_terrain(bbox, terrain_dir, resolution_m)
+            result.terrain = TerrainResult(dem_path=dem_path)
+            size_mb = dem_path.stat().st_size / 1e6 if dem_path.exists() else 0
+            logger.info(
+                f"[Stage 1/7] Terrain complete — DEM at {dem_path} "
+                f"({size_mb:.1f} MB)"
+            )
     except Exception as exc:
         raise OrchestratorError(
             f"Stage 1 (terrain) failed: {exc}. "
@@ -198,22 +279,30 @@ def run_watershed(
 
     # ── Stage 2: Watershed delineation ───────────────────────────────────────
     logger.info(
-        f"[Stage 2/7] Delineating watershed at "
+        f"[Stage 2/7] {'(mock) ' if mock else ''}Delineating watershed at "
         f"({pour_point_lon:.3f}, {pour_point_lat:.3f}) …"
     )
     try:
-        ws_result = _watershed.delineate_watershed(
-            dem_path=result.terrain.dem_path,
-            pour_point_lon=pour_point_lon,
-            pour_point_lat=pour_point_lat,
-        )
-        result.watershed = ws_result
-        chars = ws_result.characteristics
-        logger.info(
-            f"[Stage 2/7] Watershed complete — "
-            f"{chars.drainage_area_km2:.1f} km² "
-            f"({chars.drainage_area_mi2:.1f} mi²)"
-        )
+        if mock:
+            result.watershed = _mock_watershed(pour_point_lon, pour_point_lat)
+            chars = result.watershed.characteristics
+            logger.info(
+                f"[Stage 2/7] Watershed complete — "
+                f"{chars.drainage_area_km2:.1f} km² (mock mode)"
+            )
+        else:
+            ws_result = _watershed.delineate_watershed(
+                dem_path=result.terrain.dem_path,
+                pour_point_lon=pour_point_lon,
+                pour_point_lat=pour_point_lat,
+            )
+            result.watershed = ws_result
+            chars = ws_result.characteristics
+            logger.info(
+                f"[Stage 2/7] Watershed complete — "
+                f"{chars.drainage_area_km2:.1f} km² "
+                f"({chars.drainage_area_mi2:.1f} mi²)"
+            )
     except Exception as exc:
         raise OrchestratorError(
             f"Stage 2 (watershed delineation) failed: {exc}. "
@@ -221,23 +310,32 @@ def run_watershed(
         ) from exc
 
     # ── Stage 3: Peak flow estimation ─────────────────────────────────────────
-    logger.info("[Stage 3/7] Estimating peak flows (StreamStats / regression) …")
+    logger.info(
+        f"[Stage 3/7] {'(mock) ' if mock else ''}Estimating peak flows …"
+    )
     try:
-        chars = result.watershed.characteristics
-        peak_flows = _streamstats.get_peak_flows(
-            pour_point_lon=pour_point_lon,
-            pour_point_lat=pour_point_lat,
-            drainage_area_mi2=chars.drainage_area_mi2,
-            channel_slope_m_per_m=chars.main_channel_slope_m_per_m,
-        )
-        result.peak_flows = peak_flows
-        logger.info(
-            f"[Stage 3/7] Peak flows complete — "
-            f"source={peak_flows.source}, "
-            f"Q100={peak_flows.Q100:.0f} cfs"
-            if peak_flows.Q100 else
-            f"[Stage 3/7] Peak flows complete — source={peak_flows.source}"
-        )
+        if mock:
+            result.peak_flows = _mock_peak_flows(pour_point_lon, pour_point_lat)
+            logger.info(
+                f"[Stage 3/7] Peak flows complete — "
+                f"Q100={result.peak_flows.Q100:.0f} cfs (mock mode)"
+            )
+        else:
+            chars = result.watershed.characteristics
+            peak_flows = _streamstats.get_peak_flows(
+                pour_point_lon=pour_point_lon,
+                pour_point_lat=pour_point_lat,
+                drainage_area_mi2=chars.drainage_area_mi2,
+                channel_slope_m_per_m=chars.main_channel_slope_m_per_m,
+            )
+            result.peak_flows = peak_flows
+            logger.info(
+                f"[Stage 3/7] Peak flows complete — "
+                f"source={peak_flows.source}, "
+                f"Q100={peak_flows.Q100:.0f} cfs"
+                if peak_flows.Q100 else
+                f"[Stage 3/7] Peak flows complete — source={peak_flows.source}"
+            )
     except Exception as exc:
         err = f"Stage 3 (peak flows) failed: {exc}"
         logger.error(err)

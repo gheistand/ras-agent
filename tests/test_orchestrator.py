@@ -226,7 +226,7 @@ def test_run_watershed_mock_mode(tmp_path):
 
 
 def test_run_watershed_stage1_failure(tmp_path):
-    """Stage 1 failure (terrain) raises OrchestratorError."""
+    """Stage 1 failure (terrain) raises OrchestratorError (non-mock mode)."""
     with patch(
         "orchestrator._terrain.get_terrain",
         side_effect=RuntimeError("tile download failed"),
@@ -237,7 +237,7 @@ def test_run_watershed_stage1_failure(tmp_path):
                 pour_point_lat=40.5,
                 output_dir=tmp_path,
                 return_periods=[100],
-                ras_exe_dir=None,
+                ras_exe_dir=Path("/fake/ras/bin"),  # non-mock so terrain is called
             )
 
 
@@ -256,7 +256,7 @@ def test_run_watershed_stage2_failure(tmp_path):
                 pour_point_lat=40.5,
                 output_dir=tmp_path,
                 return_periods=[100],
-                ras_exe_dir=None,
+                ras_exe_dir=Path("/fake/ras/bin"),  # non-mock so real stages 1+2 called
             )
 
 
