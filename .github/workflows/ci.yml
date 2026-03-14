@@ -18,12 +18,13 @@ jobs:
       - name: Install system geospatial libraries
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y libgdal-dev gdal-bin libgeos-dev libproj-dev
+          sudo apt-get install -y libgdal-dev gdal-bin libgeos-dev libproj-dev g++
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install gdal==$(gdal-config --version)
           pip install -r pipeline/requirements.txt
+          pip install pytest
       - name: Run pipeline tests
         run: |
           python -m pytest tests/ -v --tb=short
