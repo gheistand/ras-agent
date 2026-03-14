@@ -18,6 +18,7 @@ Apache License 2.0
 
 import logging
 import math
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -468,6 +469,102 @@ def _update_mannings_n(project_dir: Path, mannings_n: float) -> bool:
         return _update_mannings_n_hdf5(project_dir, mannings_n)
 
 
+# ── Geometry File (ASCII .g##) Utilities ──────────────────────────────────────
+
+def _get_2d_area_name_from_geometry_file(geometry_file: Path) -> Optional[str]:
+    """
+    Parse a HEC-RAS .g## file and return the first 2D flow area name found.
+    Returns None if no 2D flow area is defined.
+    """
+    pattern = re.compile(r"^2D Flow Area=\s*(.+?)\s*,", re.MULTILINE | re.IGNORECASE)
+    text = geometry_file.read_text(errors="replace")
+    match = pattern.search(text)
+    return match.group(1).strip() if match else None
+
+
+def _write_perimeter_to_geometry_file(
+    geometry_file: Path,
+    area_name: str,
+    perimeter_coords: list,
+    cell_size_m: float = 100.0,
+) -> bool:
+    """
+    Update the 2D flow area perimeter in a HEC-RAS plain text geometry file (.g##).
+
+    HEC-RAS regenerates the geometry HDF on the next save/open, so writing
+    to the ASCII file is the correct approach (confirmed by Bill Katzenmeyer,
+    CLB Engineering / RAS Commander, 2026-03-13).
+
+    Args:
+        geometry_file:     Path to .g01 / .g02 / etc. ASCII geometry file
+        area_name:         Name of the 2D flow area to update (e.g. "Perimeter 1")
+        perimeter_coords:  List of (x, y) tuples in project CRS (EPSG:5070, meters)
+                           Will be automatically closed (first point appended if not already)
+        cell_size_m:       Target mesh cell size in meters (written to Cell Size field)
+
+    Returns:
+        True if perimeter was found and updated, False if area_name not found in file.
+
+    Notes:
+        - Creates a .bak backup of the original file before modifying
+        - Closes the polygon automatically if first != last point
+        - Preserves all other content in the geometry file unchanged
+    """
+    text = geometry_file.read_text(errors="replace")
+
+    # Check that the named 2D flow area exists in the file
+    area_pattern = re.compile(
+        r"(2D Flow Area=\s*" + re.escape(area_name) + r"\s*,\s*\d+\s*\n)",
+        re.IGNORECASE,
+    )
+    if not area_pattern.search(text):
+        logger.warning(
+            f"2D flow area '{area_name}' not found in {geometry_file.name} — perimeter not updated"
+        )
+        return False
+
+    # Create .bak backup BEFORE any modification
+    bak_path = geometry_file.with_suffix(geometry_file.suffix + ".bak")
+    bak_path.write_text(text, encoding="utf-8")
+
+    # Ensure polygon is closed
+    coords = list(perimeter_coords)
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+
+    coord_lines = "\n".join(f"     {x:.3f},{y:.3f}" for x, y in coords)
+    new_perimeter_block = f"2D Flow Area Perimeter= {len(coords)}\n{coord_lines}\n"
+
+    # Replace existing perimeter block (header + coordinate lines)
+    perimeter_block_pattern = re.compile(
+        r"(2D Flow Area Perimeter=\s*\d+\s*\n)"       # header line
+        r"((?:[ \t]*-?[\d.]+\s*,\s*-?[\d.]+[ \t]*\n)*)",  # coordinate lines
+        re.MULTILINE,
+    )
+    updated_text, n_subs = perimeter_block_pattern.subn(new_perimeter_block, text, count=1)
+
+    if n_subs == 0:
+        # No existing perimeter block found — insert after the 2D Flow Area header line
+        updated_text = area_pattern.sub(
+            r"\g<1>" + new_perimeter_block,
+            updated_text,
+            count=1,
+        )
+
+    # Update Cell Size line if present
+    cell_size_pattern = re.compile(r"2D Flow Area Cell Size=\s*[\d.]+")
+    updated_text = cell_size_pattern.sub(
+        f"2D Flow Area Cell Size= {cell_size_m:.1f}", updated_text
+    )
+
+    geometry_file.write_text(updated_text, encoding="utf-8")
+    logger.info(
+        f"Updated perimeter in {geometry_file.name}: "
+        f"{len(coords)} points, cell size {cell_size_m:.1f}m"
+    )
+    return True
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
@@ -541,27 +638,50 @@ def _build_from_template(
         logger.info(f"No NLCD raster provided; using default Manning's n = {mannings_n}")
     _update_mannings_n(project_dir, mannings_n)
 
-    # ── 4. TODO: Update 2D flow area perimeter polygon
-    # TODO (AWAITING BILL KATZENMEYER RESPONSE): Can RAS Commander update the
-    # 2D flow area perimeter polygon on a cloned project, or is the mesh
-    # geometry fixed at clone time?
-    #
-    # If RAS Commander supports perimeter update:
-    #   Use it here to reshape the 2D flow area boundary to match
-    #   watershed.basin geometry before running.
-    #
-    # If RAS Commander does NOT support perimeter update:
-    #   The template mesh perimeter is used as-is. The simulation domain
-    #   will be the template extent, not the exact delineated watershed.
-    #
-    # For now, log a warning that the template mesh perimeter is used as-is.
-    logger.warning(
-        "TEMPLATE MESH PERIMETER IN USE: The 2D flow area perimeter from the "
-        "template project is being used without modification. The simulation "
-        "domain may not match the delineated watershed boundary. "
-        "(Awaiting Bill Katzenmeyer's input on whether RAS Commander can update "
-        "the 2D flow area perimeter polygon on a cloned project.)"
-    )
+    # ── 4. Update 2D flow area perimeter to match watershed boundary
+    # (Bill Katzenmeyer / CLB Engineering confirmed 2026-03-13: write to ASCII .g## file;
+    #  HEC-RAS regenerates geometry HDF on next save/open)
+    geom_files = list(project_dir.glob("*.g??"))
+    if geom_files and watershed.basin is not None:
+        geom_file = geom_files[0]
+        try:
+            import geopandas as gpd
+            basin_geom = getattr(watershed.basin, "geometry", None)
+            if basin_geom is not None and hasattr(basin_geom, "iloc"):
+                basin_shape = basin_geom.iloc[0]
+            else:
+                basin_shape = watershed.basin
+            basin_gdf = gpd.GeoDataFrame(geometry=[basin_shape], crs="EPSG:4326")
+            basin_5070 = basin_gdf.to_crs("EPSG:5070")
+            boundary = basin_5070.geometry.iloc[0].exterior
+            perimeter_coords = list(boundary.coords)
+            # Adaptive cell size: 30-300m based on drainage area
+            area_km2 = watershed.characteristics.drainage_area_km2
+            cell_size_m = min(max(area_km2 * 0.5, 30.0), 300.0)
+            area_name = _get_2d_area_name_from_geometry_file(geom_file)
+            if area_name:
+                updated = _write_perimeter_to_geometry_file(
+                    geom_file, area_name, perimeter_coords, cell_size_m
+                )
+                if updated:
+                    logger.info(
+                        f"Updated 2D flow area perimeter: {len(perimeter_coords)} points, "
+                        f"cell size {cell_size_m:.0f}m"
+                    )
+                else:
+                    logger.warning(
+                        f"Could not update perimeter — area '{area_name}' not found in {geom_file.name}"
+                    )
+            else:
+                logger.warning(
+                    f"No 2D flow area found in {geom_file.name} — perimeter not updated"
+                )
+        except Exception as exc:
+            logger.warning(f"Perimeter update failed ({exc}) — template mesh perimeter in use")
+    else:
+        logger.warning(
+            "No geometry file or watershed basin geometry — perimeter not updated (using template mesh)"
+        )
 
     # ── 5. Update terrain reference in geometry HDF
     geom_hdf_candidates = list(project_dir.glob("*.g01.hdf"))

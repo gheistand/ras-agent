@@ -283,3 +283,75 @@ def test_update_mannings_n_hdf5_fallback(tmp_path):
     with h5py.File(geom_hdf, "r") as f:
         mann = f["Geometry/2D Flow Areas/MainArea/Mann"][:]
     assert np.allclose(mann[:, 1], new_n)
+
+
+# ── Tests: perimeter writing ──────────────────────────────────────────────────
+
+SAMPLE_GEOM_FILE = """\
+Geom Title=Test Geometry
+Program Version=6.60
+
+2D Flow Area= Perimeter 1  ,0
+2D Flow Area Perimeter=  5
+     300000.000,4400000.000
+     300500.000,4400000.000
+     300500.000,4400500.000
+     300000.000,4400500.000
+     300000.000,4400000.000
+2D Flow Area Cell Size=  100.0
+Mann= 0.040 ,0 ,0
+"""
+
+
+def _write_sample_geom(tmp_path: Path, content: str = SAMPLE_GEOM_FILE) -> Path:
+    geom = tmp_path / "project.g01"
+    geom.write_text(content)
+    return geom
+
+
+def test_write_perimeter_creates_backup(tmp_path):
+    geom = _write_sample_geom(tmp_path)
+    coords = [(300000.0, 4400000.0), (301000.0, 4400000.0), (301000.0, 4401000.0)]
+    result = mb._write_perimeter_to_geometry_file(geom, "Perimeter 1", coords)
+    assert result is True
+    bak = tmp_path / "project.g01.bak"
+    assert bak.exists()
+    # Backup contains original content
+    assert "300500.000,4400000.000" in bak.read_text()
+
+
+def test_write_perimeter_updates_coordinate_count(tmp_path):
+    geom = _write_sample_geom(tmp_path)
+    # 3-point open polygon → should be closed to 4 points
+    coords = [(300000.0, 4400000.0), (301000.0, 4400000.0), (301000.0, 4401000.0)]
+    mb._write_perimeter_to_geometry_file(geom, "Perimeter 1", coords)
+    content = geom.read_text()
+    # Closed polygon has 4 points
+    assert "2D Flow Area Perimeter= 4" in content
+
+
+def test_write_perimeter_closes_polygon(tmp_path):
+    geom = _write_sample_geom(tmp_path)
+    coords = [(300000.0, 4400000.0), (301000.0, 4400000.0), (301000.0, 4401000.0)]
+    mb._write_perimeter_to_geometry_file(geom, "Perimeter 1", coords)
+    content = geom.read_text()
+    lines = content.splitlines()
+    coord_lines = [l.strip() for l in lines if "," in l and "Flow" not in l and "Mann" not in l and "Title" not in l and "Version" not in l]
+    # First and last coordinate lines should be identical (closed polygon)
+    assert coord_lines[0] == coord_lines[-1]
+
+
+def test_write_perimeter_area_not_found(tmp_path):
+    geom = _write_sample_geom(tmp_path)
+    coords = [(300000.0, 4400000.0), (301000.0, 4400000.0), (301000.0, 4401000.0)]
+    result = mb._write_perimeter_to_geometry_file(geom, "NonExistentArea", coords)
+    assert result is False
+    # No backup created when area not found
+    bak = tmp_path / "project.g01.bak"
+    assert not bak.exists()
+
+
+def test_get_2d_area_name_parses_correctly(tmp_path):
+    geom = _write_sample_geom(tmp_path)
+    name = mb._get_2d_area_name_from_geometry_file(geom)
+    assert name == "Perimeter 1"
