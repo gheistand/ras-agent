@@ -3,7 +3,8 @@
     "allow": [
       "Read",
       "Glob",
-      "Grep"
+      "Grep",
+      "Bash"
     ]
   },
   "hooks": {

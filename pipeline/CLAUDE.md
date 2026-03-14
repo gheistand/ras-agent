@@ -167,6 +167,30 @@ Implemented in `model_builder.py:_write_perimeter_to_geometry_file()`.
 | Cultivated crops (NLCD 82) | 40–70% | < 10% or > 90% → note context |
 | Pour point snap distance | < 300 m | > 500 m → HITL |
 
+### QAQC Integration Pattern (Orchestrator)
+
+The `qaqc-validator` agent defines validation logic. When pipeline code integration
+happens (Phase C+), `orchestrator.py` will call it after each stage:
+
+```python
+# Pattern for orchestrator.py integration (not yet implemented in code)
+from qaqc_validator import validate_stage   # future module
+
+result_stage_2 = watershed.delineate(...)
+qaqc = validate_stage("watershed", result_stage_2, hitl_config=hitl_config)
+
+if qaqc.status == "HITL":
+    # Route via expert_liaison — blocks in blocking mode, flags in async
+    expert_liaison.ask(urgency="blocking", context=qaqc.findings)
+elif qaqc.status == "WARN":
+    logger.warning("[QAQC] Stage 2 warnings: %s", qaqc.findings)
+    # Proceed — warn is non-blocking but logged
+# PASS: proceed silently
+```
+
+The pattern: **stage completes → validate → PASS continues → WARN logs → HITL routes to expert.**
+Stages 1–2 are fatal (raise `OrchestratorError` on HITL). Stages 3–7 use partial failure pattern.
+
 ### HITL Configuration
 
 HITL routing uses `HITLConfig` — a portable abstraction that keeps the repo channel-agnostic.
