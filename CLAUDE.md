@@ -63,6 +63,36 @@ React + Vite + Tailwind. `api.js` calls the FastAPI backend. `MapViewer.jsx` ren
 - **R2 env vars:** `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`, `R2_PUBLIC_URL`, `R2_PREFIX`
 - **CI:** GitHub Actions runs `pytest` on `ubuntu-latest` with system GDAL, then `npm run build` for web
 
+## Human in the Loop (HITL)
+
+The domain expert is the **operator** — the licensed engineer or hydrologist responsible for
+the modeling results. On the reference deployment: Glenn Heistand, PE, CFM (CHAMP / ISWS).
+
+**Always pause for:** Tc method selection, peak flow source conflicts (>±20%), Manning's n
+for unmapped land cover, out-of-bounds outputs, FEMA compliance decisions.
+
+**Proceed autonomously:** Bug fixes, refactoring, data ingestion, template-based model
+generation, QAQC checks (run automatically; route findings to expert).
+
+HITL routing uses `HITLConfig` — portable, channel-agnostic. Default: `blocking + stdin`
+(zero-config for any user). Reference deployment: `blocking + telegram` (Glenn's instance).
+
+See `.claude/rules/human-in-the-loop.md` for the full decision tree.
+See `.claude/agents/expert-liaison/SUBAGENT.md` for routing and question format.
+
+## Validation Bounds (Quick Reference)
+
+All scientific outputs cross-checked against bounds. Full table in `.claude/rules/scientific-validation.md`.
+
+| Parameter | Typical (IL) | HITL Trigger |
+|-----------|-------------|--------------|
+| Tc | 0.5–12 hr | < 0.25 or > 15 hr |
+| Q100 unit peak flow | 50–150 csm | < 30 or > 800 csm |
+| Manning's n | 0.030–0.140 | Outside safety bounds by NLCD class |
+| Cell size | 15–200 m | < 10 or > 300 m |
+| Max flood depth | 0.5–15 ft | < 0.1 or > 30 ft |
+| FEMA depth accuracy | < 0.5 ft RMSE | > 0.5 ft |
+
 ## Mesh Strategy
 
 RAS Commander cannot create greenfield 2D projects. Current approach (Path A): clone template HEC-RAS projects, swap terrain/BCs/Manning's n. `model_builder.py` gracefully degrades if `ras-commander` is not installed (falls back to shutil + direct HDF5 writes).
