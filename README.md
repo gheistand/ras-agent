@@ -83,20 +83,32 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 └─────────────────────────────────────────────────┘
 ```
 
-**Windows is only required for:** RAS2025 mesh generation and initial HEC-RAS project template creation. All simulation execution and pre/post-processing runs on Linux.
+**Windows is only required for:** Initial HEC-RAS template project creation and mesh regeneration after perimeter update (RASMapper). All simulation execution and pre/post-processing runs on Linux or in Docker.
 
 ---
 
 ## Status
 
+**117 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
+
 | Phase | Description | Status |
 |-------|-------------|--------|
-| 0 | Foundation — repo, CI/CD, web scaffold | 🔨 In progress |
-| 1 | Data pipeline — terrain, watershed, StreamStats, hydrograph | 🔨 In progress |
-| 2 | Model builder — geometry, BCs, Manning's n | 📋 Planned |
-| 3 | Execution engine — RasUnsteady, job queue, parallel runs | 📋 Planned |
-| 4 | Results pipeline — HDF5 → GIS export | 📋 Planned |
-| 5 | Web dashboard — job submission, map viewer, download portal | 📋 Planned |
+| 0 | Foundation — repo, CI/CD, web scaffold | ✅ Done |
+| 1 | Data pipeline — terrain (ILHMP/3DEP + NLCD), watershed delineation, StreamStats, NRCS hydrograph | ✅ Done |
+| 2 | Model builder — template clone, .g## perimeter update, Manning's n, flow/plan ASCII files | ✅ Done |
+| 3 | Execution engine — SQLite job queue, RasUnsteady subprocess, parallel runs, 4hr timeout | ✅ Done |
+| 4 | Results pipeline — h5py HDF5 reader, max depth/WSE → COG GeoTIFF, flood extent → GeoPackage | ✅ Done |
+| 5 | FastAPI backend — job CRUD, results endpoints, R2 presigned URLs, health/stats | ✅ Done |
+| 6 | Orchestrator — `run_watershed()` chains all 7 stages; batch processor for multi-watershed runs | ✅ Done |
+| 7 | Reporting — self-contained HTML report with hydrograph plots, basin stats, flood extent preview | ✅ Done |
+| 8 | Web map viewer — MapLibre GL JS, OSM base tiles, toggleable 10/50/100yr flood extent layers | ✅ Done |
+| 9 | Deployment — Docker + docker-compose, RAS Commander wiring (clone + Manning's n), webhook/email notifications | ✅ Done |
+| 10 | Cloud storage — Cloudflare R2 results upload, presigned download URLs | ✅ Done |
+| 11 | Perimeter writing — watershed boundary → .g## ASCII (HEC-RAS regenerates HDF on next open) | ✅ Done |
+
+**Pending (requires Windows + HEC-RAS GUI):**
+- Build first HEC-RAS template project (Windows) for real (non-mock) runs
+- Mesh regeneration automation after perimeter update (RASMapper — in development by CLB Engineering / Ajith Sundarraj)
 
 ---
 
@@ -115,8 +127,8 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 
 ### Web Dashboard
 - Vite + React + Tailwind CSS
-- Mapbox GL JS / deck.gl — results map viewer
-- Cloudflare Pages — hosting
+- MapLibre GL JS (CDN) — flood extent map viewer with per-return-period toggle
+- Cloudflare Pages — hosting + auto-deploy from `main`
 
 ### HEC Software (free, public domain)
 - [HEC-RAS 6.6](https://www.hec.usace.army.mil/software/hec-ras/) — hydraulic simulation engine
