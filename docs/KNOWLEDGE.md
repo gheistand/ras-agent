@@ -11,8 +11,9 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–10b), 112/112 tests, 21 commits
+- **Status:** All phases complete (0–11 + HITL/QAQC A-C + Windows agent), 125/125 tests, ~38 commits
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
+- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (GitHub collaborator, CLB Engineering)
 
 ---
 
@@ -137,9 +138,13 @@ Web (Cloudflare Pages):
 | 9c | Webhook/email notifications | ✅ Done | notify.py, orchestrator.py, batch.py |
 | 10a | Cloudflare R2 storage | ✅ Done | storage.py, results.py, api.py |
 | 10b | Multi-RP map layers | ✅ Done | MapViewer.jsx (toggle UI), api.py, api.js |
+| HITL/QAQC A | Foundation — HITLConfig, expert-liaison agent, 4 rules | ✅ Done | .claude/rules/*.md, .claude/agents/expert-liaison/ |
+| HITL/QAQC B | Validation engine — qaqc-validator, /ask-expert, /validate-run | ✅ Done | .claude/agents/qaqc-validator/, .claude/skills/ |
+| HITL/QAQC C | Proactive review + hooks — hydro-reviewer, transparency/range hooks | ✅ Done | .claude/hooks/, .claude/agents/hydro-reviewer/ |
+| Windows Agent | Windows mesh interface + RasPreprocess integration | ✅ Done | pipeline/windows_agent.py, tests/test_windows_agent.py |
 
-**Test count: 117/117 passing** (as of 2026-03-13)
-**Latest commit:** `7bef053` — fix: remove obsolete version attribute from docker-compose.yml
+**Test count: 125/125 passing** (117 pipeline + 8 windows_agent, as of 2026-03-17)
+**Latest commit:** `b7e6646` — feat: implement _generate_local() via RasPreprocess API
 **Docker:** ✅ Confirmed working — `docker-compose up api --build` compiles cleanly
 **Mock mode:** ✅ Fixed — `--mock` now short-circuits all network calls in stages 1-3 (commit `16f2f2b`)
 
@@ -354,8 +359,9 @@ Can RAS Commander update the 2D flow area perimeter polygon on a cloned project,
 
 ## People
 
-- **Glenn Heistand** — project lead, CHAMP section lead ISWS
-- **Bill Katzenmeyer** — CLB Engineering, RAS Commander developer; bi-weekly calls with Glenn; potential collaborator
+- **Glenn Heistand, P.E., C.F.M.** — project lead, CHAMP section lead ISWS
+- **Bill Katzenmeyer, P.E., C.F.M.** — CLB Engineering, RAS Commander developer; GitHub collaborator on ras-agent
+- **Ajith Sundarraj** — CLB Engineering, RASMapper automation development (gui-subpackage, in progress)
 - **OTM** — U of I Office of Technology Management; Glenn to email otm@illinois.edu re: open-source disclosure
 
 ---
@@ -507,6 +513,35 @@ Merged 2026-03-14.
 
 ---
 
+## Bill Katzenmeyer Contributions (CLB Engineering)
+
+### PR #1 (2026-03-14): RAS Commander API Integration
+- Updated `model_builder.py` + `results.py` with RC 0.89+ APIs (`HdfResultsMesh`, `HdfMesh`, `GeomLandCover`, `RasUtils.ignore_windows_reserved`)
+- Added full Claude Code agent infrastructure (`.claude/` directory):
+  - 6 domain specialist agents (pipeline-dev, web-dev, test-engineer, devops, hydro-reviewer, self-improver)
+  - 8 workflow skill templates
+  - 6 auto-loaded coding rules
+  - 4 hooks
+- Added `CLAUDE.md` orientation files at root, pipeline/, tests/, web/
+- Added `agent_tasks/` session state tracking templates
+
+### RasPreprocess API (2026-03-17, commit 8c0c1c8)
+- New public API: `RasPreprocess.preprocess_plan(plan_number)`
+- Automates Windows preprocessing: starts HEC-RAS, monitors `.bco` log,
+  detects "Starting Unsteady Flow Computations", kills HEC-RAS at that moment
+- Returns `PreprocessResult` with `tmp_hdf_path`, `b_file_path`, `x_file_path`, `elapsed_seconds`
+- `verify_preprocessing(plan_number)` → bool (skip if already done)
+- Ported from TN Tech dashboard implementation
+- Closes the Windows→Linux preprocessing gap in ras-agent
+
+### gui-subpackage branch (in progress)
+- GUI automation for RASMapper mesh generation
+- Uses Win32 API + mouse clicks for RASMapper operations
+- Ajith Sundarraj (CLB Engineering) leading RASMapper automation
+- Pending: call with Bill + Ajith to finalize integration approach
+
+---
+
 ## ras2cng — Cloud-Native GIS Post-Processing
 
 **ras2cng** (https://ras2cng.readthedocs.io) is a CLI/library for exporting HEC-RAS results
@@ -579,13 +614,16 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 1. ~~Phases 0–11~~ ✅ All done (117/117 tests)
 2. ~~HITL/QAQC architecture (Phases A–C)~~ ✅ Done (PRs #2–4)
 3. ~~Bump ras-commander version pin~~ ✅ Done (PR #5, >=0.89)
-4. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-5. **Call with Bill + Ajith** early week of 2026-03-16 — mesh regen + RC 0.89 API questions
-6. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²)
-7. **Docker smoke test with real run** once Windows template exists
-8. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
-9. **Phase 12:** ras2cng integration into results.py (post-call)
-10. **Future:** FIRM validation, NHD batch input generator, user auth for API
+4. ~~Windows agent scaffold~~ ✅ Done (pipeline/windows_agent.py, 8 tests)
+5. ~~RasPreprocess integration~~ ✅ Done (commit 8c0c1c8, _generate_local() implemented)
+6. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
+7. **Send reply to Bill re: RasPreprocess integration** (draft ready)
+8. **Call with Bill + Ajith** — scheduled, not yet happened as of 2026-03-17 (mesh regen + gui-subpackage)
+9. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²)
+10. **Docker smoke test with real run** once Windows template exists
+11. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
+12. **Phase 12:** ras2cng integration into results.py (post-call)
+13. **Future:** FIRM validation, NHD batch input generator, user auth for API
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`

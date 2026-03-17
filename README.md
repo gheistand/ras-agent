@@ -1,8 +1,10 @@
-# RAS Agent 🌊
+# RAS Agent
 
 **Automated 2D HEC-RAS hydraulic modeling pipeline — terrain ingestion to finished flood maps.**
 
-Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois.edu/champ) in collaboration with the [RAS Commander](https://github.com/gpt-cmdr/ras-commander) community.
+Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois.edu/champ) in collaboration with [CLB Engineering Corporation](https://clbengineering.com) and the [RAS Commander](https://github.com/gpt-cmdr/ras-commander) community.
+
+**125 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
 
 ---
 
@@ -57,7 +59,7 @@ RAS Agent automates the full HEC-RAS 2D modeling workflow:
 2. **Watershed** — Delineates watershed boundaries and stream networks from DEMs
 3. **Hydrology** — Queries the [USGS StreamStats API](https://streamstats.usgs.gov) for peak flow estimates; generates synthetic inflow hydrographs using the NRCS Unit Hydrograph method
 4. **Model Build** — Constructs HEC-RAS 6.6 input files (geometry, plan, unsteady flow, boundary conditions) using [RAS Commander](https://github.com/gpt-cmdr/ras-commander)
-5. **Mesh Generation** — Integrates with [HEC-RAS 2025](https://www.hec.usace.army.mil/software/hec-ras/2025/) for 2D computational mesh creation
+5. **Windows Preprocessing** — Runs RasPreprocess on the CHAMP Dell Precision 5860 to generate `.tmp.hdf` + `.b##` + `.x##` files for Linux compute
 6. **Execution** — Runs HEC-RAS 6.6 Linux compute engine (`RasUnsteady`) headlessly; supports parallel multi-watershed execution
 7. **Results** — Exports flood inundation extents, depth grids, and velocity rasters as shapefiles, GeoPackages, and Cloud-Optimized GeoTIFFs for ArcGIS Pro and QGIS
 
@@ -67,29 +69,44 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 
 ## Architecture
 
+### Two-Phase Windows → Linux Workflow
+
 ```
-┌─────────────────────────────────────────────────┐
-│           ORCHESTRATOR (Linux / Cloud)           │
-│  FastAPI job queue · Cloudflare Pages dashboard  │
-├──────────┬──────────┬─────────────┬─────────────┤
-│ terrain  │watershed │ streamstats │  hydrograph  │
-│  .py     │  .py     │    .py      │    .py       │
-├──────────┴──────────┴─────────────┴─────────────┤
-│          model_builder.py  (RAS Commander)       │
-├─────────────────────────────────────────────────┤
-│    runner.py  (HEC-RAS 6.6 Linux RasUnsteady)   │
-├─────────────────────────────────────────────────┤
-│         results.py  (h5py · rasterio · GDAL)    │
-└─────────────────────────────────────────────────┘
+Windows (CHAMP Dell Precision 5860 — Intel Xeon W5-2545, 128GB DDR5):
+  pipeline/windows_agent.py
+    → RasPreprocess.preprocess_plan(plan_number)
+    → monitors .bco log for "Starting Unsteady Flow Computations"
+    → kills HEC-RAS, returns .tmp.hdf + .b## + .x## files
+    → transfer preprocessed files to Linux
+
+Linux (Cloud VM — Rocky 8 / RHEL 8):
+  RasUnsteady headless compute engine (HEC-RAS 6.6 Linux)
+  Full Docker stack: docker-compose up api
 ```
 
-**Windows is only required for:** Initial HEC-RAS template project creation and mesh regeneration after perimeter update (RASMapper). All simulation execution and pre/post-processing runs on Linux or in Docker.
+### Full Pipeline Stack
+
+```
+┌─────────────────────────────────────────────────────────┐
+│           ORCHESTRATOR (Linux / Cloud)                   │
+│  FastAPI job queue · Cloudflare Pages dashboard          │
+├──────────┬──────────┬─────────────┬─────────────────────┤
+│ terrain  │watershed │ streamstats │  hydrograph          │
+│  .py     │  .py     │    .py      │    .py               │
+├──────────┴──────────┴─────────────┴─────────────────────┤
+│          model_builder.py  (RAS Commander)               │
+├─────────────────────────────────────────────────────────┤
+│  windows_agent.py (RasPreprocess → .tmp.hdf + .b## + .x##)│
+├─────────────────────────────────────────────────────────┤
+│    runner.py  (HEC-RAS 6.6 Linux RasUnsteady)           │
+├─────────────────────────────────────────────────────────┤
+│         results.py  (h5py · rasterio · GDAL)            │
+└─────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## Status
-
-**117 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
 
 | Phase | Description | Status |
 |-------|-------------|--------|
@@ -105,6 +122,8 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 | 9 | Deployment — Docker + docker-compose, RAS Commander wiring (clone + Manning's n), webhook/email notifications | ✅ Done |
 | 10 | Cloud storage — Cloudflare R2 results upload, presigned download URLs | ✅ Done |
 | 11 | Perimeter writing — watershed boundary → .g## ASCII (HEC-RAS regenerates HDF on next open) | ✅ Done |
+| HITL/QAQC | Human-in-the-loop + autonomous QA/QC — expert liaison, bounds validation, transparency logging | ✅ Done |
+| Windows Agent | Windows mesh interface — RasPreprocess API for .tmp.hdf/.b##/.x## generation | ✅ Done |
 
 **Pending (requires Windows + HEC-RAS GUI):**
 - Build first HEC-RAS template project (Windows) for real (non-mock) runs
@@ -122,6 +141,7 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 - `h5py` — HEC-RAS HDF5 results access
 - `streamstats-access` — USGS StreamStats API client
 - `ras-commander` — HEC-RAS 6.x automation (Bill Katzenmeyer / CLB Engineering)
+- `ras2cng` — cloud-native GIS post-processing (optional)
 - `numpy`, `scipy`, `pandas` — numerical and data processing
 - `fastapi` — job orchestration API
 
@@ -147,6 +167,7 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 ## Related Projects
 - [RAS Commander](https://github.com/gpt-cmdr/ras-commander) — Python API for HEC-RAS automation (CLB Engineering / Bill Katzenmeyer)
 - [pyHMT2D](https://github.com/psu-efd/pyHMT2D) — Python HEC-RAS 2D results processing
+- [ras2cng](https://ras2cng.readthedocs.io) — HEC-RAS results → cloud-native GIS formats
 
 ---
 
@@ -158,9 +179,27 @@ Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 
 ---
 
-## Acknowledgments
+## Credits
 
-Built with support from the [Illinois State Water Survey, CHAMP Section](https://isws.illinois.edu/champ).  
-Computational framework informed by [RAS Commander](https://github.com/gpt-cmdr/ras-commander) (CLB Engineering Corporation).  
-HEC-RAS software by the [US Army Corps of Engineers Hydrologic Engineering Center](https://www.hec.usace.army.mil/).  
-Terrain data from the [Illinois State Geological Survey (ISGS)](https://isgs.illinois.edu/) ILHMP clearinghouse.
+### Glenn Heistand, P.E., C.F.M. — Illinois State Water Survey, CHAMP Section
+Project lead, architecture, domain expertise.
+
+### William Katzenmeyer, P.E., C.F.M. — CLB Engineering Corporation
+Author of [RAS Commander](https://github.com/gpt-cmdr/ras-commander) (Apache 2.0) — the HEC-RAS automation library this project depends on. GitHub collaborator on ras-agent.
+
+Key contributions to ras-agent:
+- **PR #1 (2026-03-14):** Updated `model_builder.py` + `results.py` to RC 0.89+ APIs; added the full `.claude/` multi-agent infrastructure (6 specialist agents, 8 skills, 6 coding rules, 4 hooks)
+- **RasPreprocess API (2026-03-17, commit 8c0c1c8):** Implemented `_generate_local()` in `windows_agent.py` using the public `RasPreprocess.preprocess_plan()` API — closes the Windows→Linux preprocessing gap
+- **Two-phase Linux execution workflow design:** Windows preprocessing → Linux headless compute architecture
+- **gui-subpackage branch (in progress):** GUI automation for RASMapper mesh generation
+
+### Ajith Sundarraj — CLB Engineering Corporation
+RASMapper automation development (gui-subpackage, in progress). Leading the Win32 API + mouse-click automation for RASMapper mesh generation operations.
+
+### Additional Acknowledgments
+- **pyHMT2D** (Xiaofeng Liu, Penn State) — HDF file handling patterns
+- **FEMA-FFRD rashdf** — incorporated into HDF libraries
+- **Sean Micek** — funkshuns, TXTure, RASmatazz utilities (via RAS Commander lineage)
+- **Illinois State Water Survey, CHAMP Section** — institutional support
+- **US Army Corps of Engineers, Hydrologic Engineering Center** — HEC-RAS software
+- **Illinois State Geological Survey (ISGS)** — ILHMP terrain data
