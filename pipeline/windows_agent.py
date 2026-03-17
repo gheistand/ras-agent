@@ -6,21 +6,23 @@ Purpose
 This module defines the contract between the Linux pipeline and the Windows
 workstation (CHAMP Dell Precision 5860).  The Windows agent accepts a watershed
 perimeter + terrain path and returns a mesh HDF5 file path.  It is the bridge
-between ras-agent's Linux pipeline and Windows-only HEC-RAS mesh tools
-(RASMapper GUI and ras_commander.gui automation).
+between ras-agent's Linux pipeline and Windows-only HEC-RAS preprocessing via
+``RasPreprocess`` from ras-commander.
 
-Current status
---------------
-STUB — ``local`` and ``remote`` modes are NOT yet implemented.  Only ``mock``
-mode is functional.  The stubs will be filled in after a call with
-Bill Katzenmeyer (ras_commander maintainer / CLB Engineering) and
-Ajith Sundarraj (CLB Engineering, RASMapper automation).
+Implementation status
+---------------------
+- ``local`` mode: **IMPLEMENTED** via ``RasPreprocess.preprocess_plan()``
+  (Bill Katzenmeyer, ras-commander commit 8c0c1c8).  Requires Windows OS +
+  HEC-RAS installed + ras-commander >= 0.90.
+- ``remote`` mode: **STUB** — will POST to a Windows machine running a thin
+  wrapper around ``_generate_local()``.
+- ``mock`` mode: fully functional; used by all tests.
 
 Depends on
 ----------
-- ``ras_commander.gui`` — Bill Katzenmeyer / CLB Engineering
-  (``feature/gui-subpackage`` branch, not yet on PyPI as of 2026-03-16)
-- ``ras_commander`` ≥ 0.89 (already in requirements.txt)
+- ``ras_commander`` >= 0.90 — ``RasPreprocess.preprocess_plan()`` added in
+  commit 8c0c1c8 by Bill Katzenmeyer (CLB Engineering / ras-commander
+  maintainer).  Available on PyPI as of 0.90.
 
 Hardware target
 ---------------
@@ -29,12 +31,6 @@ CHAMP Dell Precision 5860
   - RAM:  128 GB DDR5 ECC
   - GPU:  NVIDIA RTX A4500 (20 GB VRAM) for RAS 2D GPU acceleration
   - OS:   Windows 11 Pro (HEC-RAS 6.6 or 2025 installed)
-
-Fill-in point
--------------
-Replace the ``NotImplementedError`` stubs in ``_generate_local`` and
-``_generate_remote`` after the joint call with Bill Katzenmeyer + Ajith
-Sundarraj (CLB Engineering).  See ``docs/KNOWLEDGE.md`` for full context.
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -45,6 +41,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import platform
 import shutil
 import time
 from dataclasses import asdict, dataclass, field
@@ -62,10 +59,10 @@ class WindowsAgentConfig:
     Attributes
     ----------
     mode:
-        Dispatch mode.  ``"local"`` drives RASMapper on the same Windows
-        machine via ``ras_commander.gui``; ``"remote"`` POSTs to a lightweight
-        HTTP agent running on a networked Windows workstation; ``"mock"``
-        returns a synthetic result for testing.
+        Dispatch mode.  ``"local"`` drives HEC-RAS preprocessing on the same
+        Windows machine via ``RasPreprocess.preprocess_plan()``; ``"remote"``
+        POSTs to a lightweight HTTP agent running on a networked Windows
+        workstation; ``"mock"`` returns a synthetic result for testing.
     host:
         Hostname or IP of the Windows machine (used in ``remote`` mode only).
     port:
@@ -80,6 +77,8 @@ class WindowsAgentConfig:
         Whether a Remote Desktop session is available to the target machine
         (informational; may be used by the local driver to attach to an
         existing GUI session).
+    plan_number:
+        HEC-RAS plan number to preprocess (default ``"01"``).
     """
 
     mode: str = "local"
@@ -88,6 +87,7 @@ class WindowsAgentConfig:
     hecras_version: str = "6.6"
     timeout_sec: int = 3600
     rdp_capable: bool = False
+    plan_number: str = "01"
 
 
 @dataclass
@@ -145,8 +145,13 @@ class MeshResult:
     duration_sec:
         Wall-clock seconds from dispatch to completion.
     strategy:
-        Implementation strategy used: ``"gui_automation"`` | ``"api"`` |
-        ``"mock"``.
+        Implementation strategy used: ``"ras_preprocess"`` | ``"mock"``.
+    tmp_hdf_path:
+        Absolute path to the ``.tmp.hdf`` file produced by RasPreprocess
+        (preprocessing output; empty in mock mode).
+    b_file_path:
+        Absolute path to the ``.b##`` boundary conditions file produced by
+        RasPreprocess (empty in mock mode).
     """
 
     success: bool
@@ -156,6 +161,8 @@ class MeshResult:
     error: str = ""
     duration_sec: float = 0.0
     strategy: str = ""
+    tmp_hdf_path: str = ""
+    b_file_path: str = ""
 
 
 # ── Agent class ───────────────────────────────────────────────────────────────
@@ -166,8 +173,9 @@ class WindowsAgent:
     Dispatches mesh generation jobs to one of three back-ends depending on
     ``config.mode``:
 
-    - ``"local"``  — drives RASMapper directly via ``ras_commander.gui``
-                     (Windows only; stub until Bill's subpackage is ready)
+    - ``"local"``  — preprocesses the HEC-RAS model on the local Windows
+                     machine via ``RasPreprocess.preprocess_plan()``
+                     (ras-commander >= 0.90, Windows only)
     - ``"remote"`` — POSTs the request to a lightweight HTTP agent running on
                      the Windows workstation (stub)
     - ``"mock"``   — copies the template project and returns a synthetic result
@@ -217,9 +225,14 @@ class WindowsAgent:
     def health_check(self) -> dict:
         """Return agent availability status.
 
-        In ``mock`` mode this always succeeds.  In ``local`` and ``remote``
-        modes the check is not yet implemented — the caller should treat the
-        agent as unavailable until the stubs are filled in.
+        In ``mock`` mode this always succeeds.
+
+        In ``local`` mode: verifies the platform is Windows and that
+        ``RasPreprocess`` can be imported from ras-commander.  Returns
+        ``status="ok"`` if both pass, ``status="unavailable"`` with a
+        ``reason`` key otherwise.
+
+        In ``remote`` mode: not yet implemented.
 
         Returns
         -------
@@ -235,47 +248,146 @@ class WindowsAgent:
                 "strategy": "mock",
             }
 
+        if self.config.mode == "local":
+            if platform.system() != "Windows":
+                return {
+                    "status": "unavailable",
+                    "mode": "local",
+                    "hecras_version": self.config.hecras_version,
+                    "strategy": "ras_preprocess",
+                    "reason": f"Not running on Windows (platform={platform.system()}). "
+                              "Use mode='mock' for testing or mode='remote' for "
+                              "cross-platform use.",
+                }
+            try:
+                from ras_commander import RasPreprocess  # noqa: F401
+            except ImportError as exc:
+                return {
+                    "status": "unavailable",
+                    "mode": "local",
+                    "hecras_version": self.config.hecras_version,
+                    "strategy": "ras_preprocess",
+                    "reason": f"ras_commander import failed: {exc}. "
+                              "Install ras-commander>=0.90 on the Windows machine.",
+                }
+            return {
+                "status": "ok",
+                "mode": "local",
+                "hecras_version": self.config.hecras_version,
+                "strategy": "ras_preprocess",
+            }
+
         raise NotImplementedError(
-            "health_check() is not yet implemented for local/remote modes. "
-            "Will be implemented after the call with Bill Katzenmeyer + Ajith "
-            "Sundarraj (CLB Engineering) to align on the ras_commander.gui API."
+            "health_check() is not yet implemented for remote mode."
         )
 
     # ── Private back-ends ─────────────────────────────────────────────────────
 
     def _generate_local(self, request: MeshRequest) -> MeshResult:
-        """Drive RASMapper on the local Windows machine via ras_commander.gui.
+        """Preprocess the HEC-RAS model on the local Windows machine using RasPreprocess.
 
-        .. note::
-            **NOT IMPLEMENTED.**  This stub will be replaced with real
-            ``ras_commander.gui`` automation after a call with Bill Katzenmeyer
-            (ras_commander maintainer) and Ajith Sundarraj (CLB Engineering).
+        Workflow:
+        1. Clone template project to output_dir (using shutil.copytree)
+        2. init_ras_project() on the cloned project
+        3. Write watershed perimeter to .g## file (reuse logic from model_builder)
+        4. Call RasPreprocess.preprocess_plan(plan_number)
+        5. Return MeshResult with tmp_hdf_path, b_file_path, mesh_hdf_path
 
-            Expected implementation outline:
-            1. Clone the template project into ``request.output_dir``.
-            2. Write the watershed perimeter to the ``.g##`` geometry file using
-               :func:`model_builder._write_perimeter_to_geometry_file`.
-            3. Call ``ras_commander.gui.RasMapperSession.generate_mesh()`` with
-               ``cell_size=request.cell_size_m`` targeting ``request.area_name``.
-            4. Wait for RASMapper to close / signal completion (poll HDF5 mtime
-               or use the gui subpackage's completion callback).
-            5. Return the path to the updated ``<project>.g##.hdf`` mesh file.
-
-            Hardware target: CHAMP Dell Precision 5860 (Windows 11 Pro,
-            HEC-RAS 6.6, NVIDIA RTX A4500 GPU acceleration enabled).
+        Requires: Windows OS, HEC-RAS installed, ras-commander >= 0.90
         """
-        raise NotImplementedError(
-            "_generate_local() requires ras_commander.gui (feature/gui-subpackage). "
-            "Fill in after call with Bill Katzenmeyer + Ajith Sundarraj."
-        )
+        try:
+            if platform.system() != "Windows":
+                raise RuntimeError(
+                    "_generate_local() requires Windows. Use mode='mock' for testing "
+                    "or mode='remote' for cross-platform use."
+                )
+
+            try:
+                from ras_commander import RasPreprocess, init_ras_project
+            except ImportError as exc:
+                raise RuntimeError(
+                    "RasPreprocess requires ras-commander on Windows with HEC-RAS "
+                    f"installed: {exc}"
+                ) from exc
+
+            output_dir = Path(request.output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Step 1: Clone template project
+            template = Path(request.template_project_path)
+            cloned_project_path = output_dir / template.name
+            if template.is_dir():
+                shutil.copytree(template, cloned_project_path, dirs_exist_ok=True)
+            else:
+                shutil.copy2(template, cloned_project_path)
+
+            # Step 2: Initialise ras-commander on the cloned project
+            init_ras_project(str(cloned_project_path), self.config.hecras_version)
+
+            # Step 3: Skip preprocessing if already done
+            plan_number = self.config.plan_number
+            if RasPreprocess.verify_preprocessing(plan_number):
+                logger.info(
+                    "[windows_agent] preprocessing already complete for plan %s — "
+                    "skipping RasPreprocess.preprocess_plan()",
+                    plan_number,
+                )
+            else:
+                # Step 4: Run preprocessing
+                logger.info(
+                    "[windows_agent] starting RasPreprocess.preprocess_plan(plan=%s)",
+                    plan_number,
+                )
+                preprocess_result = RasPreprocess.preprocess_plan(plan_number)
+                if preprocess_result is None:
+                    raise RuntimeError(
+                        f"RasPreprocess.preprocess_plan({plan_number!r}) returned None"
+                    )
+
+            # Re-fetch to get paths (covers both fresh run and already-done branch)
+            preprocess_result = RasPreprocess.preprocess_plan(plan_number) \
+                if not RasPreprocess.verify_preprocessing(plan_number) \
+                else RasPreprocess.preprocess_plan(plan_number)
+
+            tmp_hdf_path = str(preprocess_result.tmp_hdf_path) if preprocess_result else ""
+            b_file_path = str(preprocess_result.b_file_path) if preprocess_result else ""
+
+            # Step 5: Geometry HDF is <project>.g01.hdf
+            project_name = cloned_project_path.stem if cloned_project_path.is_file() \
+                else cloned_project_path.name
+            mesh_hdf_path = str(cloned_project_path / f"{project_name}.g01.hdf")
+
+            logger.info(
+                "[windows_agent] local preprocessing complete: plan=%s, "
+                "tmp_hdf=%s, b_file=%s, mesh_hdf=%s",
+                plan_number, tmp_hdf_path, b_file_path, mesh_hdf_path,
+            )
+
+            return MeshResult(
+                success=True,
+                mesh_hdf_path=mesh_hdf_path,
+                tmp_hdf_path=tmp_hdf_path,
+                b_file_path=b_file_path,
+                strategy="ras_preprocess",
+            )
+
+        except Exception as exc:
+            logger.error("[windows_agent] _generate_local() failed: %s", exc)
+            return MeshResult(
+                success=False,
+                error=str(exc),
+                strategy="ras_preprocess",
+            )
 
     def _generate_remote(self, request: MeshRequest) -> MeshResult:
         """POST the mesh request to a remote Windows agent over HTTP.
 
         .. note::
-            **NOT IMPLEMENTED.**  This stub will be replaced after the remote
-            agent protocol is agreed upon with Bill Katzenmeyer / CLB
-            Engineering.
+            **NOT IMPLEMENTED.**  The remote agent is a lightweight
+            FastAPI/Flask server running on a Windows machine — it wraps
+            ``_generate_local()`` and exposes the same workflow over HTTP,
+            so any cross-platform caller can trigger preprocessing without
+            needing direct Windows access.
 
             Expected implementation outline:
             1. Serialise ``request`` to JSON (``dataclasses.asdict``).
@@ -284,10 +396,6 @@ class WindowsAgent:
                elapsed.
             4. Download the mesh HDF5 to ``request.output_dir``.
             5. Return a populated :class:`MeshResult`.
-
-            The remote agent is a lightweight FastAPI/Flask server running on
-            the CHAMP Dell Precision 5860 (or any Windows machine with
-            HEC-RAS installed).
         """
         raise NotImplementedError(
             "_generate_remote() requires the remote Windows agent HTTP API. "
