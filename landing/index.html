@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAS Agent — Automated 2D HEC-RAS Hydraulic Modeling</title>
+  <meta name="description" content="RAS Agent automates the full end-to-end HEC-RAS 2D hydraulic modeling workflow — terrain ingestion through flood map export. Open source, Docker-ready, 125 tests passing." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg-base:    #0f172a;
+      --bg-surface: #1e293b;
+      --bg-card:    #162032;
+      --border:     #334155;
+      --teal:       #06b6d4;
+      --teal-dim:   #0891b2;
+      --teal-glow:  rgba(6, 182, 212, 0.15);
+      --text:       #f1f5f9;
+      --text-muted: #94a3b8;
+      --text-dim:   #64748b;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--bg-base);
+      color: var(--text);
+      line-height: 1.6;
+      font-size: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--teal); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── NAV ─────────────────────────────────────── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+      height: 60px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .nav-logo {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .nav-logo span {
+      color: var(--teal);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .nav-link {
+      font-size: 0.875rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      transition: color 0.15s;
+    }
+    .nav-link:hover { color: var(--text); text-decoration: none; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.45rem 1rem;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      transition: all 0.15s;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .btn-primary {
+      background: var(--teal);
+      color: #0f172a;
+    }
+    .btn-primary:hover {
+      background: #22d3ee;
+      text-decoration: none;
+      color: #0f172a;
+    }
+
+    .btn-outline {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-outline:hover {
+      border-color: var(--teal);
+      color: var(--teal);
+      text-decoration: none;
+    }
+
+    /* ── LAYOUT ───────────────────────────────────── */
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    section { padding: 5rem 0; }
+
+    .section-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--teal);
+      margin-bottom: 0.75rem;
+    }
+
+    h2 {
+      font-size: 1.875rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      margin-bottom: 1rem;
+    }
+
+    /* ── HERO ─────────────────────────────────────── */
+    .hero {
+      padding: 9rem 0 6rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero::before {
+      content: '';
+      position: absolute;
+      top: -120px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 700px;
+      height: 700px;
+      background: radial-gradient(ellipse, rgba(6, 182, 212, 0.08) 0%, transparent 70%);
+      pointer-events: none;
+    }
+
+    .hero-eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--teal);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      background: rgba(6, 182, 212, 0.07);
+      border-radius: 100px;
+      padding: 0.3rem 0.9rem;
+      margin-bottom: 1.75rem;
+    }
+
+    .hero h1 {
+      font-size: clamp(2.25rem, 5vw, 3.5rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      color: var(--text);
+      max-width: 820px;
+      margin-bottom: 1.25rem;
+    }
+
+    .hero h1 em {
+      font-style: normal;
+      color: var(--teal);
+    }
+
+    .hero-sub {
+      font-size: 1.125rem;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin-bottom: 2.25rem;
+      font-weight: 400;
+      line-height: 1.7;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .hero-actions .btn {
+      padding: 0.65rem 1.4rem;
+      font-size: 0.925rem;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.78rem;
+      font-weight: 500;
+      font-family: 'JetBrains Mono', monospace;
+      padding: 0.3rem 0.75rem;
+      border-radius: 5px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    .badge .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #22c55e;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+
+    /* ── PIPELINE ─────────────────────────────────── */
+    #pipeline { background: var(--bg-surface); }
+
+    .pipeline-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      margin-top: 2.5rem;
+    }
+
+    .pipeline-stage {
+      padding: 1.5rem 1.25rem;
+      border-right: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-card);
+      position: relative;
+      transition: background 0.15s;
+    }
+
+    .pipeline-stage:hover { background: #1a2942; }
+
+    .pipeline-stage:last-child { border-right: none; }
+
+    .stage-num {
+      font-size: 0.7rem;
+      font-weight: 600;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--teal);
+      letter-spacing: 0.08em;
+      margin-bottom: 0.6rem;
+    }
+
+    .stage-icon {
+      font-size: 1.6rem;
+      line-height: 1;
+      margin-bottom: 0.6rem;
+    }
+
+    .stage-name {
+      font-size: 0.9rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 0.35rem;
+    }
+
+    .stage-desc {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .pipeline-arrow {
+      display: none; /* hidden in grid — flow implied by order */
+    }
+
+    /* ── FEATURES ─────────────────────────────────── */
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+      gap: 1.25rem;
+      margin-top: 2.5rem;
+    }
+
+    .feature-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .feature-card:hover {
+      border-color: rgba(6, 182, 212, 0.4);
+      background: #1a2535;
+    }
+
+    .feature-icon {
+      font-size: 1.75rem;
+      margin-bottom: 1rem;
+    }
+
+    .feature-title {
+      font-size: 1rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 0.5rem;
+    }
+
+    .feature-body {
+      font-size: 0.875rem;
+      color: var(--text-muted);
+      line-height: 1.65;
+    }
+
+    .code-block {
+      margin-top: 1rem;
+      background: var(--bg-base);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem 1rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      color: #7dd3fc;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* ── BUILT BY ─────────────────────────────────── */
+    #built-by {
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 3.5rem 0;
+    }
+
+    .built-by-inner {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 2rem;
+      align-items: flex-start;
+    }
+
+    .built-by-block { flex: 1; min-width: 220px; }
+
+    .built-by-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 0.5rem;
+    }
+
+    .built-by-name {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 0.2rem;
+    }
+
+    .built-by-sub {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* ── FOOTER ───────────────────────────────────── */
+    footer {
+      padding: 2rem 0;
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-inner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .footer-left {
+      font-size: 0.825rem;
+      color: var(--text-dim);
+    }
+
+    .footer-right {
+      display: flex;
+      gap: 1.25rem;
+      align-items: center;
+    }
+
+    .footer-right a {
+      font-size: 0.825rem;
+      color: var(--text-dim);
+      transition: color 0.15s;
+    }
+    .footer-right a:hover { color: var(--teal); text-decoration: none; }
+
+    /* ── RESPONSIVE ───────────────────────────────── */
+    @media (max-width: 640px) {
+      .pipeline-grid { grid-template-columns: 1fr 1fr; }
+      .nav-logo { font-size: 0.95rem; }
+      .hero { padding: 7.5rem 0 4.5rem; }
+    }
+    @media (max-width: 420px) {
+      .pipeline-grid { grid-template-columns: 1fr; }
+      .pipeline-stage { border-right: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <div class="nav-logo">
+      <span>▦</span> RAS Agent
+    </div>
+    <div class="nav-actions">
+      <a href="#pipeline" class="nav-link">Pipeline</a>
+      <a href="#features" class="nav-link">Features</a>
+      <a href="https://github.com/gheistand/ras-agent" class="nav-link" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/gheistand/ras-agent" class="btn btn-primary" target="_blank" rel="noopener">Get Started</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-eyebrow">
+      ⚡ Open Source · Apache 2.0
+    </div>
+    <h1>Automated 2D HEC-RAS Hydraulic Modeling — <em>Terrain to Flood Maps</em></h1>
+    <p class="hero-sub">
+      RAS Agent runs the complete HEC-RAS 2D workflow in a single command — from raw terrain data through watershed delineation, peak flow estimation, mesh build, model execution, and GIS results export.
+    </p>
+    <div class="hero-actions">
+      <a href="https://github.com/gheistand/ras-agent" class="btn btn-primary" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+      <a href="https://github.com/gheistand/ras-agent#readme" class="btn btn-outline" target="_blank" rel="noopener">
+        Read the Docs
+      </a>
+    </div>
+    <div class="badge-row">
+      <span class="badge"><span class="dot"></span>125 tests passing</span>
+      <span class="badge">Apache 2.0</span>
+      <span class="badge">Docker ready</span>
+      <span class="badge">HEC-RAS 2D</span>
+      <span class="badge">Python 3.11</span>
+    </div>
+  </div>
+</section>
+
+<!-- PIPELINE -->
+<section id="pipeline">
+  <div class="container">
+    <div class="section-label">Pipeline</div>
+    <h2>Eight stages. One command.</h2>
+    <p style="color:var(--text-muted); max-width:580px; font-size:0.95rem;">
+      Each stage is independently testable and produces typed result objects. Run the full
+      pipeline or individual stages — with mock mode for testing without live data or a
+      HEC-RAS license.
+    </p>
+
+    <div class="pipeline-grid">
+      <div class="pipeline-stage">
+        <div class="stage-num">01</div>
+        <div class="stage-icon">🗺️</div>
+        <div class="stage-name">Terrain</div>
+        <div class="stage-desc">Download &amp; mosaic LiDAR DEMs (ILHMP + USGS 3DEP fallback). Reproject to EPSG:5070.</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">02</div>
+        <div class="stage-icon">🌊</div>
+        <div class="stage-name">Watershed</div>
+        <div class="stage-desc">D8 flow direction &amp; accumulation via pysheds. Delineate contributing area and main channel.</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">03</div>
+        <div class="stage-icon">📈</div>
+        <div class="stage-name">StreamStats</div>
+        <div class="stage-desc">Query USGS StreamStats API for peak flows. Falls back to IL regression equations (SIR 2008-5176).</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">04</div>
+        <div class="stage-icon">〰️</div>
+        <div class="stage-name">Hydrograph</div>
+        <div class="stage-desc">Generate NRCS Dimensionless Unit Hydrographs. Compute Tc via Kirpich method.</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">05</div>
+        <div class="stage-icon">🔲</div>
+        <div class="stage-name">Mesh Build</div>
+        <div class="stage-desc">Select cell size by drainage area. Write 2D mesh perimeter geometry to HEC-RAS project.</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">06</div>
+        <div class="stage-icon">🏗️</div>
+        <div class="stage-name">Model Build</div>
+        <div class="stage-desc">Clone template project. Assign Manning's n from NLCD. Set boundary conditions and simulation window.</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">07</div>
+        <div class="stage-icon">⚙️</div>
+        <div class="stage-name">HEC-RAS Run</div>
+        <div class="stage-desc">Execute RasUnsteady via SQLite job queue. Monitor run status and capture logs.</div>
+      </div>
+      <div class="pipeline-stage" style="border-right:none;">
+        <div class="stage-num">08</div>
+        <div class="stage-icon">📦</div>
+        <div class="stage-name">Results Export</div>
+        <div class="stage-desc">Extract HDF5 outputs. Write Cloud-Optimized GeoTIFFs, GeoPackage, and Shapefile per return period.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features">
+  <div class="container">
+    <div class="section-label">Features</div>
+    <h2>Engineered for the H&amp;H workflow</h2>
+    <p style="color:var(--text-muted); max-width:580px; font-size:0.95rem;">
+      Built by engineers for engineers. Designed to handle the unglamorous parts of hydraulic
+      modeling — data wrangling, format conversion, and model assembly — so you can focus on
+      review and QA.
+    </p>
+
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">⚡</div>
+        <div class="feature-title">Fully Automated</div>
+        <div class="feature-body">
+          One command runs the entire pipeline from coordinates to flood maps. Batch mode
+          processes multiple watersheds in parallel. Human-in-the-loop pauses route scientific
+          decisions to the engineer — never silent autonomy on regulatory choices.
+        </div>
+        <div class="code-block">python pipeline/orchestrator.py \
+  --lon -88.578 --lat 40.021 \
+  --output ./output/test</div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🐳</div>
+        <div class="feature-title">Docker Ready</div>
+        <div class="feature-body">
+          Reproducible environment with GDAL, pysheds, and all geospatial dependencies
+          pre-installed. FastAPI server and web dashboard included. Deploy anywhere Docker runs —
+          workstation, HPC, or cloud.
+        </div>
+        <div class="code-block">docker-compose up api
+
+# With web dashboard:
+docker-compose \
+  --profile dev up</div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🧪</div>
+        <div class="feature-title">Mock Mode</div>
+        <div class="feature-body">
+          Run the complete pipeline workflow without real terrain data, a live StreamStats
+          connection, or a HEC-RAS license. 125 tests pass in CI. Every HTTP call is mocked —
+          no network access required to run the test suite.
+        </div>
+        <div class="code-block">python pipeline/orchestrator.py \
+  --lon -88.578 --lat 40.021 \
+  --output ./output/test \
+  --mock
+
+python -m pytest tests/ -v</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- BUILT BY -->
+<section id="built-by">
+  <div class="container">
+    <div class="section-label">Provenance</div>
+    <h2 style="margin-bottom:2rem;">Built by the H&amp;H community</h2>
+    <div class="built-by-inner">
+      <div class="built-by-block">
+        <div class="built-by-label">Primary Developer</div>
+        <div class="built-by-name">CHAMP Section</div>
+        <div class="built-by-sub">Illinois State Water Survey<br>Prairie Research Institute, UIUC</div>
+      </div>
+      <div class="built-by-block">
+        <div class="built-by-label">In Collaboration With</div>
+        <div class="built-by-name">CLB Engineering Corporation</div>
+        <div class="built-by-sub">Hydraulic modeling expertise<br>and workflow validation</div>
+      </div>
+      <div class="built-by-block">
+        <div class="built-by-label">Community</div>
+        <div class="built-by-name">RAS Commander</div>
+        <div class="built-by-sub">Open source HEC-RAS automation<br>tooling community</div>
+      </div>
+      <div class="built-by-block">
+        <div class="built-by-label">Project</div>
+        <div class="built-by-name"><a href="https://reepworks.com" target="_blank" rel="noopener" style="color:var(--text);">Reep Works LLC</a></div>
+        <div class="built-by-sub">reepworks.com</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <div class="footer-left">
+        RAS Agent · Apache 2.0 License · Built at CHAMP, Illinois State Water Survey
+      </div>
+      <div class="footer-right">
+        <a href="https://github.com/gheistand/ras-agent" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/gheistand/ras-agent/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+        <a href="https://reepworks.com" target="_blank" rel="noopener">reepworks.com</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
