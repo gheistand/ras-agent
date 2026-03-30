@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import time
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'pipeline'))
@@ -22,6 +23,7 @@ from runner import (
     run_job,
     run_queue,
     _init_db,
+    _extract_plan_number,
 )
 
 
@@ -269,3 +271,165 @@ class TestRunQueue:
             logs_dir=logs_dir,
         )
         assert list_jobs(db_path=tmp_db) == []
+
+
+# ── preprocess_mode tests ──────────────────────────────────────────────────────
+
+class TestPreprocessMode:
+    def test_enqueue_stores_default_preprocess_mode(self, tmp_db, tmp_project):
+        """Default preprocess_mode should be 'linux'."""
+        project_dir, plan_hdf = tmp_project
+        job_id = enqueue_job("p_default", str(project_dir), str(plan_hdf), db_path=tmp_db)
+        job = get_job(job_id, db_path=tmp_db)
+        assert job["preprocess_mode"] == "linux"
+
+    def test_enqueue_stores_custom_preprocess_mode(self, tmp_db, tmp_project):
+        """preprocess_mode='skip' should be stored on the job."""
+        project_dir, plan_hdf = tmp_project
+        job_id = enqueue_job(
+            "p_skip", str(project_dir), str(plan_hdf),
+            db_path=tmp_db, preprocess_mode="skip",
+        )
+        job = get_job(job_id, db_path=tmp_db)
+        assert job["preprocess_mode"] == "skip"
+
+    def test_enqueue_windows_preprocess_mode(self, tmp_db, tmp_project):
+        """preprocess_mode='windows' should be stored on the job."""
+        project_dir, plan_hdf = tmp_project
+        job_id = enqueue_job(
+            "p_win", str(project_dir), str(plan_hdf),
+            db_path=tmp_db, preprocess_mode="windows",
+        )
+        job = get_job(job_id, db_path=tmp_db)
+        assert job["preprocess_mode"] == "windows"
+
+    def test_run_job_skip_mode_completes(self, tmp_db, tmp_project, logs_dir):
+        """run_job with preprocess_mode='skip' and mock=True should complete."""
+        project_dir, plan_hdf = tmp_project
+        job_id = enqueue_job(
+            "skip_run", str(project_dir), str(plan_hdf),
+            db_path=tmp_db, preprocess_mode="skip",
+        )
+        ok = run_job(
+            job_id,
+            ras_exe_dir=Path("/fake/ras/bin"),
+            mock=True,
+            db_path=tmp_db,
+            logs_dir=logs_dir,
+        )
+        assert ok is True
+        assert get_job(job_id, db_path=tmp_db)["status"] == "complete"
+
+    def test_run_job_linux_mode_mock_completes(self, tmp_db, tmp_project, logs_dir):
+        """run_job with preprocess_mode='linux' and mock=True should skip ras_preprocess
+        and complete (mock bypasses all real preprocessing)."""
+        project_dir, plan_hdf = tmp_project
+        job_id = enqueue_job(
+            "linux_mock", str(project_dir), str(plan_hdf),
+            db_path=tmp_db, preprocess_mode="linux",
+        )
+        ok = run_job(
+            job_id,
+            ras_exe_dir=Path("/fake/ras/bin"),
+            mock=True,
+            db_path=tmp_db,
+            logs_dir=logs_dir,
+        )
+        assert ok is True
+        assert get_job(job_id, db_path=tmp_db)["status"] == "complete"
+
+    def test_run_job_linux_mode_calls_ras_preprocess(self, tmp_db, tmp_project, logs_dir):
+        """run_job with preprocess_mode='linux' (non-mock) should call ras_preprocess.py."""
+        import h5py
+        import runner as runner_mod
+
+        project_dir, plan_hdf = tmp_project
+
+        # Build a fake .tmp.hdf that _run_linux_preprocess would produce
+        tmp_hdf_path = plan_hdf.with_suffix(".tmp.hdf")
+
+        def fake_linux_preprocess(project_dir, plan_hdf, log_path, env):
+            """Simulate ras_preprocess.py creating a tmp.hdf."""
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("[mock linux-preprocess] done\n")
+            with h5py.File(str(tmp_hdf_path), "w") as hf:
+                hf.create_group("Geometry")
+            return tmp_hdf_path
+
+        job_id = enqueue_job(
+            "linux_real", str(project_dir), str(plan_hdf),
+            db_path=tmp_db, preprocess_mode="linux",
+        )
+
+        with unittest.mock.patch.object(runner_mod, "_run_linux_preprocess",
+                                        side_effect=fake_linux_preprocess) as mock_pre, \
+             unittest.mock.patch("subprocess.Popen") as mock_popen:
+            # Make RasUnsteady appear to succeed
+            mock_proc = unittest.mock.MagicMock()
+            mock_proc.wait.return_value = 0
+            mock_popen.return_value = mock_proc
+
+            ok = run_job(
+                job_id,
+                ras_exe_dir=Path("/fake/ras/bin"),
+                mock=False,
+                db_path=tmp_db,
+                logs_dir=logs_dir,
+                preprocess_mode="linux",
+            )
+
+        assert mock_pre.called, "_run_linux_preprocess should have been called"
+        # Job may complete or fail depending on file cleanup; just verify preprocess was called
+
+    def test_schema_migration_adds_preprocess_mode(self, tmp_path):
+        """_init_db() on a legacy DB without preprocess_mode column should add it."""
+        import sqlite3
+        db_path = tmp_path / "legacy.db"
+        # Create a DB with the old schema (no preprocess_mode column)
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("""
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                project_dir TEXT NOT NULL,
+                plan_hdf TEXT NOT NULL,
+                geom_ext TEXT NOT NULL DEFAULT 'g01',
+                return_period_yr INTEGER,
+                status TEXT NOT NULL DEFAULT 'queued',
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                error_msg TEXT,
+                log_path TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                results_dir TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        # _init_db should migrate the schema
+        _init_db(db_path)
+
+        conn = sqlite3.connect(str(db_path))
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+        conn.close()
+        assert "preprocess_mode" in cols
+
+
+class TestExtractPlanNumber:
+    def test_standard_plan_number(self):
+        assert _extract_plan_number(Path("Muncie.p04.hdf")) == "04"
+
+    def test_plan_01(self):
+        assert _extract_plan_number(Path("BEC.p01.hdf")) == "01"
+
+    def test_plan_two_digits(self):
+        assert _extract_plan_number(Path("Project.p12.hdf")) == "12"
+
+    def test_fallback_on_no_match(self):
+        assert _extract_plan_number(Path("weirdfile.hdf")) == "01"
+
+    def test_path_object(self):
+        from pathlib import Path
+        assert _extract_plan_number(Path("/abs/path/MyProj.p03.hdf")) == "03"

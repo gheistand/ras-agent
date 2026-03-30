@@ -5,15 +5,28 @@ Purpose
 -------
 This module defines the contract between the Linux pipeline and the Windows
 workstation (CHAMP Dell Precision 5860).  The Windows agent accepts a watershed
-perimeter + terrain path and returns a mesh HDF5 file path.  It is the bridge
-between ras-agent's Linux pipeline and Windows-only HEC-RAS preprocessing via
-``RasPreprocess`` from ras-commander.
+perimeter + terrain path and returns a mesh HDF5 file path.  Its role in the
+overall pipeline has narrowed as Linux preprocessing capabilities have matured:
+
+**Updated role (2026-03):**
+  The Windows agent is now responsible **only for initial mesh creation in
+  RASMapper** — generating the ``.g01.hdf`` mesh topology file.  It is no
+  longer needed for geometry preprocessing (building hydraulic tables).
+
+  Geometry preprocessing (volume-elevation curves, face area-elevation,
+  Manning's *n*, infiltration, BC external faces) is now performed entirely
+  on Linux by ``vendor/hecras-v66-linux/ras_preprocess.py``
+  (github.com/neeraip/hecras-v66-linux), invoked by
+  ``runner.py:_run_linux_preprocess()`` when ``preprocess_mode='linux'``.
 
 Implementation status
 ---------------------
 - ``local`` mode: **IMPLEMENTED** via ``RasPreprocess.preprocess_plan()``
   (Bill Katzenmeyer, ras-commander commit 8c0c1c8).  Requires Windows OS +
   HEC-RAS installed + ras-commander >= 0.90.
+  **Note:** As of 2026-03, the Windows RasPreprocess step is only required
+  when Windows mesh generation (``.g01.hdf``) is not yet available.  For
+  re-runs and CI pipelines, use ``preprocess_mode='linux'`` in runner.py.
 - ``remote`` mode: **STUB** — will POST to a Windows machine running a thin
   wrapper around ``_generate_local()``.
 - ``mock`` mode: fully functional; used by all tests.
@@ -284,7 +297,14 @@ class WindowsAgent:
     # ── Private back-ends ─────────────────────────────────────────────────────
 
     def _generate_local(self, request: MeshRequest) -> MeshResult:
-        """Preprocess the HEC-RAS model on the local Windows machine using RasPreprocess.
+        """Generate the RASMapper mesh HDF on the local Windows machine using RasPreprocess.
+
+        **Note:** As of 2026-03, this method's role is limited to *mesh creation*
+        (producing ``.g01.hdf`` from seed points / perimeter in the ``.g01`` text
+        file).  Geometry preprocessing — building hydraulic tables (volume-elevation
+        curves, face area-elevation, Manning's *n*, infiltration, BC external faces)
+        — is now handled on Linux by ``vendor/hecras-v66-linux/ras_preprocess.py``
+        via ``runner.py:_run_linux_preprocess()`` (``preprocess_mode='linux'``).
 
         Workflow:
         1. Clone template project to output_dir (using shutil.copytree)

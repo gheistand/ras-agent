@@ -69,19 +69,52 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 
 ## Architecture
 
-### Two-Phase Windows → Linux Workflow
+### Linux Geometry Preprocessing (as of 2026-03)
+
+Geometry preprocessing — building hydraulic tables (volume-elevation curves,
+face area-elevation, Manning's *n*, infiltration, BC external faces) — now runs
+entirely on Linux via `vendor/hecras-v66-linux/ras_preprocess.py`
+([github.com/neeraip/hecras-v66-linux](https://github.com/neeraip/hecras-v66-linux),
+verified 0.000–0.001 ft WSE accuracy vs. GUI on Muncie, BEC, VA models).
+
+**Windows is now only required for initial mesh creation in RASMapper.**
+Once a `.g01.hdf` mesh topology file exists, the full pipeline runs headlessly on Linux.
+
+```
+Windows (mesh creation only — one-time per project):
+  pipeline/windows_agent.py
+    → RASMapper: draw perimeter + seed points → g01.hdf
+
+Linux (geometry compute + simulation — fully automated):
+  runner.py (preprocess_mode='linux', the default)
+    → ras_preprocess.py   builds hydraulic tables → p{N}.tmp.hdf
+    → RasGeomPreprocess   adds internal solver index tables
+    → RasUnsteady         runs the simulation
+  Full Docker stack: docker-compose up api
+```
+
+**Three preprocessing workflows** (auto-detected by `ras_preprocess.py`):
+
+| Workflow | When | Use case |
+|----------|------|---------|
+| **A** | `g01.hdf` fully computed + `p01.hdf` exists | Re-run an existing Windows/GUI project on Linux |
+| **B** | `g01.hdf` (RASMapper mesh), no hydraulic tables | Standard ras-agent path |
+| **C** | No `g01.hdf` | Build mesh from `.g01` seed points + full geometry compute |
+
+### Legacy Two-Phase Windows → Linux Workflow
+
+The old Windows preprocessing path (`preprocess_mode='windows'` or `'skip'`) is still
+supported for projects where Windows preprocessing was already performed:
 
 ```
 Windows (CHAMP Dell Precision 5860 — Intel Xeon W5-2545, 128GB DDR5):
   pipeline/windows_agent.py
     → RasPreprocess.preprocess_plan(plan_number)
-    → monitors .bco log for "Starting Unsteady Flow Computations"
-    → kills HEC-RAS, returns .tmp.hdf + .b## + .x## files
-    → transfer preprocessed files to Linux
+    → returns .tmp.hdf + .b## + .x## files
 
 Linux (Cloud VM — Rocky 8 / RHEL 8):
-  RasUnsteady headless compute engine (HEC-RAS 6.6 Linux)
-  Full Docker stack: docker-compose up api
+  runner.py (preprocess_mode='skip')
+    → RasUnsteady headless compute engine (HEC-RAS 6.6 Linux)
 ```
 
 ### Full Pipeline Stack
@@ -124,10 +157,12 @@ Linux (Cloud VM — Rocky 8 / RHEL 8):
 | 11 | Perimeter writing — watershed boundary → .g## ASCII (HEC-RAS regenerates HDF on next open) | ✅ Done |
 | HITL/QAQC | Human-in-the-loop + autonomous QA/QC — expert liaison, bounds validation, transparency logging | ✅ Done |
 | Windows Agent | Windows mesh interface — RasPreprocess API for .tmp.hdf/.b##/.x## generation | ✅ Done |
+| Linux Preprocessor | hecras-v66-linux integration — geometry compute on Linux, Windows dependency reduced to mesh creation only | ✅ Done |
 
 **Pending (requires Windows + HEC-RAS GUI):**
 - Build first HEC-RAS template project (Windows) for real (non-mock) runs
 - Mesh regeneration automation after perimeter update (RASMapper — in development by CLB Engineering / Ajith Sundarraj)
+- Download hecras-v66-linux git LFS binaries (`cd vendor/hecras-v66-linux && git lfs pull`) for real runs
 
 ---
 

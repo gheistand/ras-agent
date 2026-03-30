@@ -13,9 +13,11 @@ Apache License 2.0
 
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -33,6 +35,8 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB = _REPO_ROOT / "data" / "jobs.db"
 _DEFAULT_LOGS = _REPO_ROOT / "data" / "logs"
+_VENDOR_ROOT = _REPO_ROOT / "vendor" / "hecras-v66-linux"
+_RAS_PREPROCESS = _VENDOR_ROOT / "ras_preprocess.py"
 
 JOB_TIMEOUT_SEC = 4 * 60 * 60    # 4-hour hard limit per job
 RETRY_DELAY_SEC = 30              # wait between attempt 1 and attempt 2
@@ -54,7 +58,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     error_msg TEXT,
     log_path TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    results_dir TEXT          -- set after results.export_results() completes
+    results_dir TEXT,         -- set after results.export_results() completes
+    preprocess_mode TEXT NOT NULL DEFAULT 'linux'  -- 'linux', 'windows', or 'skip'
 );
 """
 
@@ -74,10 +79,15 @@ def _init_db(db_path: Optional[Path] = None) -> None:
     """Create the jobs table if it does not exist, and migrate schema."""
     with _get_conn(db_path) as conn:
         conn.executescript(_DDL)
-        # Migrate: add results_dir column to existing databases
+        # Migrate: add columns to existing databases
         cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
         if "results_dir" not in cols:
             conn.execute("ALTER TABLE jobs ADD COLUMN results_dir TEXT")
+            conn.commit()
+        if "preprocess_mode" not in cols:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN preprocess_mode TEXT NOT NULL DEFAULT 'linux'"
+            )
             conn.commit()
 
 
@@ -98,6 +108,7 @@ def enqueue_job(
     geom_ext: str = "g01",
     return_period_yr: Optional[int] = None,
     db_path: Optional[Path] = None,
+    preprocess_mode: str = "linux",
 ) -> str:
     """
     Insert a new job into the queue with status='queued'.
@@ -109,6 +120,13 @@ def enqueue_job(
         geom_ext:         Geometry file extension (e.g., 'g01', 'x04').
         return_period_yr: Return period in years (2, 5, 10, 25, 50, 100, 500).
         db_path:          Override default DB location (useful for testing).
+        preprocess_mode:  Geometry preprocessing mode:
+                          ``'linux'``   — run ras_preprocess.py (vendor/hecras-v66-linux)
+                                          to compute hydraulic tables on Linux (default);
+                          ``'windows'`` — geometry was preprocessed by windows_agent.py
+                                          (RasPreprocess on Windows), skip recompute;
+                          ``'skip'``    — geometry tables already present, just strip
+                                          Results and run RasUnsteady directly.
 
     Returns:
         job_id as a UUID4 string.
@@ -118,16 +136,16 @@ def enqueue_job(
     sql = """
         INSERT INTO jobs
             (id, name, project_dir, plan_hdf, geom_ext, return_period_yr,
-             status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?)
+             status, created_at, preprocess_mode)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
     """
     with _get_conn(db_path) as conn:
         conn.execute(sql, (
             job_id, name, str(project_dir), str(plan_hdf),
-            geom_ext, return_period_yr, _now_iso(),
+            geom_ext, return_period_yr, _now_iso(), preprocess_mode,
         ))
         conn.commit()
-    logger.info(f"Enqueued job {job_id} ({name})")
+    logger.info(f"Enqueued job {job_id} ({name}, preprocess={preprocess_mode})")
     return job_id
 
 
@@ -252,6 +270,88 @@ def _prepare_run(project_dir: Path, plan_hdf: Path) -> Path:
     return tmp_hdf
 
 
+# ── Linux Preprocessing ───────────────────────────────────────────────────────
+
+def _extract_plan_number(plan_hdf: Path) -> str:
+    """Extract the plan number digits from a plan HDF filename.
+
+    Args:
+        plan_hdf: Path like ``Muncie.p04.hdf``.
+
+    Returns:
+        Plan number string, e.g. ``'04'``.  Falls back to ``'01'`` if the
+        filename does not match the expected pattern.
+    """
+    match = re.search(r'\.p(\d+)$', plan_hdf.stem, re.IGNORECASE)
+    return match.group(1) if match else "01"
+
+
+def _run_linux_preprocess(
+    project_dir: Path,
+    plan_hdf: Path,
+    log_path: Path,
+    env: dict,
+) -> Path:
+    """Run ras_preprocess.py to compute geometry hydraulic tables on Linux.
+
+    Replicates the HEC-RAS GUI "Compute Geometry" step entirely in Python,
+    producing a ``p{N}.tmp.hdf`` ready for ``RasGeomPreprocess`` + ``RasUnsteady``.
+
+    Uses ``vendor/hecras-v66-linux/ras_preprocess.py`` (github.com/neeraip/hecras-v66-linux).
+
+    Args:
+        project_dir: Path to the HEC-RAS project directory.
+        plan_hdf:    Path to the plan HDF file (e.g., ``Muncie.p04.hdf``).
+        log_path:    Path to the log file (output is appended).
+        env:         OS environment dict passed to subprocess.
+
+    Returns:
+        Path to the generated ``.tmp.hdf`` file in ``project_dir``.
+
+    Raises:
+        RuntimeError: If ``ras_preprocess.py`` is missing, exits non-zero,
+                      or does not produce the expected output file.
+    """
+    if not _RAS_PREPROCESS.exists():
+        raise RuntimeError(
+            f"ras_preprocess.py not found at {_RAS_PREPROCESS}. "
+            "Ensure vendor/hecras-v66-linux is present "
+            "(git clone https://github.com/neeraip/hecras-v66-linux vendor/hecras-v66-linux)."
+        )
+    plan_number = _extract_plan_number(plan_hdf)
+    cmd = [
+        sys.executable, str(_RAS_PREPROCESS),
+        str(project_dir),
+        "--plan", plan_number,
+        "--output-dir", str(project_dir),
+    ]
+    logger.info(
+        "[linux-preprocess] ras_preprocess.py project=%s plan=%s",
+        project_dir.name, plan_number,
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a") as log_fh:
+        log_fh.write(f"[linux-preprocess] cmd: {' '.join(cmd)}\n")
+        rc = subprocess.call(cmd, stdout=log_fh, stderr=subprocess.STDOUT, env=env)
+    if rc != 0:
+        raise RuntimeError(
+            f"ras_preprocess.py exited with code {rc}. See log: {log_path}"
+        )
+    # Expected output: {project_name}.p{plan_number}.tmp.hdf in project_dir
+    tmp_hdf = plan_hdf.with_suffix(".tmp.hdf")
+    if not tmp_hdf.exists():
+        # Fallback: glob for any matching .tmp.hdf in the project dir
+        matches = list(project_dir.glob(f"*.p{plan_number}.tmp.hdf"))
+        if matches:
+            tmp_hdf = matches[0]
+        else:
+            raise RuntimeError(
+                f"ras_preprocess.py succeeded but {tmp_hdf.name} not found in {project_dir}"
+            )
+    logger.info("[linux-preprocess] produced %s", tmp_hdf.name)
+    return tmp_hdf
+
+
 # ── Mock Execution ────────────────────────────────────────────────────────────
 
 def _run_mock(job: dict, logs_dir: Path) -> None:
@@ -293,6 +393,7 @@ def run_job(
     mock: bool = False,
     db_path: Optional[Path] = None,
     logs_dir: Optional[Path] = None,
+    preprocess_mode: Optional[str] = None,
 ) -> bool:
     """
     Execute a single queued job.
@@ -304,11 +405,20 @@ def run_job(
     run is performed instead for testing without a HEC-RAS installation.
 
     Args:
-        job_id:      UUID of the job to run.
-        ras_exe_dir: Directory containing the RasUnsteady executable.
-        mock:        If True, simulate execution without calling RasUnsteady.
-        db_path:     Override default DB location.
-        logs_dir:    Override default logs directory.
+        job_id:           UUID of the job to run.
+        ras_exe_dir:      Directory containing the RasUnsteady (and optionally
+                          RasGeomPreprocess) executable.
+        mock:             If True, simulate execution without calling RasUnsteady.
+        db_path:          Override default DB location.
+        logs_dir:         Override default logs directory.
+        preprocess_mode:  Override the preprocess_mode stored on the job record.
+                          ``'linux'``   — run ras_preprocess.py + RasGeomPreprocess
+                                          before RasUnsteady (default for new jobs);
+                          ``'windows'`` — geometry was preprocessed on Windows,
+                                          skip recompute (same as 'skip' at runtime);
+                          ``'skip'``    — geometry tables already present, just strip
+                                          Results and run RasUnsteady directly.
+                          Pass ``None`` to use the value stored on the job.
 
     Returns:
         True on success, False on error.
@@ -334,10 +444,19 @@ def run_job(
     project_dir = Path(job["project_dir"])
     plan_hdf = Path(job["plan_hdf"])
     geom_ext = job["geom_ext"]
+    # Resolve preprocess_mode: caller override → job record → fallback 'linux'
+    _preprocess_mode = (
+        preprocess_mode
+        if preprocess_mode is not None
+        else (job.get("preprocess_mode") or "linux")
+    )
 
     for attempt in range(1, 3):  # attempts 1 and 2
         _update_job(job_id, db_path, attempts=attempt)
-        logger.info(f"Job {job_id} attempt {attempt}/2 — {job['name']}")
+        logger.info(
+            f"Job {job_id} attempt {attempt}/2 — {job['name']} "
+            f"(preprocess={_preprocess_mode})"
+        )
 
         if mock:
             try:
@@ -362,10 +481,26 @@ def run_job(
                             error_msg=err_msg)
                 return False
         else:
-            # ── Real RasUnsteady execution ────────────────────────────────
+            # ── Real execution ────────────────────────────────────────────
+            ras_exe_dir_path = Path(ras_exe_dir)
+            lib_base = ras_exe_dir_path.parent / "libs"
+            ld_path = (
+                f"{lib_base}:"
+                f"{lib_base / 'mkl'}:"
+                f"{lib_base / 'rhel_8'}"
+            )
+            env = os.environ.copy()
+            env["LD_LIBRARY_PATH"] = ld_path
+            log_path = _logs_dir / f"{job_id}.log"
+
             tmp_hdf: Optional[Path] = None
             try:
-                tmp_hdf = _prepare_run(project_dir, plan_hdf)
+                if _preprocess_mode == "linux":
+                    # Linux geometry compute: ras_preprocess.py → RasGeomPreprocess → RasUnsteady
+                    tmp_hdf = _run_linux_preprocess(project_dir, plan_hdf, log_path, env)
+                else:
+                    # "windows" or "skip": geometry already computed; strip Results + run
+                    tmp_hdf = _prepare_run(project_dir, plan_hdf)
             except Exception as exc:
                 err_msg = f"Pre-run preparation failed: {exc}"
                 logger.error(f"Job {job_id}: {err_msg}")
@@ -379,22 +514,48 @@ def run_job(
                             error_msg=err_msg)
                 return False
 
-            ras_exe = Path(ras_exe_dir) / "RasUnsteady"
-            lib_base = Path(ras_exe_dir).parent / "libs"
-            ld_path = (
-                f"{lib_base}:"
-                f"{lib_base / 'mkl'}:"
-                f"{lib_base / 'rhel_8'}"
-            )
-            env = os.environ.copy()
-            env["LD_LIBRARY_PATH"] = ld_path
+            # ── RasGeomPreprocess (linux mode only) ──────────────────────
+            if _preprocess_mode == "linux":
+                geom_pre_exe = ras_exe_dir_path / "RasGeomPreprocess"
+                if geom_pre_exe.exists():
+                    logger.info(
+                        f"[linux-preprocess] RasGeomPreprocess {tmp_hdf.name} {geom_ext}"
+                    )
+                    with open(log_path, "a") as log_fh:
+                        gp_rc = subprocess.call(
+                            [str(geom_pre_exe), str(tmp_hdf), geom_ext],
+                            stdout=log_fh,
+                            stderr=subprocess.STDOUT,
+                            env=env,
+                        )
+                    if gp_rc != 0:
+                        err_msg = f"RasGeomPreprocess exited with code {gp_rc}"
+                        logger.error(f"Job {job_id}: {err_msg}")
+                        if tmp_hdf and tmp_hdf.exists():
+                            tmp_hdf.unlink(missing_ok=True)
+                        if attempt < 2:
+                            logger.info(f"Retrying in {RETRY_DELAY_SEC}s…")
+                            time.sleep(RETRY_DELAY_SEC)
+                            continue
+                        _update_job(job_id, db_path,
+                                    status="error",
+                                    completed_at=_now_iso(),
+                                    error_msg=err_msg)
+                        return False
+                else:
+                    logger.warning(
+                        "[linux-preprocess] RasGeomPreprocess not found at %s — "
+                        "skipping (proceeding directly to RasUnsteady)",
+                        geom_pre_exe,
+                    )
 
-            log_path = _logs_dir / f"{job_id}.log"
+            ras_exe = ras_exe_dir_path / "RasUnsteady"
             success = False
             err_msg = ""
 
             try:
-                with open(log_path, "w") as log_fh:
+                # Append to log (linux mode may have already written preprocess output)
+                with open(log_path, "a") as log_fh:
                     proc = subprocess.Popen(
                         [str(ras_exe), str(tmp_hdf), geom_ext],
                         stdout=log_fh,
@@ -465,6 +626,7 @@ def run_queue(
     mock: bool = False,
     db_path: Optional[Path] = None,
     logs_dir: Optional[Path] = None,
+    preprocess_mode: Optional[str] = None,
 ) -> None:
     """
     Process all queued jobs, running up to max_parallel concurrently.
@@ -474,11 +636,13 @@ def run_queue(
     or watersheds.
 
     Args:
-        ras_exe_dir:  Directory containing the RasUnsteady executable.
-        max_parallel: Maximum number of simultaneous RasUnsteady processes.
-        mock:         If True, use mock execution (no HEC-RAS required).
-        db_path:      Override default DB location.
-        logs_dir:     Override default logs directory.
+        ras_exe_dir:      Directory containing the RasUnsteady executable.
+        max_parallel:     Maximum number of simultaneous RasUnsteady processes.
+        mock:             If True, use mock execution (no HEC-RAS required).
+        db_path:          Override default DB location.
+        logs_dir:         Override default logs directory.
+        preprocess_mode:  Override preprocess_mode for all jobs in this run.
+                          Pass ``None`` to use each job's stored value.
     """
     _init_db(db_path)
     logger.info(f"Starting queue runner (max_parallel={max_parallel}, mock={mock})")
@@ -494,7 +658,9 @@ def run_queue(
 
         with ThreadPoolExecutor(max_workers=max_parallel) as pool:
             futures = {
-                pool.submit(run_job, job["id"], ras_exe_dir, mock, db_path, logs_dir): job["id"]
+                pool.submit(
+                    run_job, job["id"], ras_exe_dir, mock, db_path, logs_dir, preprocess_mode
+                ): job["id"]
                 for job in batch
             }
             for future in as_completed(futures):
@@ -526,9 +692,16 @@ def _build_cli():
     @click.argument("plan_hdf", type=click.Path())
     @click.option("--geom-ext", default="g01", show_default=True)
     @click.option("--return-period", type=int, default=None)
-    def enqueue(name, project_dir, plan_hdf, geom_ext, return_period):
+    @click.option(
+        "--preprocess-mode",
+        default="linux",
+        show_default=True,
+        type=click.Choice(["linux", "windows", "skip"]),
+    )
+    def enqueue(name, project_dir, plan_hdf, geom_ext, return_period, preprocess_mode):
         """Add a job to the queue."""
-        jid = enqueue_job(name, project_dir, plan_hdf, geom_ext, return_period)
+        jid = enqueue_job(name, project_dir, plan_hdf, geom_ext, return_period,
+                          preprocess_mode=preprocess_mode)
         click.echo(f"Enqueued job: {jid}")
 
     @cli.command("list")
@@ -543,18 +716,29 @@ def _build_cli():
     @click.argument("job_id")
     @click.argument("ras_exe_dir", type=click.Path())
     @click.option("--mock", is_flag=True)
-    def run(job_id, ras_exe_dir, mock):
+    @click.option(
+        "--preprocess-mode",
+        default=None,
+        type=click.Choice(["linux", "windows", "skip"]),
+    )
+    def run(job_id, ras_exe_dir, mock, preprocess_mode):
         """Run a single job by ID."""
-        ok = run_job(job_id, Path(ras_exe_dir), mock=mock)
+        ok = run_job(job_id, Path(ras_exe_dir), mock=mock, preprocess_mode=preprocess_mode)
         click.echo("success" if ok else "error")
 
     @cli.command("run-queue")
     @click.argument("ras_exe_dir", type=click.Path())
     @click.option("--max-parallel", default=2, show_default=True)
     @click.option("--mock", is_flag=True)
-    def run_queue_cmd(ras_exe_dir, max_parallel, mock):
+    @click.option(
+        "--preprocess-mode",
+        default=None,
+        type=click.Choice(["linux", "windows", "skip"]),
+    )
+    def run_queue_cmd(ras_exe_dir, max_parallel, mock, preprocess_mode):
         """Process all queued jobs."""
-        run_queue(Path(ras_exe_dir), max_parallel=max_parallel, mock=mock)
+        run_queue(Path(ras_exe_dir), max_parallel=max_parallel, mock=mock,
+                  preprocess_mode=preprocess_mode)
 
     return cli
 

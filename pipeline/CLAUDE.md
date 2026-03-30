@@ -12,7 +12,8 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 | `streamstats.py` | USGS StreamStats + IL regression fallback | `PeakFlowEstimates` |
 | `hydrograph.py` | NRCS DUH synthetic hydrographs | `HydrographResult`, `HydrographSet` |
 | `model_builder.py` | Template clone + RC wiring + HDF5 fallback | `HecRasProject`, `build_model()` |
-| `runner.py` | SQLite job queue + RasUnsteady invocation | `enqueue_job()`, `run_queue()` |
+| `runner.py` | SQLite job queue + Linux geometry preprocess + RasUnsteady | `enqueue_job()`, `run_queue()` |
+| `windows_agent.py` | Windows RASMapper mesh creation (`g01.hdf`) | `WindowsAgent`, `MeshRequest`, `MeshResult` |
 | `results.py` | HDF5 → raster/vector export | `export_results()` |
 | `api.py` | FastAPI REST endpoints | runs on `:8000` |
 | `batch.py` | Multi-watershed parallel execution | `run_batch()` |
@@ -42,6 +43,30 @@ Requires system GDAL (`libgdal-dev`). Install order matters:
 pip install gdal==$(gdal-config --version)   # must match system GDAL
 pip install -r requirements.txt
 ```
+
+### hecras-v66-linux (vendored, Apache 2.0)
+
+`vendor/hecras-v66-linux/` — Linux geometry preprocessor by Neerai Prasad
+(github.com/neeraip/hecras-v66-linux).  Replicates the HEC-RAS GUI "Compute Geometry"
+step in pure Python + the `RasGeomPreprocess` / `RasUnsteady` Linux binaries.
+
+Used by `runner.py` when `preprocess_mode='linux'` (the default for new jobs).  Eliminates
+the Windows preprocessing bottleneck; Windows is now only needed for initial RASMapper
+mesh creation (`g01.hdf`).
+
+**Three preprocessing workflows:**
+
+| Workflow | When | What happens |
+|----------|------|--------------|
+| **A** | `g01.hdf` has full hydraulic tables + `p01.hdf` exists | Strip Results → `p01.tmp.hdf`; reuse geometry |
+| **B** | `g01.hdf` exists (RASMapper mesh), no hydraulic tables | Compute hydraulic tables on Linux → `p01.tmp.hdf` |
+| **C** | No `g01.hdf` | Build Voronoi mesh from `.g01` seed points → full Workflow B |
+
+ras-agent primary path: **Workflow B** (mesh from RASMapper, tables computed on Linux).
+
+The Linux binaries (`bin/RasGeomPreprocess`, `bin/RasUnsteady`) are tracked via git LFS
+and are not required for mock mode.  See `vendor/hecras-v66-linux/RAS_AGENT.md` for
+integration details.
 
 ---
 
