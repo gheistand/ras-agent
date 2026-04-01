@@ -14,7 +14,7 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 | `model_builder.py` | Template clone + RC wiring + HDF5 fallback | `HecRasProject`, `build_model()` |
 | `runner.py` | SQLite job queue + Linux geometry preprocess + RasUnsteady | `enqueue_job()`, `run_queue()` |
 | `windows_agent.py` | Windows RASMapper mesh creation (`g01.hdf`) | `WindowsAgent`, `MeshRequest`, `MeshResult` |
-| `results.py` | HDF5 → raster/vector export | `export_results()` |
+| `results.py` | HDF5 → raster/vector export | `FlowAreaGeometry`, `FlowAreaResults`, `export_results()`, `extract_max_velocity()`, `extract_flow_area_results()` |
 | `api.py` | FastAPI REST endpoints | runs on `:8000` |
 | `batch.py` | Multi-watershed parallel execution | `run_batch()` |
 | `report.py` | Self-contained HTML run reports | `generate_report()` |
@@ -31,10 +31,62 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 
 ## HEC-RAS HDF5 Paths
 
-Results are read from these HDF5 groups:
-- `/Geometry/2D Flow Areas/<name>/Cells Center Coordinate`
-- `/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Depth`
-- `/Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Water Surface`
+### HEC-RAS 6.x schema (primary)
+
+| Dataset | HDF Path | Shape |
+|---------|----------|-------|
+| Cell centers | `Geometry/2D Flow Areas/<name>/Cells Center Coordinate` | (N, 2) float64 |
+| Face-point coords | `Geometry/2D Flow Areas/<name>/FacePoints Coordinate` | (P, 2) float64 |
+| Face → face-point | `Geometry/2D Flow Areas/<name>/Faces FacePoint Indexes` | (F, 2) int32 |
+| Cell → face connectivity | `Geometry/2D Flow Areas/<name>/Cells Face and Orientation` | (N, *) int32 |
+| Depth time series | `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Depth` | (T, N) float32 |
+| WSE time series | `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Water Surface` | (T, N) float32 |
+| Velocity time series | `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Velocity` | (T, N) float32 |
+| Face velocity | `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/2D Flow Areas/<name>/Face Velocity` | (T, F) float32 |
+
+### HEC-RAS 2025 schema (fallback, auto-detected)
+
+| Dataset | HDF Path |
+|---------|----------|
+| Cell centers | `Geometry/2D Flow Areas/<name>/Cell Coordinates` |
+| Depth | `Results/Output Blocks/Base Output/2D Flow Areas/<name>/Depth` |
+| WSE | `Results/Output Blocks/Base Output/2D Flow Areas/<name>/Water Surface` |
+| Velocity | `Results/Output Blocks/Base Output/2D Flow Areas/<name>/Velocity` |
+| Face velocity | `Results/Output Blocks/Base Output/2D Flow Areas/<name>/Face Velocity` |
+
+Use `detect_ras_version(hdf_path)` → `"6.x"` or `"2025"` to identify schema automatically.
+
+### Typed Result Dataclasses
+
+```python
+@dataclass
+class FlowAreaGeometry:
+    name: str
+    cell_centers: np.ndarray        # (N, 2) x/y in project CRS
+    face_points: Optional[np.ndarray]        # (P, 2) — None if absent
+    face_point_indexes: Optional[np.ndarray] # (F, 2) int32 — None if absent
+    cell_face_info: Optional[np.ndarray]     # connectivity — None if absent
+
+@dataclass
+class FlowAreaResults:
+    name: str
+    geometry: FlowAreaGeometry
+    max_depth: np.ndarray           # (N,) float32, m
+    max_wse: np.ndarray             # (N,) float32, m
+    max_velocity: Optional[np.ndarray]       # (N,) float32, m/s — None if absent
+```
+
+Use `extract_flow_area_results(hdf_path, area_name)` to get all fields in one call.
+
+### Raster Interpolation Methods (`cells_to_raster`)
+
+| method | Description |
+|--------|-------------|
+| `"linear"` (default) | scipy griddata linear triangulation |
+| `"nearest"` | scipy griddata nearest-neighbor |
+| `"face_weighted"` | IDW (k=8 neighbors) — use face-point coords for RASMapper-equivalent rendering |
+
+HDF path patterns and dataclass design inspired by rivia (github.com/gyanz/rivia, Apache 2.0).
 
 ## Dependencies
 
