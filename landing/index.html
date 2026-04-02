@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RAS Agent — Automated 2D HEC-RAS Hydraulic Modeling</title>
-  <meta name="description" content="RAS Agent automates the full end-to-end HEC-RAS 2D hydraulic modeling workflow — terrain ingestion through flood map export. Open source, Docker-ready, 125 tests passing." />
+  <meta name="description" content="RAS Agent automates the full end-to-end HEC-RAS 2D hydraulic modeling workflow — terrain ingestion through flood map export. Open source, Docker-ready, 170 tests passing." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -472,11 +472,12 @@
       </a>
     </div>
     <div class="badge-row">
-      <span class="badge"><span class="dot"></span>125 tests passing</span>
+      <span class="badge"><span class="dot"></span>170 tests passing</span>
       <span class="badge">Apache 2.0</span>
       <span class="badge">Docker ready</span>
       <span class="badge">HEC-RAS 2D</span>
       <span class="badge">Python 3.11</span>
+      <span class="badge">Rocky Linux 8 / Headless</span>
     </div>
   </div>
 </section>
@@ -485,7 +486,7 @@
 <section id="pipeline">
   <div class="container">
     <div class="section-label">Pipeline</div>
-    <h2>Eight stages. One command.</h2>
+    <h2>Nine stages. One command.</h2>
     <p style="color:var(--text-muted); max-width:580px; font-size:0.95rem;">
       Each stage is independently testable and produces typed result objects. Run the full
       pipeline or individual stages — with mock mode for testing without live data or a
@@ -496,50 +497,56 @@
       <div class="pipeline-stage">
         <div class="stage-num">01</div>
         <div class="stage-icon">🗺️</div>
-        <div class="stage-name">Terrain</div>
-        <div class="stage-desc">Download &amp; mosaic LiDAR DEMs (ILHMP + USGS 3DEP fallback). Reproject to EPSG:5070.</div>
+        <div class="stage-name">Terrain Ingestion</div>
+        <div class="stage-desc">ILHMP LiDAR + USGS 3DEP fallback. 3m resolution, mosaic &amp; reproject to EPSG:5070.</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">02</div>
         <div class="stage-icon">🌊</div>
-        <div class="stage-name">Watershed</div>
-        <div class="stage-desc">D8 flow direction &amp; accumulation via pysheds. Delineate contributing area and main channel.</div>
+        <div class="stage-name">Watershed Delineation</div>
+        <div class="stage-desc">pysheds D8 flow direction &amp; accumulation. Delineate contributing basin, extract characteristics.</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">03</div>
         <div class="stage-icon">📈</div>
-        <div class="stage-name">StreamStats</div>
-        <div class="stage-desc">Query USGS StreamStats API for peak flows. Falls back to IL regression equations (SIR 2008-5176).</div>
+        <div class="stage-name">Peak Flow Estimation</div>
+        <div class="stage-desc">USGS StreamStats API for peak flows. Fallback to IL regression equations (SIR 2008-5176).</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">04</div>
         <div class="stage-icon">〰️</div>
-        <div class="stage-name">Hydrograph</div>
-        <div class="stage-desc">Generate NRCS Dimensionless Unit Hydrographs. Compute Tc via Kirpich method.</div>
+        <div class="stage-name">Hydrograph Generation</div>
+        <div class="stage-desc">NRCS dimensionless unit hydrograph (NEH Part 630). Compute Tc via Kirpich method.</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">05</div>
-        <div class="stage-icon">🔲</div>
-        <div class="stage-name">Mesh Build</div>
-        <div class="stage-desc">Select cell size by drainage area. Write 2D mesh perimeter geometry to HEC-RAS project.</div>
+        <div class="stage-icon">🏗️</div>
+        <div class="stage-name">Model Builder</div>
+        <div class="stage-desc">Clone template project. Assign Manning's n from NLCD. Write mesh perimeter to .g## files.</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">06</div>
-        <div class="stage-icon">🏗️</div>
-        <div class="stage-name">Model Build</div>
-        <div class="stage-desc">Clone template project. Assign Manning's n from NLCD. Set boundary conditions and simulation window.</div>
+        <div class="stage-icon">⚙️</div>
+        <div class="stage-name">Execution Engine</div>
+        <div class="stage-desc">RasUnsteady via SQLite job queue. Parallel runs, 4hr timeout, headless on Rocky Linux 8.</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">07</div>
-        <div class="stage-icon">⚙️</div>
-        <div class="stage-name">HEC-RAS Run</div>
-        <div class="stage-desc">Execute RasUnsteady via SQLite job queue. Monitor run status and capture logs.</div>
+        <div class="stage-icon">📦</div>
+        <div class="stage-name">Results Pipeline</div>
+        <div class="stage-desc">Typed dataclasses, depth/WSE/velocity rasters, flood extent GeoPackage, COG GeoTIFFs per return period.</div>
+      </div>
+      <div class="pipeline-stage">
+        <div class="stage-num">08</div>
+        <div class="stage-icon">🔁</div>
+        <div class="stage-name">Batch Mode</div>
+        <div class="stage-desc">Parallel watershed processing via batch.py. Resume on failure, summary CSV output.</div>
       </div>
       <div class="pipeline-stage" style="border-right:none;">
-        <div class="stage-num">08</div>
-        <div class="stage-icon">📦</div>
-        <div class="stage-name">Results Export</div>
-        <div class="stage-desc">Extract HDF5 outputs. Write Cloud-Optimized GeoTIFFs, GeoPackage, and Shapefile per return period.</div>
+        <div class="stage-num">09</div>
+        <div class="stage-icon">📄</div>
+        <div class="stage-name">HTML Reports</div>
+        <div class="stage-desc">Self-contained run reports with hydrograph plots, basin characteristics, and flood extent preview. FEMA-memo ready.</div>
       </div>
     </div>
   </div>
@@ -561,8 +568,7 @@
         <div class="feature-icon">⚡</div>
         <div class="feature-title">Fully Automated</div>
         <div class="feature-body">
-          One command runs the entire pipeline from coordinates to flood maps. Batch mode
-          processes multiple watersheds in parallel. Human-in-the-loop pauses route scientific
+          One command runs the entire 9-stage pipeline from coordinates to flood maps. Human-in-the-loop pauses route scientific
           decisions to the engineer — never silent autonomy on regulatory choices.
         </div>
         <div class="code-block">python pipeline/orchestrator.py \
@@ -571,12 +577,22 @@
       </div>
 
       <div class="feature-card">
-        <div class="feature-icon">🐳</div>
-        <div class="feature-title">Docker Ready</div>
+        <div class="feature-icon">🔁</div>
+        <div class="feature-title">Batch Processing</div>
         <div class="feature-body">
-          Reproducible environment with GDAL, pysheds, and all geospatial dependencies
-          pre-installed. FastAPI server and web dashboard included. Deploy anywhere Docker runs —
-          workstation, HPC, or cloud.
+          Run hundreds of watersheds in parallel with <code style="font-family:'JetBrains Mono',monospace;font-size:0.82em;color:#7dd3fc;">batch.py</code>. Resume on failure — skip completed runs automatically. Outputs a summary CSV for each batch run.
+        </div>
+        <div class="code-block">python batch.py \
+  --watersheds watersheds.csv \
+  --workers 8 \
+  --resume</div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🗺️</div>
+        <div class="feature-title">Web Dashboard + Map Viewer</div>
+        <div class="feature-body">
+          FastAPI backend with React dashboard. MapLibre flood extent viewer with multi-return-period toggle — switch between 10-yr, 50-yr, and 100-yr flood layers interactively.
         </div>
         <div class="code-block">docker-compose up api
 
@@ -586,19 +602,96 @@ docker-compose \
       </div>
 
       <div class="feature-card">
-        <div class="feature-icon">🧪</div>
-        <div class="feature-title">Mock Mode</div>
+        <div class="feature-icon">🐳</div>
+        <div class="feature-title">Docker Ready</div>
         <div class="feature-body">
-          Run the complete pipeline workflow without real terrain data, a live StreamStats
-          connection, or a HEC-RAS license. 125 tests pass in CI. Every HTTP call is mocked —
-          no network access required to run the test suite.
+          Reproducible environment with GDAL, pysheds, and all geospatial dependencies
+          pre-installed. Runs fully headless on Rocky Linux 8 — no Windows required for geometry preprocessing or simulation.
+        </div>
+        <div class="code-block">docker build -t ras-agent .
+docker run --rm ras-agent \
+  python pipeline/orchestrator.py \
+  --lon -88.578 --lat 40.021</div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">📄</div>
+        <div class="feature-title">HTML Run Reports</div>
+        <div class="feature-body">
+          Self-contained HTML reports generated for every run — hydrograph plots, basin characteristics table, and flood extent preview. Suitable for attaching to FEMA memos or client deliverables.
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">☁️</div>
+        <div class="feature-title">Cloud Storage</div>
+        <div class="feature-body">
+          Cloudflare R2 integration for results storage. Generates presigned download URLs for sharing COG GeoTIFFs, GeoPackages, and HTML reports without exposing storage credentials.
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🔬</div>
+        <div class="feature-title">HITL / Scientific Review</div>
+        <div class="feature-body">
+          Human-in-the-loop pauses at configurable stages for expert validation. Engineers review and approve before the pipeline advances — critical for regulatory submissions and peer review.
+        </div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🧪</div>
+        <div class="feature-title">Mock Mode &amp; CI</div>
+        <div class="feature-body">
+          Run the complete pipeline without real terrain data, a live StreamStats connection, or a HEC-RAS license. 170 tests pass in CI on every push. Every HTTP call is mocked — no network access required.
         </div>
         <div class="code-block">python pipeline/orchestrator.py \
-  --lon -88.578 --lat 40.021 \
-  --output ./output/test \
   --mock
 
-python -m pytest tests/ -v</div>
+python -m pytest tests/ -v
+# 170 passed</div>
+      </div>
+
+      <div class="feature-card">
+        <div class="feature-icon">🔔</div>
+        <div class="feature-title">Webhook Notifications</div>
+        <div class="feature-body">
+          HMAC-signed webhook payloads on run completion. Email notifications included. Integrate with Slack, Teams, or any CI/CD pipeline to trigger downstream workflows automatically.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MILESTONES -->
+<section id="milestones" style="background:var(--bg-base); padding: 5rem 0;">
+  <div class="container">
+    <div class="section-label">Recent Milestones</div>
+    <h2>What's shipping now</h2>
+    <p style="color:var(--text-muted); max-width:580px; font-size:0.95rem; margin-bottom:2.5rem;">
+      Active development — major capability unlocks in the last development cycle.
+    </p>
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🐧</div>
+        <div class="feature-title">hecras-v66-linux Integration</div>
+        <div class="feature-body">
+          Eliminates the Windows geometry preprocessing dependency. The <code style="font-family:'JetBrains Mono',monospace;font-size:0.82em;color:#7dd3fc;">ras_preprocess.py</code> module replicates the HEC-RAS GUI "Compute Geometry" step on Linux/Docker, enabling fully headless simulation on Rocky Linux 8.<br><br>
+          <strong style="color:var(--text);">Verified accuracy:</strong> 0.000–0.001 ft WSE diff vs GUI output.
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🖥️</div>
+        <div class="feature-title">Illinois Computes Allocation</div>
+        <div class="feature-body">
+          100,000 CPU-hours/year awarded on the NCSA Campus Cluster — 16 nodes × 128 cores × 512 GB RAM. SLURM integration is in progress for production-scale statewide batch runs across all Illinois watersheds.
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">✅</div>
+        <div class="feature-title">170 Tests Passing</div>
+        <div class="feature-body">
+          Full test suite runs in CI on every push. 170 tests covering all 9 pipeline stages, batch mode, results parsing, and API endpoints — with mock mode so no live data or HEC-RAS license is required.
+        </div>
       </div>
     </div>
   </div>
