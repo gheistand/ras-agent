@@ -46,13 +46,30 @@ orchestrator.py  ← entry point, chains all stages
   ├─ hydrograph.py   → NRCS DUH synthetic hydrographs → HydrographSet
   ├─ model_builder.py→ template clone + Manning's n + BCs → HecRasProject
   ├─ runner.py       → SQLite job queue + RasUnsteady execution
-  └─ results.py      → HDF5 → COG GeoTIFF + GeoPackage + Shapefile
+  ├─ results.py      → HDF5 → COG GeoTIFF + GeoPackage + Shapefile
+  └─ mesh_inspector.py → pre-flight geometric validation of geometry HDF files
+                          (vendored from rivia, Apache 2.0)
 ```
 
 Supporting modules: `batch.py` (parallel multi-watershed), `report.py` (HTML reports), `notify.py` (webhook/email), `storage.py` (Cloudflare R2 upload).
 
 ### Web dashboard
 React + Vite + Tailwind. `api.js` calls the FastAPI backend. `MapViewer.jsx` renders flood extents via MapLibre GL JS with per-return-period toggle layers. Deployed to Cloudflare Pages (auto-deploys from `main`).
+
+## Mesh Inspector
+
+`pipeline/mesh_inspector.py` validates HEC-RAS 2D mesh geometry against five rules:
+- Rule 1: 3–8 faces per cell
+- Rule 2: Strictly convex cells
+- Rule 3: No collinear adjacent edges
+- Rule 4: No duplicate cell centres or facepoints
+- Rule 5: Cell centres inside the 2D flow area boundary
+
+Run standalone:
+    python pipeline/mesh_inspector.py path/to/model.g01.hdf [--max-cells N]
+
+Runs automatically as a warning-only preflight check during template clone in model_builder.py.
+Logic vendored from gyanz/rivia (https://github.com/gyanz/rivia), Apache 2.0.
 
 ## Key Conventions
 

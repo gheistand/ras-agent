@@ -699,6 +699,24 @@ def _build_from_template(
     # ── 5. Update terrain reference in geometry HDF
     geom_hdf_candidates = list(project_dir.glob("*.g01.hdf"))
     if geom_hdf_candidates:
+        # --- Mesh preflight check ---
+        try:
+            from mesh_inspector import preflight_template, format_report
+            logger.info("Running mesh pre-flight check on template geometry HDF...")
+            pf = preflight_template(geom_hdf_candidates[0], max_cells=500)
+            if not pf.passed:
+                logger.warning(
+                    "Template mesh has %d violation(s) — model may fail in HEC-RAS.\n%s",
+                    pf.total_violations,
+                    format_report(pf),
+                )
+            else:
+                logger.info(
+                    "Mesh pre-flight passed (%d cells sampled, 0 violations).",
+                    sum(a.n_cells for a in pf.areas),
+                )
+        except Exception as exc:
+            logger.warning("Mesh pre-flight check skipped: %s", exc)
         _update_terrain_reference(geom_hdf_candidates[0], watershed.dem_clipped)
     else:
         logger.warning(
