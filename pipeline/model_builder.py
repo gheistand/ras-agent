@@ -4,7 +4,12 @@ model_builder.py — HEC-RAS 6.6 project builder
 Builds a HEC-RAS 6.6 project directory from watershed delineation and
 design hydrograph results. Supports three mesh strategies:
 
-  template_clone  — clone an existing template project, swap terrain/BCs
+  template_clone  — clone an existing template project, swap terrain/BCs/
+                    Manning's n, then write Cartesian cell centers so the
+                    HEC-RAS 6.6 geometry preprocessor regenerates the mesh
+                    via Voronoi tessellation from those centers (no RASMapper
+                    or GUI required; approach by Bill Katzenmeyer / CLB
+                    Engineering, April 2026 — see docs/KNOWLEDGE.md)
   hdf5_direct     — write geometry HDF5 from scratch (future)
   ras2025         — use RAS2025 API for mesh generation (future)
 
@@ -44,6 +49,9 @@ class HecRasProject:
     mesh_strategy: str       # "template_clone", "hdf5_direct", "ras2025"
     return_periods: list
     metadata: dict = field(default_factory=dict)
+    cell_count: Optional[int] = None        # number of 2D cells generated (Cartesian mesh)
+    cell_size_m: Optional[float] = None     # cell size used (meters)
+    grid_shift: Optional[tuple] = None     # (dx_shift, dy_shift) grid origin offset used
 
 
 @dataclass
@@ -578,6 +586,249 @@ def _write_perimeter_to_geometry_file(
     return True
 
 
+# ── Cartesian Mesh Generation ─────────────────────────────────────────────────
+# Cartesian mesh approach from CLB Engineering / Bill Katzenmeyer
+# (Breaking the RAS 6.6 Mesh Lock, April 2026)
+#
+# Key insight: HEC-RAS 6.6 reads cell center coordinates from the "Storage Area
+# 2D Points" section of the .g## text file, runs Voronoi tessellation, and writes
+# full mesh topology to .g##.hdf.  Whoever controls the cell centers controls the
+# mesh — no RASMapper, no GUI, no DLL needed.
+
+
+def _fmt_coord(x: float) -> str:
+    """
+    16-character fixed-width HEC-RAS coordinate encoder.
+
+    CRITICAL: Do not change this function. HEC-RAS 6.6 parses the Storage
+    Area 2D Points section using 16-character fixed-width fields. A naive
+    ``f"{x:.6f}"`` produces 14 characters — the parser reads the next
+    coordinate starting at the wrong column and the cell centers are garbage.
+
+    Works correctly for non-negative coordinates. EPSG:5070 (NAD83 Albers)
+    values are always large positive numbers for the continental US.
+
+    Args:
+        x: Coordinate value (non-negative; EPSG:5070 meters)
+
+    Returns:
+        Exactly 16 characters: integer digits + decimal point + decimal digits.
+    """
+    n_int = len(str(int(abs(x))))
+    n_dec = 16 - n_int - 1
+    return f"{x:.{n_dec}f}"
+
+
+def _generate_cartesian_cell_centers(
+    watershed_polygon,
+    cell_size_m: float,
+    min_face_length_ratio: float = 0.05,
+    max_shift_tries: int = 200,
+) -> tuple:
+    """
+    Generate Cartesian cell centers for a HEC-RAS 2D mesh.
+
+    Scans grid origin offsets (dx_shift, dy_shift) ∈ [0, cell_size_m) × [0,
+    cell_size_m) to find a position where no Voronoi boundary (VB) falls
+    within ``tol = min_face_length_ratio × cell_size_m`` of any polygon
+    vertex coordinate.  This prevents topological face errors in the HEC-RAS
+    6.6 geometry preprocessor.
+
+    VB positions for a grid starting at (xmin + dx_shift, ymin + dy_shift)::
+
+        x-VBs at xmin + dx_shift + cell_size_m/2 + k × cell_size_m
+        y-VBs at ymin + dy_shift + cell_size_m/2 + m × cell_size_m
+
+    If no clean shift is found after max_shift_tries the combination with the
+    fewest conflicts is used and a warning is logged.
+
+    Args:
+        watershed_polygon:    Shapely Polygon in project CRS (EPSG:5070, meters)
+        cell_size_m:          Mesh cell size in meters
+        min_face_length_ratio: HEC-RAS MinFaceLength / CellSize ratio (default 0.05)
+        max_shift_tries:      Maximum (dx, dy) combinations to search
+
+    Returns:
+        Tuple of (cell_centers, dx_shift, dy_shift):
+          cell_centers — (N, 2) float64 array of (x, y) in project CRS
+          dx_shift     — grid x-origin offset used (meters)
+          dy_shift     — grid y-origin offset used (meters)
+
+    Raises:
+        ImportError: If numpy or shapely is not installed
+    """
+    import numpy as np
+    from shapely import contains_xy
+
+    tol = min_face_length_ratio * cell_size_m
+
+    # Extract polygon exterior vertices
+    if hasattr(watershed_polygon, "exterior"):
+        verts = np.array(watershed_polygon.exterior.coords)
+    else:
+        verts = np.array(list(watershed_polygon.coords))
+
+    vx = verts[:, 0]
+    vy = verts[:, 1]
+
+    xmin, ymin, xmax, ymax = watershed_polygon.bounds
+
+    # Search grid: n_side × n_side combinations; break on first clean shift
+    n_side = max(2, int(np.sqrt(max_shift_tries)))
+    shift_step = cell_size_m / n_side
+
+    best_shift = (0.0, 0.0)
+    best_conflicts = int(len(vx)) * 2 + 1   # worse than any real result
+    found_clean = False
+
+    for i in range(n_side):
+        dx = i * shift_step
+        # x-VBs at xmin + dx + cell_size_m/2 + k*cell_size_m
+        # distance of vertex vx_k to nearest x-VB:
+        x_relv = (vx - xmin - dx - cell_size_m / 2) % cell_size_m
+        x_dist = np.minimum(x_relv, cell_size_m - x_relv)
+        n_x = int(np.sum(x_dist < tol))
+
+        for j in range(n_side):
+            dy = j * shift_step
+            y_relv = (vy - ymin - dy - cell_size_m / 2) % cell_size_m
+            y_dist = np.minimum(y_relv, cell_size_m - y_relv)
+            n_y = int(np.sum(y_dist < tol))
+
+            total = n_x + n_y
+            if total < best_conflicts:
+                best_conflicts = total
+                best_shift = (dx, dy)
+
+            if total == 0:
+                found_clean = True
+                break
+
+        if found_clean:
+            break
+
+    dx_shift, dy_shift = best_shift
+
+    if not found_clean:
+        logger.warning(
+            "[CART] No clean grid shift found in %d tries "
+            "(best: %d conflict(s) at dx=%.1f m, dy=%.1f m) — using best available",
+            n_side * n_side,
+            best_conflicts,
+            dx_shift,
+            dy_shift,
+        )
+    else:
+        logger.info(
+            "[CART] Clean grid shift: dx=%.1f m, dy=%.1f m (0 VB-vertex conflicts)",
+            dx_shift,
+            dy_shift,
+        )
+
+    # Generate Cartesian grid; cell centers at xmin+dx_shift + k*cell_size_m
+    xs = np.arange(xmin + dx_shift, xmax + cell_size_m, cell_size_m)
+    ys = np.arange(ymin + dy_shift, ymax + cell_size_m, cell_size_m)
+    xx, yy = np.meshgrid(xs, ys)
+    candidates = np.column_stack([xx.ravel(), yy.ravel()])
+
+    # Keep only centers inside the watershed polygon
+    mask = contains_xy(watershed_polygon, candidates[:, 0], candidates[:, 1])
+    cell_centers = candidates[mask]
+
+    logger.info(
+        "[CART] %d Cartesian cell centers (cell_size=%.1f m, dx=%.1f m, dy=%.1f m)",
+        len(cell_centers),
+        cell_size_m,
+        dx_shift,
+        dy_shift,
+    )
+    return cell_centers, dx_shift, dy_shift
+
+
+def _write_cell_centers_to_geometry_file(
+    geometry_file: Path,
+    area_name: str,
+    cell_centers,
+) -> bool:
+    """
+    Write Cartesian cell centers to the ``Storage Area 2D Points`` section of a
+    HEC-RAS plain text geometry file (.g##).
+
+    The HEC-RAS 6.6 geometry preprocessor reads these cell centers and runs
+    Voronoi tessellation to produce full mesh topology in .g##.hdf.  Each data
+    line contains two 16-character fixed-width coordinates concatenated::
+
+        Storage Area 2D Points= {N}
+        {x1_16char}{y1_16char}
+        {x2_16char}{y2_16char}
+        ...
+
+    See ``_fmt_coord()`` for the critical encoding requirement.
+
+    Creates a .bak backup of the original file before modifying (same pattern
+    as ``_write_perimeter_to_geometry_file``).
+
+    Args:
+        geometry_file: Path to .g## ASCII geometry file
+        area_name:     Name of the 2D flow area (used for logging)
+        cell_centers:  (N, 2) array-like of (x, y) cell center coordinates
+
+    Returns:
+        True if written successfully; False if cell_centers is empty.
+    """
+    if len(cell_centers) == 0:
+        logger.warning(
+            "[CART] No cell centers provided for area '%s' — Storage Area 2D Points not written",
+            area_name,
+        )
+        return False
+
+    text = geometry_file.read_text(errors="replace")
+
+    # Backup before any modification
+    bak_path = geometry_file.with_suffix(geometry_file.suffix + ".bak")
+    bak_path.write_text(text, encoding="utf-8")
+
+    # Build replacement block
+    n = len(cell_centers)
+    new_header = f"Storage Area 2D Points= {n}\n"
+    data_lines = "".join(
+        _fmt_coord(float(x)) + _fmt_coord(float(y)) + "\n"
+        for x, y in cell_centers
+    )
+    new_block = new_header + data_lines
+
+    # Replace existing "Storage Area 2D Points" section (data lines start with digit or -)
+    points_pattern = re.compile(
+        r"Storage Area 2D Points=[ \t]*\d+[ \t]*\n"
+        r"(?:[-0-9][^\n]*\n)*",
+        re.MULTILINE,
+    )
+    updated_text, n_subs = points_pattern.subn(new_block, text, count=1)
+
+    if n_subs == 0:
+        # No existing section — insert after "2D Flow Area Cell Size=" line
+        cell_size_pat = re.compile(
+            r"(2D Flow Area Cell Size=[ \t]*[\d.]+[ \t]*\n)", re.MULTILINE
+        )
+        m = cell_size_pat.search(text)
+        if m:
+            pos = m.end()
+            updated_text = text[:pos] + new_block + text[pos:]
+        else:
+            # Fallback: append at end of file
+            updated_text = text.rstrip("\n") + "\n" + new_block
+
+    geometry_file.write_text(updated_text, encoding="utf-8")
+    logger.info(
+        "[CART] Wrote %d cell centers to %s (area: %s)",
+        n,
+        geometry_file.name,
+        area_name,
+    )
+    return True
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
@@ -651,6 +902,17 @@ def _build_from_template(
         logger.info(f"No NLCD raster provided; using default Manning's n = {mannings_n}")
     _update_mannings_n(project_dir, mannings_n)
 
+    # Adaptive cell size: 30–300 m based on drainage area
+    # (computed here so it's available for both perimeter write and cell centers)
+    area_km2 = watershed.characteristics.drainage_area_km2
+    cell_size_m = min(max(area_km2 * 0.5, 30.0), 300.0)
+
+    # Variables populated in steps 4 / 4b
+    watershed_polygon_5070 = None
+    area_name = None
+    cell_count = None
+    grid_shift = None
+
     # ── 4. Update 2D flow area perimeter to match watershed boundary
     # (Bill Katzenmeyer / CLB Engineering confirmed 2026-03-13: write to ASCII .g## file;
     #  HEC-RAS regenerates geometry HDF on next save/open)
@@ -666,11 +928,9 @@ def _build_from_template(
                 basin_shape = watershed.basin
             basin_gdf = gpd.GeoDataFrame(geometry=[basin_shape], crs="EPSG:4326")
             basin_5070 = basin_gdf.to_crs("EPSG:5070")
-            boundary = basin_5070.geometry.iloc[0].exterior
+            watershed_polygon_5070 = basin_5070.geometry.iloc[0]
+            boundary = watershed_polygon_5070.exterior
             perimeter_coords = list(boundary.coords)
-            # Adaptive cell size: 30-300m based on drainage area
-            area_km2 = watershed.characteristics.drainage_area_km2
-            cell_size_m = min(max(area_km2 * 0.5, 30.0), 300.0)
             area_name = _get_2d_area_name_from_geometry_file(geom_file)
             if area_name:
                 updated = _write_perimeter_to_geometry_file(
@@ -691,9 +951,41 @@ def _build_from_template(
                 )
         except Exception as exc:
             logger.warning(f"Perimeter update failed ({exc}) — template mesh perimeter in use")
+
+        # ── 4b. Write Cartesian cell centers
+        # The HEC-RAS 6.6 geometry preprocessor runs Voronoi tessellation from
+        # these centers and writes the full mesh to .g##.hdf — no GUI needed.
+        # (Bill Katzenmeyer / CLB Engineering, April 2026)
+        if watershed_polygon_5070 is not None and area_name is not None:
+            try:
+                cc, dx_s, dy_s = _generate_cartesian_cell_centers(
+                    watershed_polygon_5070, cell_size_m
+                )
+                if len(cc) > 0:
+                    _write_cell_centers_to_geometry_file(geom_file, area_name, cc)
+                    cell_count = len(cc)
+                    grid_shift = (dx_s, dy_s)
+                    logger.info(
+                        "[CART] %d Cartesian cell centers written "
+                        "(cell_size=%.0f m, shift=(%.1f, %.1f) m)",
+                        cell_count,
+                        cell_size_m,
+                        dx_s,
+                        dy_s,
+                    )
+                else:
+                    logger.warning(
+                        "[CART] No cell centers inside polygon — skipping Storage Area 2D Points"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[CART] Cell center generation failed (%s) — "
+                    "preprocessor will use perimeter-only approach",
+                    exc,
+                )
     else:
         logger.warning(
-            "No geometry file or watershed basin geometry — perimeter not updated (using template mesh)"
+            "No geometry file or watershed basin geometry — perimeter/cell centers not updated (using template mesh)"
         )
 
     # ── 5. Update terrain reference in geometry HDF
@@ -770,11 +1062,15 @@ def _build_from_template(
         "main_channel_slope": bc_slope,
         "mannings_n": mannings_n,
         "dem_clipped": str(watershed.dem_clipped),
+        "cell_count": cell_count,
+        "cell_size_m": cell_size_m,
+        "grid_shift": grid_shift,
     }
 
     logger.info(
         f"Template clone complete: {project_dir} "
-        f"({len(return_periods)} return periods)"
+        f"({len(return_periods)} return periods, "
+        f"{cell_count or 'no'} Cartesian cell centers)"
     )
 
     return HecRasProject(
@@ -789,6 +1085,9 @@ def _build_from_template(
         mesh_strategy="template_clone",
         return_periods=return_periods,
         metadata=metadata,
+        cell_count=cell_count,
+        cell_size_m=cell_size_m,
+        grid_shift=grid_shift,
     )
 
 

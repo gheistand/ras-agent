@@ -11,7 +11,7 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 | `watershed.py` | pysheds D8 delineation | `WatershedResult`, `BasinCharacteristics` |
 | `streamstats.py` | USGS StreamStats + IL regression fallback | `PeakFlowEstimates` |
 | `hydrograph.py` | NRCS DUH synthetic hydrographs | `HydrographResult`, `HydrographSet` |
-| `model_builder.py` | Template clone + RC wiring + HDF5 fallback | `HecRasProject`, `build_model()` |
+| `model_builder.py` | Template clone + Cartesian mesh + RC wiring + HDF5 fallback | `HecRasProject`, `build_model()`, `_fmt_coord()`, `_generate_cartesian_cell_centers()`, `_write_cell_centers_to_geometry_file()` |
 | `runner.py` | SQLite job queue + Linux geometry preprocess + RasUnsteady | `enqueue_job()`, `run_queue()` |
 | `windows_agent.py` | Windows RASMapper mesh creation (`g01.hdf`) | `WindowsAgent`, `MeshRequest`, `MeshResult` |
 | `results.py` | HDF5 → raster/vector export | `FlowAreaGeometry`, `FlowAreaResults`, `export_results()`, `extract_max_velocity()`, `extract_flow_area_results()` |
@@ -226,6 +226,38 @@ Mesh regeneration after perimeter change requires RASMapper (Windows GUI).
 Ajith Sundarraj (CLB Engineering) is building RASMapper automation for this step.
 
 Implemented in `model_builder.py:_write_perimeter_to_geometry_file()`.
+
+### Cartesian Mesh Generation — Breaking the RAS 6.6 Mesh Lock (CLB Engineering, April 2026)
+
+**Key insight:** HEC-RAS 6.6 reads cell center coordinates from the `Storage Area 2D Points`
+section of the `.g##` text file, runs Voronoi tessellation, and writes full mesh topology to
+`.g##.hdf`.  Whoever controls the cell centers controls the mesh — no RASMapper or GUI needed.
+
+**Fixed-width encoding (CRITICAL):** Each coordinate is encoded in exactly 16 characters.
+Do NOT use `f"{x:.6f}"` (wrong length → garbage mesh).  Use `_fmt_coord(x)`.
+
+```python
+def _fmt_coord(x: float) -> str:
+    n_int = len(str(int(abs(x))))   # digits before decimal
+    n_dec = 16 - n_int - 1          # remaining chars after decimal point
+    return f"{x:.{n_dec}f}"         # exactly 16 characters
+```
+
+**Grid shift (topological safety):** Voronoi boundaries (VBs) sit halfway between adjacent
+cell centers.  When a perimeter polygon vertex falls within `tol = MinFaceLength × CellSize`
+of a VB, the preprocessor reports face errors.  `_generate_cartesian_cell_centers()` scans
+(dx_shift, dy_shift) ∈ [0, cell_size) × [0, cell_size) to find a safe grid origin.
+
+Functions:
+- `_fmt_coord(x)` — 16-char fixed-width encoder
+- `_generate_cartesian_cell_centers(polygon, cell_size_m)` → (centers, dx, dy)
+- `_write_cell_centers_to_geometry_file(geom_file, area_name, centers)` — writes section
+
+`template_clone` strategy now automatically generates and writes Cartesian cell centers
+after the perimeter update (step 4b in `_build_from_template`).  If generation fails,
+logs a warning and continues — the preprocessor falls back to the perimeter-only approach.
+
+Reference: `vendor/RASAlphaCLI/docs/Breaking_The_RAS66_Mesh_Lock.md`
 
 ### Flood Depth Accuracy Target
 

@@ -355,3 +355,139 @@ def test_get_2d_area_name_parses_correctly(tmp_path):
     geom = _write_sample_geom(tmp_path)
     name = mb._get_2d_area_name_from_geometry_file(geom)
     assert name == "Perimeter 1"
+
+
+# ── Tests: Cartesian mesh generation ─────────────────────────────────────────
+
+def test_fmt_coord_precision():
+    """_fmt_coord must produce exactly 16 characters for a range of EPSG:5070 values."""
+    # Typical state-plane / Albers coordinates used in continental US
+    test_values = [
+        3201045.0,      # 7 integer digits → 8 decimal digits
+        13808000.0,     # 8 integer digits → 7 decimal digits
+        999999.0,       # 6 integer digits → 9 decimal digits
+        12345678.0,     # 8 integer digits → 7 decimal digits
+        100.0,          # 3 integer digits → 12 decimal digits
+        1234567.5,      # 7 integer digits → 8 decimal digits
+    ]
+    for x in test_values:
+        result = mb._fmt_coord(x)
+        assert len(result) == 16, (
+            f"_fmt_coord({x}) returned {len(result)!r} chars, expected 16: {result!r}"
+        )
+        # Must be parseable as float and round-trip faithfully
+        assert abs(float(result) - x) < 1e-4, (
+            f"_fmt_coord({x}) → {result!r} does not round-trip: {float(result)}"
+        )
+
+    # Specific value from Bill Katzenmeyer's report
+    assert mb._fmt_coord(3201045.0) == "3201045.00000000"
+    assert mb._fmt_coord(13808000.0) == "13808000.0000000"
+
+
+def test_generate_cartesian_cell_centers_basic():
+    """_generate_cartesian_cell_centers clips a Cartesian grid to a polygon."""
+    shapely = pytest.importorskip("shapely")
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    # Simple 1000×1000 m square (EPSG:5070 coordinates)
+    xo, yo = 300000.0, 4400000.0
+    poly = ShapelyPolygon([
+        (xo, yo), (xo + 1000, yo), (xo + 1000, yo + 1000), (xo, yo + 1000), (xo, yo)
+    ])
+    cell_size = 100.0
+
+    cell_centers, dx_shift, dy_shift = mb._generate_cartesian_cell_centers(
+        poly, cell_size, max_shift_tries=200
+    )
+
+    # Should produce some cells
+    assert len(cell_centers) > 0
+
+    # All returned centers must be inside (or on boundary of) the polygon
+    from shapely import contains_xy
+    mask = contains_xy(poly, cell_centers[:, 0], cell_centers[:, 1])
+    assert mask.all(), f"{(~mask).sum()} centers are outside the polygon"
+
+    # Shifts must be in [0, cell_size)
+    assert 0.0 <= dx_shift < cell_size
+    assert 0.0 <= dy_shift < cell_size
+
+    # For a 1000×1000 square with 100 m cells, expect ≈ 81–100 cells
+    assert 50 <= len(cell_centers) <= 120, (
+        f"Unexpected cell count {len(cell_centers)} for 1000m square / 100m cells"
+    )
+
+
+def test_write_cell_centers_to_geometry_file(tmp_path):
+    """_write_cell_centers_to_geometry_file inserts Storage Area 2D Points section."""
+    import numpy as np
+
+    geom = _write_sample_geom(tmp_path)
+
+    # A handful of representative cell centers (EPSG:5070 values)
+    centers = np.array([
+        [300050.0, 4400050.0],
+        [300150.0, 4400050.0],
+        [300050.0, 4400150.0],
+        [300150.0, 4400150.0],
+    ])
+
+    result = mb._write_cell_centers_to_geometry_file(geom, "Perimeter 1", centers)
+    assert result is True
+
+    content = geom.read_text()
+
+    # Header with correct count
+    assert "Storage Area 2D Points= 4" in content
+
+    # Each center encoded as two 16-char fields on one line (32 chars)
+    lines = [l for l in content.splitlines() if l.startswith("3")]  # starts with digit '3'
+    assert len(lines) == 4, f"Expected 4 data lines, got {len(lines)}: {lines}"
+    for line in lines:
+        assert len(line) == 32, (
+            f"Data line has {len(line)} chars, expected 32: {line!r}"
+        )
+
+    # Backup created
+    bak = tmp_path / "project.g01.bak"
+    assert bak.exists()
+
+
+def test_grid_shift_avoids_voronoi_conflicts():
+    """Grid shift search finds a configuration without VB-vertex conflicts."""
+    pytest.importorskip("shapely")
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    cell_size = 100.0
+    tol = 0.05 * cell_size   # 5 m (default min_face_length_ratio)
+
+    # Place a vertex exactly at the first x-VB for dx=0.
+    # With dx=0: first x-VB at xmin + 0 + cell_size/2 = xmin + 50
+    # Vertex at xmin + 50 → distance = 0 → conflict.
+    xo, yo = 300000.0, 4400000.0
+    conflicting_vx = xo + cell_size / 2   # exactly on VB for dx=0
+
+    poly = ShapelyPolygon([
+        (xo, yo),
+        (xo + 500, yo),
+        (xo + 500, yo + 500),
+        (conflicting_vx, yo + 250),   # vertex on VB
+        (xo, yo + 500),
+        (xo, yo),
+    ])
+
+    cell_centers, dx_shift, dy_shift = mb._generate_cartesian_cell_centers(
+        poly, cell_size, max_shift_tries=200
+    )
+
+    # Must still generate cells
+    assert len(cell_centers) > 0
+
+    # With the returned dx_shift, the problematic vertex should be >= tol from any x-VB
+    x_relv = (conflicting_vx - xo - dx_shift - cell_size / 2) % cell_size
+    x_dist = min(float(x_relv), cell_size - float(x_relv))
+    assert x_dist >= tol, (
+        f"Conflict persists at dx_shift={dx_shift:.1f}: "
+        f"vertex distance to nearest x-VB = {x_dist:.2f} m (tol={tol} m)"
+    )
