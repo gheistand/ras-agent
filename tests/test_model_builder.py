@@ -390,3 +390,89 @@ def test_get_2d_area_name_parses_correctly(tmp_path):
     geom = _write_sample_geom(tmp_path)
     name = mb._get_2d_area_name_from_geometry_file(geom)
     assert name == "Perimeter 1"
+
+
+# ── Tests: geometry-first strategy ───────────────────────────────────────────
+
+def test_scaffold_project_from_template(tmp_path):
+    project_dir, prj_file, rasmap_file = mb._scaffold_project_from_template(tmp_path, "test_project")
+    assert project_dir == tmp_path / "test_project"
+    assert prj_file.exists()
+    assert prj_file.name == "test_project.prj"
+    prj_text = prj_file.read_text()
+    assert "Proj Title=test_project" in prj_text
+    assert not (project_dir / "TEMPLATE.prj").exists()
+    assert not (project_dir / "TEMPLATE.rasmap.backup").exists()
+    assert not (project_dir / "README.md").exists()
+
+
+def test_register_files_in_prj(tmp_path):
+    prj = tmp_path / "test.prj"
+    prj.write_text("Proj Title=test\n")
+    mb._register_files_in_prj(prj, geom_ext="g01", flow_ext="u01", plan_ext="p01")
+    text = prj.read_text()
+    assert "Geom File=g01" in text
+    assert "Unsteady File=u01" in text
+    assert "Plan File=p01" in text
+    assert "Current Plan=p01" in text
+
+
+def test_write_geometry_first_geom_file(tmp_path):
+    geom_file = tmp_path / "test.g01"
+    coords = [
+        (300000.0, 4400000.0), (315000.0, 4400000.0),
+        (315000.0, 4415000.0), (300000.0, 4415000.0),
+    ]
+    mb._write_geometry_first_geom_file(
+        geom_file, "TestArea", coords, cell_size_m=100.0, mannings_n=0.04,
+    )
+    text = geom_file.read_text()
+    assert "Geom Title=RAS Agent Geometry" in text
+    assert "Storage Area=TestArea" in text
+    assert "Storage Area Is2D=-1" in text
+    assert "Storage Area Mannings=0.04" in text
+
+
+def test_build_geometry_first_creates_complete_project(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb._build_geometry_first(
+        watershed, hydro_set, tmp_path, return_periods=[10, 100],
+    )
+    assert project.mesh_strategy == "geometry_first"
+    assert project.prj_file.exists()
+    assert project.geometry_file.exists()
+    assert project.flow_file.exists()
+    assert project.plan_file.exists()
+
+    prj_text = project.prj_file.read_text()
+    assert "Geom File=g01" in prj_text
+    assert "Plan File=p01" in prj_text
+
+    geom_text = project.geometry_file.read_text()
+    assert "Storage Area=MainArea" in geom_text
+    assert "Storage Area Is2D=-1" in geom_text
+
+
+def test_build_model_dispatches_geometry_first(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb.build_model(
+        watershed, hydro_set, tmp_path, mesh_strategy="geometry_first",
+    )
+    assert project.mesh_strategy == "geometry_first"
+    assert project.geometry_file.exists()
+
+
+def test_geometry_first_perimeter_matches_watershed(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb._build_geometry_first(
+        watershed, hydro_set, tmp_path, return_periods=[100],
+    )
+    geom_text = project.geometry_file.read_text()
+    assert "Storage Area Surface Line=" in geom_text
+    assert "300000" in geom_text
+    assert "4400000" in geom_text
+    assert "315000" in geom_text
+    assert "4415000" in geom_text

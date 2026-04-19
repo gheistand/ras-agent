@@ -8,6 +8,8 @@ No HEC-RAS installation or real results files are required.
 
 import os
 import sys
+from pathlib import Path
+
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
@@ -106,7 +108,7 @@ def test_patch_job_results_dir(client):
     results_res = client.get(f"/api/jobs/{job_id}/results")
     assert results_res.status_code == 200
     data = results_res.json()
-    assert data["results_dir"] == mock_dir
+    assert Path(data["results_dir"]) == Path(mock_dir)
     assert data["flood_extent_available"] is True   # mock path contains "mock"
 
     # GET /flood-extent should return sample GeoJSON for mock path.

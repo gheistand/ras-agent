@@ -212,7 +212,7 @@ def run_batch(
     output_dir: Path,
     max_workers: int = 3,
     resolution_m: float = 3.0,
-    mesh_strategy: str = "hdf5_direct",
+    mesh_strategy: str = "geometry_first",
     ras_exe_dir: Optional[Path] = None,
     resume: bool = True,
     dry_run: bool = False,
@@ -232,9 +232,9 @@ def run_batch(
         output_dir:     Root output directory
         max_workers:    ThreadPoolExecutor concurrency limit
         resolution_m:   DEM resolution in meters
-        mesh_strategy:  HEC-RAS mesh build strategy (default: hdf5_direct)
-                        where "hdf5_direct" is the current placeholder until
-                        the geometry-first `ras-commander` builder lands
+        mesh_strategy:  HEC-RAS mesh build strategy (default: geometry_first)
+                        uses ras-commander GeomStorage to write .g## and
+                        lets HEC-RAS regenerate HDF artifacts
         ras_exe_dir:    Path to RasUnsteady binary dir; None = mock mode
         resume:         Skip watersheds with existing completed output
         dry_run:        Load + validate specs, print plan, exit without running
@@ -478,8 +478,8 @@ if __name__ == "__main__":
     parser.add_argument("--ras-exe-dir", type=Path, default=None)
     parser.add_argument(
         "--strategy",
-        default="hdf5_direct",
-        help="Mesh build strategy (default: hdf5_direct; temporary placeholder path)",
+        default="geometry_first",
+        help="Mesh build strategy (default: geometry_first)",
     )
     parser.add_argument("--no-resume", action="store_true",
                         help="Re-run even if output exists")

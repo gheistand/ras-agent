@@ -262,7 +262,7 @@ def run_watershed(
     output_dir: Path,
     return_periods: Optional[list] = None,
     resolution_m: float = 3.0,
-    mesh_strategy: str = "hdf5_direct",
+    mesh_strategy: str = "geometry_first",
     nlcd_raster_path: Optional[Path] = None,
     ras_exe_dir: Optional[Path] = None,
     max_parallel: int = 2,
@@ -279,9 +279,9 @@ def run_watershed(
         output_dir:        Root directory for all pipeline outputs
         return_periods:    Return periods to model (default: [10, 50, 100])
         resolution_m:      DEM resolution in meters (default: 3.0)
-        mesh_strategy:     HEC-RAS mesh build strategy (default: "hdf5_direct")
-                           where "hdf5_direct" is the current placeholder until
-                           the geometry-first `ras-commander` builder lands
+        mesh_strategy:     HEC-RAS mesh build strategy (default: "geometry_first")
+                           uses ras-commander GeomStorage to write .g## and
+                           lets HEC-RAS regenerate HDF artifacts
         nlcd_raster_path:  Optional NLCD 2019 GeoTIFF for Manning's n
         ras_exe_dir:       Path to RasUnsteady binary dir; None = mock mode
         max_parallel:      Maximum simultaneous HEC-RAS jobs

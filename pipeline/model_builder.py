@@ -4,15 +4,18 @@ model_builder.py — HEC-RAS 6.6 project builder
 Builds a HEC-RAS 6.6 project directory from watershed delineation and
 design hydrograph results. Supports three mesh strategies:
 
-  template_clone  — clone an existing template project, swap terrain/BCs
-  hdf5_direct     — current experimental seed-project placeholder
-  ras2025         — use RAS2025 API for mesh generation (future)
+  template_clone   — clone an existing template project, swap terrain/BCs
+  geometry_first   — create project from template scaffold, write .g## via
+                     ras-commander GeomStorage, let HEC-RAS regenerate HDF
+  hdf5_direct      — legacy experimental seed-project placeholder
+  ras2025          — use RAS2025 API for mesh generation (future)
 
-`hdf5_direct` still exists to keep the repo runnable in mock and prototype
-workflows, but it should not be treated as the architectural end state. The
-target direction is a `ras-commander` driven geometry-first workflow where
-watershed outputs are inserted into the plain-text `.g##` geometry file and
-HEC-RAS regenerates derived HDF/preprocessor artifacts.
+`geometry_first` is the production strategy: it writes watershed-derived
+2D flow area perimeters into plain-text `.g##` files via `ras-commander`
+`GeomStorage` and lets HEC-RAS regenerate derived HDF/preprocessor artifacts.
+
+`hdf5_direct` is retained as a legacy fallback for environments where
+ras-commander is not available.
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -1079,6 +1082,204 @@ def _build_hdf5_direct(
     )
 
 
+# ── Geometry-First Implementation ────────────────────────────────────────────
+
+TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "data" / "RAS_6.6_Template"
+
+
+def _scaffold_project_from_template(
+    output_dir: Path,
+    project_name: str,
+) -> tuple[Path, Path, Path]:
+    """
+    Copy the RAS_6.6_Template scaffold and rename files for the new project.
+
+    Returns (project_dir, prj_file, rasmap_file).
+    """
+    project_dir = output_dir / project_name
+    if project_dir.exists():
+        shutil.rmtree(project_dir)
+    shutil.copytree(TEMPLATE_DIR, project_dir)
+
+    src_prj = project_dir / "TEMPLATE.prj"
+    dst_prj = project_dir / f"{project_name}.prj"
+    text = src_prj.read_text(encoding="utf-8")
+    dst_prj.write_text(text.replace("Proj Title=TEMPLATE", f"Proj Title={project_name}"), encoding="utf-8")
+    src_prj.unlink()
+
+    src_rasmap = project_dir / "TEMPLATE.rasmap"
+    dst_rasmap = project_dir / f"{project_name}.rasmap"
+    if src_rasmap.exists():
+        dst_rasmap.write_text(src_rasmap.read_text(encoding="utf-8"), encoding="utf-8")
+        src_rasmap.unlink()
+
+    bak = project_dir / "TEMPLATE.rasmap.backup"
+    if bak.exists():
+        bak.unlink()
+
+    readme = project_dir / "README.md"
+    if readme.exists():
+        readme.unlink()
+
+    return project_dir, dst_prj, dst_rasmap
+
+
+def _register_files_in_prj(
+    prj_file: Path,
+    geom_ext: str = "g01",
+    flow_ext: str = "u01",
+    plan_ext: str = "p01",
+) -> None:
+    """Append geometry, flow, and plan file references to the .prj file."""
+    text = prj_file.read_text(encoding="utf-8")
+    lines_to_add = (
+        f"Current Plan={plan_ext}\n"
+        f"Geom File={geom_ext}\n"
+        f"Unsteady File={flow_ext}\n"
+        f"Plan File={plan_ext}\n"
+    )
+    prj_file.write_text(text + lines_to_add, encoding="utf-8")
+
+
+def _write_geometry_first_geom_file(
+    geom_file: Path,
+    area_name: str,
+    perimeter_coords: list[tuple[float, float]],
+    cell_size_m: float,
+    mannings_n: float,
+) -> None:
+    """
+    Create a .g## file and populate it via ras-commander GeomStorage.
+
+    Writes the initial header, then delegates perimeter and settings to
+    GeomStorage.set_2d_flow_area_perimeter() and set_2d_flow_area_settings().
+    """
+    from ras_commander.geom import GeomStorage
+
+    geom_file.write_text(
+        "Geom Title=RAS Agent Geometry\n"
+        "Program Version=6.60\n",
+        encoding="utf-8",
+    )
+
+    GeomStorage.set_2d_flow_area_perimeter(
+        geom_file,
+        area_name,
+        coordinates=perimeter_coords,
+        recompute_centroid=True,
+        point_generation_data=[None, None, int(cell_size_m), int(cell_size_m)],
+        create_backup=False,
+    )
+
+    GeomStorage.set_2d_flow_area_settings(
+        geom_file,
+        area_name,
+        mannings_n=mannings_n,
+        create_backup=False,
+    )
+
+    logger.info(
+        "Wrote geometry-first .g## via GeomStorage: %s (%d vertices, cell=%dm, n=%.3f)",
+        geom_file.name, len(perimeter_coords), int(cell_size_m), mannings_n,
+    )
+
+
+def _build_geometry_first(
+    watershed,
+    hydro_set,
+    output_dir: Path,
+    return_periods: list,
+    nlcd_raster_path: Optional[Path] = None,
+    **kwargs,
+) -> HecRasProject:
+    """
+    Build a HEC-RAS 6.6 project using the geometry-first workflow.
+
+    Copies the RAS_6.6_Template scaffold, writes watershed-derived 2D flow
+    area geometry via ras-commander GeomStorage, and creates plan/flow files.
+    HEC-RAS regenerates all HDF artifacts on the next compute_plan() call.
+    """
+    project_name = f"ras_agent_{watershed.characteristics.drainage_area_mi2:.0f}mi2"
+    project_dir, prj_file, rasmap_file = _scaffold_project_from_template(output_dir, project_name)
+
+    area_name = "MainArea"
+    geom_ext = "g01"
+    geom_file = project_dir / f"{project_name}.{geom_ext}"
+
+    basin_poly = _watershed_polygon_5070(watershed)
+    perimeter_coords = list(basin_poly.exterior.coords)
+    cell_size_m = _cell_size_from_area_km2(watershed.characteristics.drainage_area_km2)
+
+    if nlcd_raster_path is not None:
+        mannings_n = dominant_mannings_n_from_raster(nlcd_raster_path, basin_poly)
+    else:
+        mannings_n = DEFAULT_MANNINGS_N
+
+    _write_geometry_first_geom_file(
+        geom_file, area_name, perimeter_coords, cell_size_m, mannings_n,
+    )
+
+    bc_slope = max(watershed.characteristics.main_channel_slope_m_per_m, 1e-6)
+
+    for idx, rp in enumerate(return_periods, start=1):
+        hydro = hydro_set.get(rp)
+        if hydro is None:
+            logger.warning(f"No hydrograph for T={rp}yr; skipping")
+            continue
+
+        u_suffix = f"u{idx:02d}"
+        p_suffix = f"p{idx:02d}"
+        rp_flow_file = project_dir / f"{project_name}.{u_suffix}"
+        rp_plan_file = project_dir / f"{project_name}.{p_suffix}"
+
+        _write_unsteady_flow_file(rp_flow_file, hydro_set, rp, bc_slope)
+        _write_plan_file(
+            rp_plan_file,
+            geom_file=geom_ext,
+            flow_file=u_suffix,
+            simulation_duration_hr=hydro.duration_hr,
+            plan_title=f"T={rp}yr — RAS Agent",
+            short_id=f"T{rp}YR",
+        )
+
+    _register_files_in_prj(prj_file, geom_ext=geom_ext)
+
+    flow_file = project_dir / f"{project_name}.u01"
+    plan_file = project_dir / f"{project_name}.p01"
+    plan_hdf = project_dir / f"{project_name}.p01.hdf"
+
+    metadata = {
+        "watershed_area_mi2": watershed.characteristics.drainage_area_mi2,
+        "watershed_area_km2": watershed.characteristics.drainage_area_km2,
+        "main_channel_slope": bc_slope,
+        "mannings_n": mannings_n,
+        "cell_size_m": cell_size_m,
+        "dem_clipped": str(getattr(watershed, "dem_clipped", "")),
+        "centerline_count": _centerline_count(watershed),
+        "breakline_count": len(bl) if (bl := _linework_5070(getattr(watershed, "breaklines", None))) is not None else 0,
+        "artifact_keys": sorted(list(getattr(watershed, "artifacts", {}).keys())),
+    }
+
+    logger.info(
+        "Geometry-first project complete: %s (%d return periods)",
+        project_dir, len(return_periods),
+    )
+
+    return HecRasProject(
+        project_dir=project_dir,
+        project_name=project_name,
+        prj_file=prj_file,
+        geometry_file=geom_file,
+        flow_file=flow_file,
+        plan_file=plan_file,
+        plan_hdf=plan_hdf,
+        geom_ext=geom_ext,
+        mesh_strategy="geometry_first",
+        return_periods=return_periods,
+        metadata=metadata,
+    )
+
+
 def _build_ras2025(
     watershed,
     hydro_set,
@@ -1187,10 +1388,10 @@ def build_model(
         hydro_set:          Design hydrographs (HydrographSet from hydrograph.py)
         output_dir:         Directory where the project folder will be created
         return_periods:     Return period years to configure; default = all in hydro_set
-        mesh_strategy:      "hdf5_direct" | "template_clone" | "ras2025"
-                            where "hdf5_direct" is the current experimental
-                            placeholder pending the geometry-first
-                            `ras-commander` workflow
+        mesh_strategy:      "geometry_first" | "hdf5_direct" | "template_clone" | "ras2025"
+                            where "geometry_first" uses ras-commander
+                            GeomStorage to write .g## and lets HEC-RAS
+                            regenerate HDF artifacts
         nlcd_raster_path:   Optional NLCD 2019 GeoTIFF for Manning's n lookup
 
     Returns:
@@ -1218,7 +1419,11 @@ def build_model(
     if mock:
         return _build_mock_project(watershed, hydro_set, output_dir, return_periods)
 
-    if mesh_strategy == "template_clone":
+    if mesh_strategy == "geometry_first":
+        return _build_geometry_first(
+            watershed, hydro_set, output_dir, return_periods, nlcd_raster_path, **kwargs
+        )
+    elif mesh_strategy == "template_clone":
         return _build_from_template(
             watershed, hydro_set, output_dir, return_periods, nlcd_raster_path
         )
@@ -1233,5 +1438,5 @@ def build_model(
     else:
         raise ValueError(
             f"Unknown mesh_strategy: '{mesh_strategy}'. "
-            "Valid options: 'template_clone', 'hdf5_direct', 'ras2025'"
+            "Valid options: 'geometry_first', 'template_clone', 'hdf5_direct', 'ras2025'"
         )

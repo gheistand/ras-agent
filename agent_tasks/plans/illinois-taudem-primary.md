@@ -34,10 +34,10 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 
 1. Separate active work by generalizability so reusable methods are upstreamed to `hms-commander` or `ras-commander` instead of accreting in `ras-agent`.
 2. For each blocking sibling-repo feature gap, file or reference a GitHub issue in the target repo and record the issue link in this plan.
-3. Replace the `hdf5_direct` architectural framing with a geometry-first `ras-commander` workflow in docs and code.
-4. Retire or rename the `mesh_strategy='hdf5_direct'` contract once the geometry-first builder exists so the public API no longer implies HDF-first authoring.
+3. ~~Replace the `hdf5_direct` architectural framing with a geometry-first `ras-commander` workflow in docs and code.~~ DONE — `geometry_first` is the default strategy in orchestrator.py and batch.py (2026-04-19).
+4. ~~Retire or rename the `mesh_strategy='hdf5_direct'` contract once the geometry-first builder exists so the public API no longer implies HDF-first authoring.~~ DONE — `hdf5_direct` retained as legacy fallback, `geometry_first` is the default (2026-04-19).
 5. Mature `data/RAS_6.6_Template/` into at least one usable 2D seed template and, if needed, a separate 1D seed template with real geometry, flow, and plan files.
-6. Implement a first-class `ras-commander` writer for watershed-derived 2D flow area perimeter geometry in `.g##`.
+6. ~~Implement a first-class `ras-commander` writer for watershed-derived 2D flow area perimeter geometry in `.g##`.~~ DONE — ras-commander Issue #38 complete, integrated via `_write_geometry_first_geom_file()` (2026-04-19).
 7. Wire watershed outputs into `ras-commander` geometry, land-cover, and infiltration compilation workflows.
 8. Push reusable TauDEM example and preprocessing patterns toward `hms-commander` while keeping Illinois-specific adaptation in `ras-agent`.
 9. Validate direct TauDEM runs on at least two Illinois basins, including one low-relief case.
