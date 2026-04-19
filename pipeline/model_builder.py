@@ -25,6 +25,7 @@ import logging
 import math
 import re
 import shutil
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1141,6 +1142,40 @@ def _register_files_in_prj(
     prj_file.write_text(text + lines_to_add, encoding="utf-8")
 
 
+def _register_terrain_in_rasmap(rasmap_file: Path, terrain_path: Path) -> None:
+    """Replace the empty terrain node in a RASMap file with the project terrain."""
+    tree = ET.parse(rasmap_file)
+    root = tree.getroot()
+    terrains = root.find("Terrains")
+    if terrains is None:
+        raise ValueError(f"Terrains element not found in {rasmap_file}")
+
+    registered_terrains = ET.Element(
+        "Terrains",
+        {"Checked": "True", "Expanded": "True"},
+    )
+    ET.SubElement(
+        registered_terrains,
+        "Layer",
+        {
+            "Name": "Terrain",
+            "Type": "TerrainLayer",
+            "Checked": "True",
+            "Filename": r".\terrain.tif",
+        },
+    )
+
+    for index, child in enumerate(list(root)):
+        if child is terrains:
+            root.remove(terrains)
+            root.insert(index, registered_terrains)
+            break
+
+    ET.indent(tree, space="  ")
+    tree.write(rasmap_file, encoding="utf-8", short_empty_elements=True)
+    logger.info("Registered terrain in rasmap: %s -> %s", rasmap_file.name, terrain_path.name)
+
+
 def _write_geometry_first_geom_file(
     geom_file: Path,
     area_name: str,
@@ -1218,6 +1253,14 @@ def _build_geometry_first(
     _write_geometry_first_geom_file(
         geom_file, area_name, perimeter_coords, cell_size_m, mannings_n,
     )
+
+    dem_clipped = getattr(watershed, "dem_clipped", None)
+    if dem_clipped is not None and Path(dem_clipped).exists():
+        terrain_file = project_dir / "terrain.tif"
+        shutil.copy2(dem_clipped, terrain_file)
+        _register_terrain_in_rasmap(rasmap_file, terrain_file)
+    else:
+        logger.warning("No clipped DEM available for terrain registration; skipping")
 
     bc_slope = max(watershed.characteristics.main_channel_slope_m_per_m, 1e-6)
 

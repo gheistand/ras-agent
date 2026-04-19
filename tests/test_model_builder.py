@@ -10,7 +10,7 @@ Apache License 2.0
 import os
 import shutil
 import sys
-import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -417,6 +417,29 @@ def test_register_files_in_prj(tmp_path):
     assert "Current Plan=p01" in text
 
 
+def test_register_terrain_in_rasmap(tmp_path):
+    rasmap_file = tmp_path / "test.rasmap"
+    rasmap_file.write_text(
+        "<RASMapper><Version>2.0.0</Version><Terrains /></RASMapper>",
+        encoding="utf-8",
+    )
+
+    terrain_path = tmp_path / "terrain.tif"
+    terrain_path.write_bytes(b"fake-tif")
+
+    mb._register_terrain_in_rasmap(rasmap_file, terrain_path)
+
+    root = ET.parse(rasmap_file).getroot()
+    terrains = root.find("Terrains")
+    assert terrains is not None
+    assert terrains.attrib == {"Checked": "True", "Expanded": "True"}
+
+    layer = terrains.find("Layer")
+    assert layer is not None
+    assert layer.attrib["Filename"] == r".\terrain.tif"
+    assert layer.attrib["Type"] == "TerrainLayer"
+
+
 def test_write_geometry_first_geom_file(tmp_path):
     geom_file = tmp_path / "test.g01"
     coords = [
@@ -434,7 +457,9 @@ def test_write_geometry_first_geom_file(tmp_path):
 
 
 def test_build_geometry_first_creates_complete_project(tmp_path):
-    watershed = _make_watershed()
+    dem_path = tmp_path / "source_dem.tif"
+    dem_path.write_bytes(b"fake-dem")
+    watershed = _make_watershed(dem_path=dem_path)
     hydro_set = _make_hydro_set()
     project = mb._build_geometry_first(
         watershed, hydro_set, tmp_path, return_periods=[10, 100],
@@ -444,6 +469,7 @@ def test_build_geometry_first_creates_complete_project(tmp_path):
     assert project.geometry_file.exists()
     assert project.flow_file.exists()
     assert project.plan_file.exists()
+    assert (project.project_dir / "terrain.tif").exists()
 
     prj_text = project.prj_file.read_text()
     assert "Geom File=g01" in prj_text
@@ -452,6 +478,31 @@ def test_build_geometry_first_creates_complete_project(tmp_path):
     geom_text = project.geometry_file.read_text()
     assert "Storage Area=MainArea" in geom_text
     assert "Storage Area Is2D=-1" in geom_text
+
+
+def test_build_geometry_first_registers_terrain(tmp_path):
+    dem_path = tmp_path / "source_dem.tif"
+    dem_path.write_bytes(b"fake-dem")
+    watershed = _make_watershed(dem_path=dem_path)
+    hydro_set = _make_hydro_set()
+
+    project = mb._build_geometry_first(
+        watershed, hydro_set, tmp_path, return_periods=[100],
+    )
+
+    terrain_file = project.project_dir / "terrain.tif"
+    assert terrain_file.exists()
+    assert terrain_file.read_bytes() == b"fake-dem"
+
+    rasmap_file = project.project_dir / f"{project.project_name}.rasmap"
+    root = ET.parse(rasmap_file).getroot()
+    terrains = root.find("Terrains")
+    assert terrains is not None
+    assert terrains.attrib["Checked"] == "True"
+
+    layer = terrains.find("Layer")
+    assert layer is not None
+    assert layer.attrib["Filename"] == r".\terrain.tif"
 
 
 def test_build_model_dispatches_geometry_first(tmp_path):
