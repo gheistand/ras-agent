@@ -22,10 +22,12 @@ from shapely.geometry import box
 
 from terrain import (
     TerrainError,
+    find_champ_image_service,
     download_nlcd,
     reproject_nlcd,
     clip_nlcd_to_watershed,
     get_nlcd,
+    get_terrain,
 )
 
 
@@ -137,3 +139,52 @@ def test_clip_nlcd_to_watershed(tmp_path):
         assert ds.crs == CRS.from_epsg(5070)
         arr = ds.read(1)
         assert arr.size > 0, "Clipped raster must have pixels"
+
+
+def test_find_champ_image_service_returns_intersecting_service(monkeypatch):
+    bbox = (-89.8, 39.6, -89.4, 40.0)
+    metadata = {
+        "fullExtent": {
+            "xmin": -90.0,
+            "ymin": 39.4,
+            "xmax": -89.0,
+            "ymax": 40.4,
+            "spatialReference": {"wkid": 4326},
+        },
+        "maxImageWidth": 4096,
+        "maxImageHeight": 4096,
+    }
+
+    monkeypatch.setattr("terrain._get_arcgis_service_metadata", lambda url: metadata)
+    result = find_champ_image_service(bbox, candidate_urls=["https://example.test/ImageServer"])
+
+    assert result is not None
+    assert result["url"] == "https://example.test/ImageServer"
+
+
+def test_get_terrain_prefers_champ_image_service(tmp_path, monkeypatch):
+    bbox = (-89.8, 39.6, -89.4, 40.0)
+    output_dir = tmp_path / "terrain"
+    champ_service = {
+        "url": "https://example.test/ImageServer",
+        "metadata": {"maxImageWidth": 4096, "maxImageHeight": 4096},
+    }
+
+    monkeypatch.setattr("terrain.find_champ_image_service", lambda bbox_wgs84: champ_service)
+
+    def _fake_export(service_url, bbox_wgs84, output_path, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake-dem")
+        return output_path
+
+    monkeypatch.setattr("terrain.export_champ_image_service_dem", _fake_export)
+
+    def _unexpected_tiles(*args, **kwargs):
+        raise AssertionError("Legacy tile discovery should not be used when CHAMP succeeds")
+
+    monkeypatch.setattr("terrain.find_ilhmp_tiles", _unexpected_tiles)
+
+    result = get_terrain(bbox_wgs84=bbox, output_dir=output_dir, resolution_m=3.0)
+
+    assert result.exists()
+    assert result.name == "dem_mosaic.tif"

@@ -14,10 +14,12 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+import geopandas as gpd
+from shapely.geometry import LineString, Point, box
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 
@@ -28,6 +30,23 @@ from orchestrator import (
     TerrainResult,
     run_watershed,
 )
+
+if orch._terrain is None:
+    orch._terrain = SimpleNamespace(get_terrain=lambda *args, **kwargs: None)
+if orch._watershed is None:
+    orch._watershed = SimpleNamespace(delineate_watershed=lambda *args, **kwargs: None)
+if orch._streamstats is None:
+    orch._streamstats = SimpleNamespace(get_peak_flows=lambda *args, **kwargs: None)
+if orch._hydrograph is None:
+    orch._hydrograph = SimpleNamespace(generate_hydrograph_set=lambda *args, **kwargs: None)
+if orch._runner is None:
+    orch._runner = SimpleNamespace(
+        enqueue_job=lambda *args, **kwargs: None,
+        run_queue=lambda *args, **kwargs: None,
+        get_job=lambda *args, **kwargs: None,
+    )
+if orch._results is None:
+    orch._results = SimpleNamespace(export_results=lambda *args, **kwargs: {})
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -58,18 +77,34 @@ def _make_watershed_result(tmp_path):
     dem_clipped = tmp_path / "terrain" / "dem_watershed.tif"
     dem_clipped.parent.mkdir(parents=True, exist_ok=True)
     dem_clipped.write_bytes(b"\x00" * 100)
+    basin = box(300000.0, 4400000.0, 315000.0, 4415000.0)
+    basin_gdf = gpd.GeoDataFrame({"name": ["watershed"]}, geometry=[basin], crs="EPSG:5070")
+    stream = LineString([(307500.0, 4414000.0), (307500.0, 4401000.0)])
+    streams_gdf = gpd.GeoDataFrame({"stream_id": [1]}, geometry=[stream], crs="EPSG:5070")
+    subbasins_gdf = basin_gdf.copy()
+    subbasins_gdf["wsno"] = [1]
+    centerlines_gdf = streams_gdf.copy()
+    centerlines_gdf["centerline_id"] = [1]
+    breaklines_gdf = gpd.GeoDataFrame(
+        {"breakline_type": ["stream", "boundary"]},
+        geometry=[stream, basin.boundary],
+        crs="EPSG:5070",
+    )
     return SimpleNamespace(
-        basin=MagicMock(),
-        streams=MagicMock(),
-        pour_point=MagicMock(),
+        basin=basin_gdf,
+        streams=streams_gdf,
+        subbasins=subbasins_gdf,
+        centerlines=centerlines_gdf,
+        breaklines=breaklines_gdf,
+        pour_point=Point(307500.0, 4400500.0),
         characteristics=_make_basin_chars(),
         dem_clipped=dem_clipped,
+        artifacts={"fel": tmp_path / "terrain" / "fel.tif"},
     )
 
 
 def _make_peak_flows():
-    from streamstats import PeakFlowEstimates
-    pf = PeakFlowEstimates(
+    pf = SimpleNamespace(
         pour_point_lon=-89.5,
         pour_point_lat=40.5,
         drainage_area_mi2=50.0,
@@ -84,28 +119,28 @@ def _make_peak_flows():
 
 
 def _make_hydro_set():
-    from hydrograph import HydrographSet, HydrographResult
     times = np.linspace(0, 24, 97)
     flows = np.maximum(np.sin(np.linspace(0, np.pi, 97)) * 1000 + 10, 0)
-    h10 = HydrographResult(
+    h10 = SimpleNamespace(
         return_period_yr=10, peak_flow_cfs=1200.0,
         time_to_peak_hr=4.0, duration_hr=24.0, time_step_hr=0.25,
         times_hr=times, flows_cfs=flows, baseflow_cfs=10.0, source="NRCS_DUH",
     )
-    h50 = HydrographResult(
+    h50 = SimpleNamespace(
         return_period_yr=50, peak_flow_cfs=2500.0,
         time_to_peak_hr=4.0, duration_hr=24.0, time_step_hr=0.25,
         times_hr=times, flows_cfs=flows * 2.1, baseflow_cfs=10.0, source="NRCS_DUH",
     )
-    h100 = HydrographResult(
+    h100 = SimpleNamespace(
         return_period_yr=100, peak_flow_cfs=3200.0,
         time_to_peak_hr=4.0, duration_hr=24.0, time_step_hr=0.25,
         times_hr=times, flows_cfs=flows * 2.7, baseflow_cfs=10.0, source="NRCS_DUH",
     )
-    return HydrographSet(
+    return SimpleNamespace(
         watershed_area_mi2=50.0,
         time_of_concentration_hr=3.5,
         hydrographs={10: h10, 50: h50, 100: h100},
+        get=lambda rp: {10: h10, 50: h50, 100: h100}.get(rp),
     )
 
 
@@ -124,7 +159,7 @@ def _make_project(tmp_path):
         plan_file=proj_dir / "template.p01",
         plan_hdf=plan_hdf,
         geom_ext="g01",
-        mesh_strategy="template_clone",
+        mesh_strategy="hdf5_direct",
         return_periods=[10, 50, 100],
         metadata={},
     )

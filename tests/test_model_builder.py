@@ -17,6 +17,8 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import geopandas as gpd
+from shapely.geometry import LineString, box
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 
@@ -41,11 +43,28 @@ def _make_basin_characteristics(area_mi2=150.0, slope=0.003):
 
 
 def _make_watershed(area_mi2=150.0, dem_path=None):
+    basin = box(300000.0, 4400000.0, 315000.0, 4415000.0)
+    basin_gdf = gpd.GeoDataFrame({"name": ["watershed"]}, geometry=[basin], crs="EPSG:5070")
+    stream = LineString([(307500.0, 4414000.0), (307500.0, 4401000.0)])
+    streams_gdf = gpd.GeoDataFrame({"stream_id": [1]}, geometry=[stream], crs="EPSG:5070")
+    subbasins_gdf = basin_gdf.copy()
+    subbasins_gdf["wsno"] = [1]
+    centerlines_gdf = streams_gdf.copy()
+    centerlines_gdf["centerline_id"] = [1]
+    breaklines_gdf = gpd.GeoDataFrame(
+        {"breakline_type": ["stream", "boundary"]},
+        geometry=[stream, basin.boundary],
+        crs="EPSG:5070",
+    )
     return SimpleNamespace(
         characteristics=_make_basin_characteristics(area_mi2),
-        basin=SimpleNamespace(geometry=SimpleNamespace(iloc=lambda i: None)),
-        streams=None,
+        basin=basin_gdf,
+        streams=streams_gdf,
+        subbasins=subbasins_gdf,
+        centerlines=centerlines_gdf,
+        breaklines=breaklines_gdf,
         dem_clipped=Path(dem_path or "/tmp/fake_dem.tif"),
+        artifacts={"fel": Path("/tmp/fel.tif"), "ad8": Path("/tmp/ad8.tif")},
     )
 
 
@@ -204,11 +223,27 @@ def test_build_from_template_no_templates(tmp_path):
         mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="template_clone")
 
 
-def test_build_hdf5_direct_raises(tmp_path):
+def test_build_hdf5_direct_creates_seed_project(tmp_path):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
-    with pytest.raises(NotImplementedError):
-        mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="hdf5_direct")
+    project = mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="hdf5_direct")
+
+    assert project.mesh_strategy == "hdf5_direct"
+    assert project.prj_file.exists()
+    assert project.geometry_file.exists()
+    assert project.flow_file.exists()
+    assert project.plan_file.exists()
+    assert project.plan_hdf.exists()
+    assert project.metadata["seed_project_only"] is True
+    assert project.metadata["windows_regeneration_required"] is True
+    assert project.metadata["centerline_count"] == 1
+    assert project.metadata["breakline_count"] >= 2
+    assert project.metadata["artifact_keys"] == ["ad8", "fel"]
+
+    geom_text = project.geometry_file.read_text()
+    assert "2D Flow Area=" in geom_text
+    assert "2D Flow Area Cell Size=" in geom_text
+    assert "Mann=" in geom_text
 
 
 def test_build_ras2025_raises(tmp_path):

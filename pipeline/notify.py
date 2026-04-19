@@ -22,7 +22,11 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:  # pragma: no cover - fallback for lean test environments
+    import logging
+    logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from batch import BatchResult

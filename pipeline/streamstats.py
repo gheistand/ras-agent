@@ -12,8 +12,8 @@ Apache License 2.0
 """
 
 import logging
-import time
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Optional
 
 import httpx
@@ -22,7 +22,10 @@ logger = logging.getLogger(__name__)
 
 # ── USGS StreamStats API ──────────────────────────────────────────────────────
 
-STREAMSTATS_BASE = "https://streamstats.usgs.gov/streamstatsservices"
+STREAMSTATS_BASE = os.getenv(
+    "STREAMSTATS_BASE",
+    "https://streamstats.usgs.gov/streamstatsservices",
+)
 
 # Return periods (years) and their AEP labels
 RETURN_PERIODS = {
@@ -62,6 +65,8 @@ class PeakFlowEstimates:
     Q50:  Optional[float] = None
     Q100: Optional[float] = None
     Q500: Optional[float] = None
+    messages: list[str] = field(default_factory=list)
+    gaps: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict[int, float]:
         """Return {return_period: flow_cfs} dict, skipping None values."""
@@ -70,6 +75,33 @@ class PeakFlowEstimates:
             for rp, label in RETURN_PERIODS.items()
             if getattr(self, label) is not None
         }
+
+
+def _build_streamstats_gap(
+    description: str,
+    *,
+    severity: str = "medium",
+    affected_artifact: str = "streamstats_api",
+    blocking_for: str = "automated_peak_flow_inputs",
+    recommended_action: str = (
+        "Update the StreamStats integration to the current USGS service contract "
+        "or document regression fallback usage explicitly."
+    ),
+    issue_url: Optional[str] = None,
+) -> dict:
+    """Return a shared-contract gap record for StreamStats failures."""
+    return {
+        "id": "streamstats-service-transition",
+        "category": "service",
+        "severity": severity,
+        "status": "open",
+        "description": description,
+        "affected_artifact": affected_artifact,
+        "owner_repo": "ras-agent",
+        "issue_url": issue_url,
+        "blocking_for": blocking_for,
+        "recommended_action": recommended_action,
+    }
 
 
 # ── StreamStats API ───────────────────────────────────────────────────────────
@@ -303,6 +335,10 @@ def get_peak_flows(
                     estimates.source = "StreamStats_API"
                     for label, value in parsed.items():
                         setattr(estimates, label, value)
+                    estimates.messages.append(
+                        f"StreamStats API returned {len(parsed)} peak-flow statistics "
+                        f"for workspace {workspace_id}."
+                    )
                     logger.info(
                         f"Peak flows from StreamStats API: "
                         f"Q100={estimates.Q100:.0f} cfs, Q500={estimates.Q500:.0f} cfs"
@@ -310,6 +346,19 @@ def get_peak_flows(
                     return estimates
 
         logger.warning("StreamStats API did not return sufficient data. Using regression fallback.")
+        estimates.messages.append(
+            "Legacy StreamStats API endpoint did not return sufficient data; "
+            "Illinois regression fallback was used."
+        )
+        estimates.gaps.append(
+            _build_streamstats_gap(
+                description=(
+                    "The configured StreamStats endpoint did not return a usable watershed "
+                    "workspace and peak-flow statistic set, so ras-agent fell back to "
+                    "Illinois regression equations."
+                ),
+            )
+        )
 
     # Regression fallback
     il_lat_regions = {
@@ -332,6 +381,9 @@ def get_peak_flows(
     estimates.source = f"regression_{il_region}"
     for label, value in regression_flows.items():
         setattr(estimates, label, value)
+    estimates.messages.append(
+        f"Illinois {il_region} regression equations were used to estimate peak flows."
+    )
 
     return estimates
 

@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:  # pragma: no cover - fallback for lean test environments
+    import logging
+    logger = logging.getLogger(__name__)
 
 import orchestrator as _orchestrator
 from orchestrator import OrchestratorResult, run_watershed
@@ -208,7 +212,7 @@ def run_batch(
     output_dir: Path,
     max_workers: int = 3,
     resolution_m: float = 3.0,
-    mesh_strategy: str = "template_clone",
+    mesh_strategy: str = "hdf5_direct",
     ras_exe_dir: Optional[Path] = None,
     resume: bool = True,
     dry_run: bool = False,
@@ -228,7 +232,9 @@ def run_batch(
         output_dir:     Root output directory
         max_workers:    ThreadPoolExecutor concurrency limit
         resolution_m:   DEM resolution in meters
-        mesh_strategy:  HEC-RAS mesh build strategy
+        mesh_strategy:  HEC-RAS mesh build strategy (default: hdf5_direct)
+                        where "hdf5_direct" is the current placeholder until
+                        the geometry-first `ras-commander` builder lands
         ras_exe_dir:    Path to RasUnsteady binary dir; None = mock mode
         resume:         Skip watersheds with existing completed output
         dry_run:        Load + validate specs, print plan, exit without running
@@ -470,6 +476,11 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--ras-exe-dir", type=Path, default=None)
+    parser.add_argument(
+        "--strategy",
+        default="hdf5_direct",
+        help="Mesh build strategy (default: hdf5_direct; temporary placeholder path)",
+    )
     parser.add_argument("--no-resume", action="store_true",
                         help="Re-run even if output exists")
     parser.add_argument("--dry-run", action="store_true")
@@ -491,6 +502,7 @@ if __name__ == "__main__":
         args.input_file,
         args.output_dir,
         max_workers=args.workers,
+        mesh_strategy=args.strategy,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         resume=not args.no_resume,
         dry_run=args.dry_run,

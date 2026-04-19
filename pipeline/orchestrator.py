@@ -17,24 +17,60 @@ Apache License 2.0
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+from types import SimpleNamespace
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:  # pragma: no cover - fallback for lean test environments
+    import logging
+    logger = logging.getLogger(__name__)
 
 import numpy as np
 
-import terrain as _terrain
-import watershed as _watershed
-import streamstats as _streamstats
-import hydrograph as _hydrograph
-import model_builder as _model_builder
-import runner as _runner
-import results as _results
+try:
+    import terrain as _terrain
+except ImportError:
+    _terrain = None
 
-from watershed import WatershedResult, BasinCharacteristics
-from streamstats import PeakFlowEstimates
-from hydrograph import HydrographSet
-from model_builder import HecRasProject
+try:
+    import watershed as _watershed
+    from watershed import WatershedResult, BasinCharacteristics
+except ImportError:
+    _watershed = None
+    WatershedResult = Any
+    BasinCharacteristics = Any
+
+try:
+    import streamstats as _streamstats
+    from streamstats import PeakFlowEstimates
+except ImportError:
+    _streamstats = None
+    PeakFlowEstimates = Any
+
+try:
+    import hydrograph as _hydrograph
+    from hydrograph import HydrographSet
+except ImportError:
+    _hydrograph = None
+    HydrographSet = Any
+
+try:
+    import model_builder as _model_builder
+    from model_builder import HecRasProject
+except ImportError:
+    _model_builder = None
+    HecRasProject = Any
+
+try:
+    import runner as _runner
+except ImportError:
+    _runner = None
+
+try:
+    import results as _results
+except ImportError:
+    _results = None
 
 
 # ── Data Structures ───────────────────────────────────────────────────────────
@@ -109,6 +145,16 @@ def _plan_hdf_for_rp(project: HecRasProject, rp_index: int) -> Path:
     return project.project_dir / f"{prj_base}.p{rp_index:02d}.hdf"
 
 
+def _require_module(module, name: str):
+    """Raise a clear error when an optional runtime dependency is unavailable."""
+    if module is None:
+        raise ImportError(
+            f"{name} dependencies are not installed in this environment. "
+            f"Install the pipeline requirements before running non-mock workflows."
+        )
+    return module
+
+
 # ── Mock Data Generators ─────────────────────────────────────────────────────
 
 def _mock_terrain(output_dir: Path, lon: float, lat: float) -> "TerrainResult":
@@ -142,13 +188,24 @@ def _mock_terrain(output_dir: Path, lon: float, lat: float) -> "TerrainResult":
 def _mock_watershed(lon: float, lat: float) -> "WatershedResult":
     """Generate a synthetic WatershedResult for mock mode (no DEM needed)."""
     import geopandas as gpd
-    from shapely.geometry import box, Point
+    from shapely.geometry import LineString, Point, box
     from pyproj import Transformer
 
     # ~50 mi² square basin in WGS84, converted to EPSG:5070 for GeoDataFrame
     basin_wgs84 = box(lon - 0.15, lat - 0.15, lon + 0.15, lat + 0.15)
     basin_gdf = gpd.GeoDataFrame(geometry=[basin_wgs84], crs="EPSG:4326").to_crs("EPSG:5070")
-    streams_gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:5070")
+    centroid = basin_gdf.geometry.iloc[0].centroid
+    stream_line = LineString([(centroid.x, centroid.y + 8000), (centroid.x, centroid.y - 8000)])
+    streams_gdf = gpd.GeoDataFrame({"stream_id": [1]}, geometry=[stream_line], crs="EPSG:5070")
+    subbasins_gdf = basin_gdf.copy()
+    subbasins_gdf["wsno"] = [1]
+    centerlines_gdf = streams_gdf.copy()
+    centerlines_gdf["centerline_id"] = [1]
+    breaklines_gdf = gpd.GeoDataFrame(
+        {"breakline_type": ["stream", "boundary"]},
+        geometry=[stream_line, basin_gdf.geometry.iloc[0].boundary],
+        crs="EPSG:5070",
+    )
 
     t = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
     cx, cy = t.transform(lon, lat)
@@ -166,21 +223,34 @@ def _mock_watershed(lon: float, lat: float) -> "WatershedResult":
         pour_point_lon=lon,
         pour_point_lat=lat,
     )
-    return WatershedResult(basin=basin_gdf, streams=streams_gdf,
-                           pour_point=pour_pt, characteristics=chars,
-                           dem_clipped=None)
+    return WatershedResult(
+        basin=basin_gdf,
+        streams=streams_gdf,
+        subbasins=subbasins_gdf,
+        centerlines=centerlines_gdf,
+        breaklines=breaklines_gdf,
+        pour_point=pour_pt,
+        characteristics=chars,
+        dem_clipped=None,
+        artifacts={},
+    )
 
 
 def _mock_peak_flows(lon: float, lat: float) -> "PeakFlowEstimates":
     """Generate synthetic peak flows for mock mode (central IL agricultural)."""
-    return PeakFlowEstimates(
+    return SimpleNamespace(
         pour_point_lon=lon,
         pour_point_lat=lat,
         drainage_area_mi2=50.2,
         source="mock",
         workspace_id=None,
-        Q2=1800, Q5=3100, Q10=4200, Q25=6000,
-        Q50=7600, Q100=9400, Q500=13800,
+        Q2=1800,
+        Q5=3100,
+        Q10=4200,
+        Q25=6000,
+        Q50=7600,
+        Q100=9400,
+        Q500=13800,
     )
 
 
@@ -192,7 +262,7 @@ def run_watershed(
     output_dir: Path,
     return_periods: Optional[list] = None,
     resolution_m: float = 3.0,
-    mesh_strategy: str = "template_clone",
+    mesh_strategy: str = "hdf5_direct",
     nlcd_raster_path: Optional[Path] = None,
     ras_exe_dir: Optional[Path] = None,
     max_parallel: int = 2,
@@ -209,7 +279,9 @@ def run_watershed(
         output_dir:        Root directory for all pipeline outputs
         return_periods:    Return periods to model (default: [10, 50, 100])
         resolution_m:      DEM resolution in meters (default: 3.0)
-        mesh_strategy:     HEC-RAS mesh build strategy (default: "template_clone")
+        mesh_strategy:     HEC-RAS mesh build strategy (default: "hdf5_direct")
+                           where "hdf5_direct" is the current placeholder until
+                           the geometry-first `ras-commander` builder lands
         nlcd_raster_path:  Optional NLCD 2019 GeoTIFF for Manning's n
         ras_exe_dir:       Path to RasUnsteady binary dir; None = mock mode
         max_parallel:      Maximum simultaneous HEC-RAS jobs
@@ -264,7 +336,8 @@ def run_watershed(
         else:
             bbox = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
             terrain_dir = output_dir / "terrain"
-            dem_path = _terrain.get_terrain(bbox, terrain_dir, resolution_m)
+            terrain_mod = _require_module(_terrain, "terrain")
+            dem_path = terrain_mod.get_terrain(bbox, terrain_dir, resolution_m)
             result.terrain = TerrainResult(dem_path=dem_path)
             size_mb = dem_path.stat().st_size / 1e6 if dem_path.exists() else 0
             logger.info(
@@ -291,7 +364,8 @@ def run_watershed(
                 f"{chars.drainage_area_km2:.1f} km² (mock mode)"
             )
         else:
-            ws_result = _watershed.delineate_watershed(
+            watershed_mod = _require_module(_watershed, "watershed")
+            ws_result = watershed_mod.delineate_watershed(
                 dem_path=result.terrain.dem_path,
                 pour_point_lon=pour_point_lon,
                 pour_point_lat=pour_point_lat,
@@ -322,7 +396,8 @@ def run_watershed(
             )
         else:
             chars = result.watershed.characteristics
-            peak_flows = _streamstats.get_peak_flows(
+            streamstats_mod = _require_module(_streamstats, "streamstats")
+            peak_flows = streamstats_mod.get_peak_flows(
                 pour_point_lon=pour_point_lon,
                 pour_point_lat=pour_point_lat,
                 drainage_area_mi2=chars.drainage_area_mi2,
@@ -350,7 +425,8 @@ def run_watershed(
     )
     try:
         chars = result.watershed.characteristics
-        hydro_set = _hydrograph.generate_hydrograph_set(
+        hydrograph_mod = _require_module(_hydrograph, "hydrograph")
+        hydro_set = hydrograph_mod.generate_hydrograph_set(
             peak_flows=result.peak_flows,
             channel_length_km=chars.main_channel_length_km,
             channel_slope_m_per_m=chars.main_channel_slope_m_per_m,
@@ -375,7 +451,8 @@ def run_watershed(
         f"(strategy={mesh_strategy}) …"
     )
     try:
-        project = _model_builder.build_model(
+        model_builder_mod = _require_module(_model_builder, "model_builder")
+        project = model_builder_mod.build_model(
             watershed=result.watershed,
             hydro_set=result.hydro_set,
             output_dir=output_dir / "model",
@@ -402,9 +479,10 @@ def run_watershed(
         f"(mock={mock}) …"
     )
     try:
+        runner_mod = _require_module(_runner, "runner")
         for i, rp in enumerate(return_periods, 1):
             rp_plan_hdf = _plan_hdf_for_rp(result.project, i)
-            job_id = _runner.enqueue_job(
+            job_id = runner_mod.enqueue_job(
                 name=f"{name}_T{rp}yr",
                 project_dir=str(result.project.project_dir),
                 plan_hdf=str(rp_plan_hdf),
@@ -415,7 +493,7 @@ def run_watershed(
             result.job_ids.append(job_id)
 
         exe_dir = ras_exe_dir if ras_exe_dir is not None else Path("/nonexistent")
-        _runner.run_queue(
+        runner_mod.run_queue(
             ras_exe_dir=exe_dir,
             max_parallel=max_parallel,
             mock=mock,
@@ -437,8 +515,9 @@ def run_watershed(
     logger.info("[Stage 7/7] Exporting results …")
     n_files_total = 0
     try:
+        runner_mod = _require_module(_runner, "runner")
         for job_id, rp in zip(result.job_ids, return_periods):
-            job = _runner.get_job(job_id, db_path=db_path)
+            job = runner_mod.get_job(job_id, db_path=db_path)
             if job is None or job["status"] != "complete":
                 err = (
                     f"Job {job_id} (T={rp}yr) did not complete — "
@@ -461,7 +540,8 @@ def run_watershed(
                 continue
 
             try:
-                exported = _results.export_results(
+                results_mod = _require_module(_results, "results")
+                exported = results_mod.export_results(
                     hdf_path=output_hdf,
                     output_dir=rp_output_dir,
                 )
@@ -529,8 +609,14 @@ if __name__ == "__main__":
                         help="Return periods in years (default: 10 50 100)")
     parser.add_argument("--resolution", type=float, default=3.0,
                         help="DEM resolution in meters (default: 3.0)")
-    parser.add_argument("--strategy", default="template_clone",
-                        help="Mesh build strategy (default: template_clone)")
+    parser.add_argument(
+        "--strategy",
+        default="hdf5_direct",
+        help=(
+            "Mesh build strategy "
+            "(default: hdf5_direct; temporary placeholder path)"
+        ),
+    )
     parser.add_argument("--ras-exe-dir", type=Path, default=None,
                         help="Path to RasUnsteady binary directory")
     parser.add_argument("--mock", action="store_true",

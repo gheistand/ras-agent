@@ -5,12 +5,14 @@ Builds a HEC-RAS 6.6 project directory from watershed delineation and
 design hydrograph results. Supports three mesh strategies:
 
   template_clone  — clone an existing template project, swap terrain/BCs
-  hdf5_direct     — write geometry HDF5 from scratch (future)
+  hdf5_direct     — current experimental seed-project placeholder
   ras2025         — use RAS2025 API for mesh generation (future)
 
-The interface is path-agnostic from day one; only template_clone is
-implemented in Phase 2. No RAS Commander import — RAS Commander use
-is deferred until after clarification from Bill Katzenmeyer.
+`hdf5_direct` still exists to keep the repo runnable in mock and prototype
+workflows, but it should not be treated as the architectural end state. The
+target direction is a `ras-commander` driven geometry-first workflow where
+watershed outputs are inserted into the plain-text `.g##` geometry file and
+HEC-RAS regenerates derived HDF/preprocessor artifacts.
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -565,6 +567,182 @@ def _write_perimeter_to_geometry_file(
     return True
 
 
+def _watershed_polygon_5070(watershed):
+    """Return a single watershed polygon in EPSG:5070."""
+    from pyproj import Transformer
+    from shapely.geometry import box
+    import geopandas as gpd
+
+    basin = getattr(watershed, "basin", None)
+    basin_geom = getattr(basin, "geometry", None)
+    if basin_geom is not None and hasattr(basin_geom, "iloc"):
+        geom = basin_geom.iloc[0]
+        basin_crs = getattr(basin, "crs", None) or "EPSG:5070"
+        basin_gdf = gpd.GeoDataFrame(geometry=[geom], crs=basin_crs).to_crs("EPSG:5070")
+        return basin_gdf.geometry.iloc[0]
+
+    if basin is not None and hasattr(basin, "geom_type"):
+        basin_gdf = gpd.GeoDataFrame(geometry=[basin], crs="EPSG:5070").to_crs("EPSG:5070")
+        return basin_gdf.geometry.iloc[0]
+
+    chars = watershed.characteristics
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    center_x, center_y = transformer.transform(chars.centroid_lon, chars.centroid_lat)
+    area_m2 = max(chars.drainage_area_km2, 0.01) * 1_000_000.0
+    side = math.sqrt(area_m2)
+    return box(
+        center_x - side / 2.0,
+        center_y - side / 2.0,
+        center_x + side / 2.0,
+        center_y + side / 2.0,
+    )
+
+
+def _linework_5070(gdf_like) -> Optional["gpd.GeoDataFrame"]:
+    """Coerce a linework GeoDataFrame-like object to EPSG:5070."""
+    if gdf_like is None or not hasattr(gdf_like, "geometry"):
+        return None
+    import geopandas as gpd
+
+    crs = getattr(gdf_like, "crs", None) or "EPSG:5070"
+    gdf = gpd.GeoDataFrame(gdf_like.copy(), geometry=gdf_like.geometry, crs=crs)
+    return gdf.to_crs("EPSG:5070")
+
+
+def _build_seed_breaklines(
+    watershed,
+    basin_poly,
+    centerlines_gdf,
+):
+    """Return breaklines in EPSG:5070 from watershed outputs or fallbacks."""
+    import geopandas as gpd
+
+    existing = _linework_5070(getattr(watershed, "breaklines", None))
+    if existing is not None and len(existing) > 0:
+        return existing
+
+    geoms = []
+    types = []
+    if centerlines_gdf is not None and len(centerlines_gdf) > 0:
+        for geom in centerlines_gdf.geometry:
+            geoms.append(geom)
+            types.append("stream")
+
+    boundary = basin_poly.boundary
+    if hasattr(boundary, "geoms"):
+        for geom in boundary.geoms:
+            geoms.append(geom)
+            types.append("boundary")
+    else:
+        geoms.append(boundary)
+        types.append("boundary")
+
+    return gpd.GeoDataFrame({"breakline_type": types}, geometry=geoms, crs="EPSG:5070")
+
+
+def _cell_size_from_area_km2(area_km2: float) -> float:
+    """Adaptive default cell size for a seed project."""
+    return min(max(area_km2 * 0.5, 30.0), 300.0)
+
+
+def _seed_cell_centers(basin_poly, cell_size_m: float, max_cells: int = 4000):
+    """Generate regular seed cell centers inside the basin polygon."""
+    import numpy as np
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+
+    minx, miny, maxx, maxy = basin_poly.bounds
+    xs = np.arange(minx + cell_size_m / 2.0, maxx, cell_size_m)
+    ys = np.arange(miny + cell_size_m / 2.0, maxy, cell_size_m)
+    prepared = prep(basin_poly)
+    centers = []
+    for y in ys:
+        for x in xs:
+            if prepared.contains(Point(float(x), float(y))):
+                centers.append((float(x), float(y)))
+
+    if not centers:
+        centers = [(float(basin_poly.centroid.x), float(basin_poly.centroid.y))]
+    if len(centers) > max_cells:
+        stride = math.ceil(len(centers) / max_cells)
+        centers = centers[::stride]
+    return np.asarray(centers, dtype=float)
+
+
+def _write_project_file(prj_file: Path, project_name: str) -> None:
+    """Write a minimal HEC-RAS project file."""
+    prj_file.write_text(
+        f"Proj Title={project_name}\n"
+        f"Current Plan=p01\n"
+        f"Program Version=6.60\n"
+    )
+
+
+def _write_geometry_seed_file(
+    geom_file: Path,
+    area_name: str,
+    perimeter_coords: list[tuple[float, float]],
+    cell_size_m: float,
+    mannings_n: float,
+) -> None:
+    """
+    Write a minimal ASCII geometry file for the current experimental seed path.
+
+    Long-term, watershed-derived 2D flow area geometry should be emitted via
+    `ras-commander` geometry writers rather than maintained here as the primary
+    project-assembly contract.
+    """
+    coords = list(perimeter_coords)
+    if coords[0] != coords[-1]:
+        coords.append(coords[0])
+    coord_lines = "\n".join(f"     {x:.3f},{y:.3f}" for x, y in coords)
+    geom_file.write_text(
+        f"Geom Title=RAS Agent Seed Geometry\n"
+        f"Program Version=6.60\n\n"
+        f"2D Flow Area= {area_name}  ,0\n"
+        f"2D Flow Area Perimeter= {len(coords)}\n"
+        f"{coord_lines}\n"
+        f"2D Flow Area Cell Size= {cell_size_m:.1f}\n"
+        f"Mann= {mannings_n:.3f} ,0 ,0\n"
+    )
+
+
+def _seed_hdf_geometry(
+    hdf_path: Path,
+    area_name: str,
+    cell_centers,
+    terrain_path: Optional[Path] = None,
+    mannings_n: float = DEFAULT_MANNINGS_N,
+) -> None:
+    """Write minimal geometry metadata into a plan or geometry HDF."""
+    import h5py
+    import numpy as np
+
+    with h5py.File(hdf_path, "w") as hf:
+        hf.attrs["File Type"] = "HEC-RAS Seed Geometry"
+        hf.create_group("Plan Data")
+        area_group = hf.require_group(f"Geometry/2D Flow Areas/{area_name}")
+        area_group.create_dataset(
+            "Cells Center Coordinate",
+            data=np.asarray(cell_centers, dtype=np.float64),
+        )
+        mann = np.zeros((1, 3), dtype=float)
+        mann[:, 1] = mannings_n
+        area_group.create_dataset("Mann", data=mann)
+        if terrain_path is not None:
+            area_group.create_dataset("Terrain Filename", data=str(terrain_path))
+
+
+def _centerline_count(watershed) -> int:
+    centerlines = getattr(watershed, "centerlines", None)
+    if centerlines is not None and hasattr(centerlines, "__len__"):
+        return len(centerlines)
+    streams = getattr(watershed, "streams", None)
+    if streams is not None and hasattr(streams, "__len__"):
+        return len(streams)
+    return 0
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
@@ -645,15 +823,8 @@ def _build_from_template(
     if geom_files and watershed.basin is not None:
         geom_file = geom_files[0]
         try:
-            import geopandas as gpd
-            basin_geom = getattr(watershed.basin, "geometry", None)
-            if basin_geom is not None and hasattr(basin_geom, "iloc"):
-                basin_shape = basin_geom.iloc[0]
-            else:
-                basin_shape = watershed.basin
-            basin_gdf = gpd.GeoDataFrame(geometry=[basin_shape], crs="EPSG:4326")
-            basin_5070 = basin_gdf.to_crs("EPSG:5070")
-            boundary = basin_5070.geometry.iloc[0].exterior
+            basin_shape = _watershed_polygon_5070(watershed)
+            boundary = basin_shape.exterior
             perimeter_coords = list(boundary.coords)
             # Adaptive cell size: 30-300m based on drainage area
             area_km2 = watershed.characteristics.drainage_area_km2
@@ -772,17 +943,139 @@ def _build_hdf5_direct(
     **kwargs,
 ) -> HecRasProject:
     """
-    TODO: Build HEC-RAS geometry HDF5 from scratch using h5py.
-    Planned for Phase 2B after template+clone is proven.
+    Build the current experimental seed HEC-RAS project from watershed geometry.
 
-    True greenfield approach: define 2D flow area perimeter from watershed
-    polygon, generate mesh cells programmatically, write all HDF5 datasets
-    matching HEC-RAS 6.6 geometry file spec.
+    This path does not require TEMPLATE_REGISTRY. It writes ASCII project,
+    geometry, plan, and flow files plus minimal seed HDF metadata so downstream
+    steps can carry project provenance and HEC-RAS can regenerate richer
+    geometry on the next Windows-side open/save cycle.
+
+    This is scaffolding, not the intended long-term build architecture. The
+    production direction is to hand watershed geometry, roughness, and
+    infiltration instructions to `ras-commander`, keep `.g##` authoritative for
+    geometry-backed content, and let HEC-RAS rebuild compiled HDF artifacts.
     """
-    raise NotImplementedError(
-        "Direct HDF5 mesh construction not yet implemented. "
-        "Use mesh_strategy='template_clone' for now. "
-        "See docs/KNOWLEDGE.md § 'Three Mesh Strategy Paths' (Path B) for plan."
+    project_name = f"ras_agent_{watershed.characteristics.drainage_area_mi2:.0f}mi2"
+    project_dir = Path(output_dir) / project_name
+    if project_dir.exists():
+        shutil.rmtree(project_dir)
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    project_base = project_name
+    prj_file = project_dir / f"{project_base}.prj"
+    geom_file = project_dir / f"{project_base}.g01"
+    geom_hdf = project_dir / f"{project_base}.g01.hdf"
+    geom_ext = "g01"
+    area_name = "MainArea"
+
+    basin_poly = _watershed_polygon_5070(watershed)
+    centerline_source = getattr(watershed, "centerlines", None)
+    if centerline_source is None:
+        centerline_source = getattr(watershed, "streams", None)
+    centerlines_gdf = _linework_5070(centerline_source)
+    breaklines_gdf = _build_seed_breaklines(watershed, basin_poly, centerlines_gdf)
+    cell_size_m = _cell_size_from_area_km2(watershed.characteristics.drainage_area_km2)
+    perimeter_coords = list(basin_poly.exterior.coords)
+
+    if nlcd_raster_path is not None:
+        mannings_n = dominant_mannings_n_from_raster(nlcd_raster_path, basin_poly)
+    else:
+        mannings_n = DEFAULT_MANNINGS_N
+
+    _write_project_file(prj_file, project_name)
+    _write_geometry_seed_file(
+        geom_file,
+        area_name=area_name,
+        perimeter_coords=perimeter_coords,
+        cell_size_m=cell_size_m,
+        mannings_n=mannings_n,
+    )
+
+    cell_centers = _seed_cell_centers(basin_poly, cell_size_m)
+    _seed_hdf_geometry(
+        geom_hdf,
+        area_name=area_name,
+        cell_centers=cell_centers,
+        terrain_path=getattr(watershed, "dem_clipped", None),
+        mannings_n=mannings_n,
+    )
+
+    bc_slope = max(watershed.characteristics.main_channel_slope_m_per_m, 1e-6)
+
+    for idx, rp in enumerate(return_periods, start=1):
+        hydro = hydro_set.get(rp)
+        if hydro is None:
+            logger.warning(f"No hydrograph for T={rp}yr; skipping")
+            continue
+
+        u_suffix = f"u{idx:02d}"
+        p_suffix = f"p{idx:02d}"
+        rp_flow_file = project_dir / f"{project_base}.{u_suffix}"
+        rp_plan_file = project_dir / f"{project_base}.{p_suffix}"
+        rp_plan_hdf = project_dir / f"{project_base}.{p_suffix}.hdf"
+
+        _write_unsteady_flow_file(rp_flow_file, hydro_set, rp, bc_slope)
+        _write_plan_file(
+            rp_plan_file,
+            geom_file=geom_ext,
+            flow_file=u_suffix,
+            simulation_duration_hr=hydro.duration_hr,
+            plan_title=f"T={rp}yr — RAS Agent Seed",
+            short_id=f"T{rp}YR",
+        )
+        _seed_hdf_geometry(
+            rp_plan_hdf,
+            area_name=area_name,
+            cell_centers=cell_centers,
+            terrain_path=getattr(watershed, "dem_clipped", None),
+            mannings_n=mannings_n,
+        )
+
+    flow_file = project_dir / f"{project_base}.u01"
+    plan_file = project_dir / f"{project_base}.p01"
+    plan_hdf = project_dir / f"{project_base}.p01.hdf"
+    if not plan_hdf.exists():
+        _seed_hdf_geometry(
+            plan_hdf,
+            area_name=area_name,
+            cell_centers=cell_centers,
+            terrain_path=getattr(watershed, "dem_clipped", None),
+            mannings_n=mannings_n,
+        )
+
+    metadata = {
+        "watershed_area_mi2": watershed.characteristics.drainage_area_mi2,
+        "watershed_area_km2": watershed.characteristics.drainage_area_km2,
+        "main_channel_slope": bc_slope,
+        "mannings_n": mannings_n,
+        "dem_clipped": str(getattr(watershed, "dem_clipped", "")),
+        "centerline_count": _centerline_count(watershed),
+        "breakline_count": len(breaklines_gdf),
+        "artifact_keys": sorted(list(getattr(watershed, "artifacts", {}).keys())),
+        "seed_project_only": True,
+        "windows_regeneration_required": True,
+        "geometry_hdf": str(geom_hdf),
+    }
+
+    logger.info(
+        "Template-free seed project complete: %s (%d return periods, %.0f cell centers)",
+        project_dir,
+        len(return_periods),
+        len(cell_centers),
+    )
+
+    return HecRasProject(
+        project_dir=project_dir,
+        project_name=project_name,
+        prj_file=prj_file,
+        geometry_file=geom_file,
+        flow_file=flow_file,
+        plan_file=plan_file,
+        plan_hdf=plan_hdf,
+        geom_ext=geom_ext,
+        mesh_strategy="hdf5_direct",
+        return_periods=return_periods,
+        metadata=metadata,
     )
 
 
@@ -804,7 +1097,7 @@ def _build_ras2025(
     """
     raise NotImplementedError(
         "RAS2025 API integration not yet implemented. "
-        "Use mesh_strategy='template_clone' for now. "
+        "Use mesh_strategy='hdf5_direct' only as the current placeholder path. "
         "RAS2025 is alpha as of March 2026; no Linux build available. "
         "See docs/KNOWLEDGE.md § 'Three Mesh Strategy Paths' (Path C)."
     )
@@ -878,7 +1171,7 @@ def build_model(
     hydro_set,
     output_dir: Path,
     return_periods: Optional[list] = None,
-    mesh_strategy: str = "template_clone",
+    mesh_strategy: str = "hdf5_direct",
     nlcd_raster_path: Optional[Path] = None,
     mock: bool = False,
     **kwargs,
@@ -894,7 +1187,10 @@ def build_model(
         hydro_set:          Design hydrographs (HydrographSet from hydrograph.py)
         output_dir:         Directory where the project folder will be created
         return_periods:     Return period years to configure; default = all in hydro_set
-        mesh_strategy:      "template_clone" | "hdf5_direct" | "ras2025"
+        mesh_strategy:      "hdf5_direct" | "template_clone" | "ras2025"
+                            where "hdf5_direct" is the current experimental
+                            placeholder pending the geometry-first
+                            `ras-commander` workflow
         nlcd_raster_path:   Optional NLCD 2019 GeoTIFF for Manning's n lookup
 
     Returns:
@@ -903,7 +1199,7 @@ def build_model(
     Raises:
         ValueError:          Unknown mesh_strategy
         RuntimeError:        No templates registered (template_clone only)
-        NotImplementedError: hdf5_direct or ras2025 strategies not yet implemented
+        NotImplementedError: ras2025 strategy not yet implemented
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
