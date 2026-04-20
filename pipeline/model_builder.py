@@ -1275,6 +1275,7 @@ def _build_geometry_first(
     )
 
     dem_clipped = getattr(watershed, "dem_clipped", None)
+    terrain_file = None
     if dem_clipped is not None and Path(dem_clipped).exists():
         terrain_file = project_dir / "terrain.tif"
         shutil.copy2(dem_clipped, terrain_file)
@@ -1283,6 +1284,31 @@ def _build_geometry_first(
         logger.warning("No clipped DEM available for terrain registration; skipping")
 
     bc_slope = max(watershed.characteristics.main_channel_slope_m_per_m, 1e-6)
+
+    # Generate 2D BC Lines from watershed/stream/terrain data
+    from pipeline.bc_lines import (
+        append_bc_lines_to_geom,
+        generate_bc_lines,
+        write_unsteady_flow_file_2d,
+    )
+    from shapely.geometry import Point as ShapelyPoint
+
+    streams_gdf = _linework_5070(getattr(watershed, "streams", None))
+    streams_5070 = list(streams_gdf.geometry) if streams_gdf is not None else []
+    pp = getattr(watershed, "pour_point", None)
+    pour_point_geom = ShapelyPoint(pp.x, pp.y) if pp is not None else basin_poly.centroid
+
+    dem_for_bc = terrain_file
+
+    bc_set = generate_bc_lines(
+        basin=basin_poly,
+        streams=streams_5070,
+        pour_point=pour_point_geom,
+        dem_path=dem_for_bc,
+        area_name=area_name,
+        channel_slope=bc_slope,
+    )
+    append_bc_lines_to_geom(geom_file, bc_set)
 
     for idx, rp in enumerate(return_periods, start=1):
         hydro = hydro_set.get(rp)
@@ -1295,7 +1321,7 @@ def _build_geometry_first(
         rp_flow_file = project_dir / f"{project_name}.{u_suffix}"
         rp_plan_file = project_dir / f"{project_name}.{p_suffix}"
 
-        _write_unsteady_flow_file(rp_flow_file, hydro_set, rp, bc_slope)
+        write_unsteady_flow_file_2d(rp_flow_file, hydro_set, rp, bc_set, bc_slope)
         _write_plan_file(
             rp_plan_file,
             geom_file=geom_ext,
@@ -1435,7 +1461,7 @@ def build_model(
     hydro_set,
     output_dir: Path,
     return_periods: Optional[list] = None,
-    mesh_strategy: str = "hdf5_direct",
+    mesh_strategy: str = "geometry_first",
     nlcd_raster_path: Optional[Path] = None,
     mock: bool = False,
     **kwargs,
@@ -1452,9 +1478,9 @@ def build_model(
         output_dir:         Directory where the project folder will be created
         return_periods:     Return period years to configure; default = all in hydro_set
         mesh_strategy:      "geometry_first" | "hdf5_direct" | "template_clone" | "ras2025"
-                            where "geometry_first" uses ras-commander
-                            GeomStorage to write .g## and lets HEC-RAS
-                            regenerate HDF artifacts
+                            default is "geometry_first", which uses
+                            ras-commander GeomStorage to write .g## and
+                            lets HEC-RAS regenerate HDF artifacts
         nlcd_raster_path:   Optional NLCD 2019 GeoTIFF for Manning's n lookup
 
     Returns:

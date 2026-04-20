@@ -479,6 +479,17 @@ def test_build_geometry_first_creates_complete_project(tmp_path):
     assert "Storage Area=MainArea" in geom_text
     assert "Storage Area Is2D=-1" in geom_text
 
+    # BC Lines present in .g01
+    assert "BC Line Name=" in geom_text
+    assert "BC Line Storage Area=MainArea" in geom_text
+    assert "BC Line Arc=" in geom_text
+
+    # .u01 uses 2D Boundary Locations (not 1D refs)
+    flow_text = project.flow_file.read_text()
+    assert "Boundary Location=" in flow_text
+    assert "MainArea" in flow_text
+    assert "RAS_AGENT,MAIN" not in flow_text
+
 
 def test_build_geometry_first_registers_terrain(tmp_path):
     dem_path = tmp_path / "source_dem.tif"
@@ -511,6 +522,15 @@ def test_build_model_dispatches_geometry_first(tmp_path):
     project = mb.build_model(
         watershed, hydro_set, tmp_path, mesh_strategy="geometry_first",
     )
+    assert project.mesh_strategy == "geometry_first"
+    assert project.geometry_file.exists()
+
+
+def test_build_model_defaults_to_geometry_first(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb.build_model(watershed, hydro_set, tmp_path)
+
     assert project.mesh_strategy == "geometry_first"
     assert project.geometry_file.exists()
 
