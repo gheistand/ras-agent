@@ -148,21 +148,8 @@ def test_geometry_first_builds_valid_project(tmp_path):
 @requires_basin
 @requires_dem
 @requires_ras
-@pytest.mark.skip(reason=(
-    "HEC-RAS 6.6 CLI hangs when run as a subprocess — "
-    "it requires an interactive desktop session. "
-    "Run manually: open the project in HEC-RAS GUI and preprocess geometry."
-))
 def test_geometry_first_hecras_preprocess(tmp_path):
-    """Build project with terrain, launch HEC-RAS, confirm geometry HDF is created.
-
-    NOTE: HEC-RAS 6.6 is a WinForms app that blocks when spawned as a
-    subprocess without access to an interactive desktop session. This test
-    is retained for manual validation — open the built project in HEC-RAS
-    GUI and verify that geometry preprocessing generates the .g01.hdf.
-    """
-    import subprocess
-    import time
+    """Build project with terrain, run HEC-RAS via compute_plan, confirm geometry HDF."""
     import model_builder as mb
 
     basin_poly = _load_basin_polygon()
@@ -175,34 +162,23 @@ def test_geometry_first_hecras_preprocess(tmp_path):
         mesh_strategy="geometry_first",
     )
 
+    from ras_commander import init_ras_project, RasCmdr
+
+    init_ras_project(project.project_dir, "6.6")
+
     for hdf in project.project_dir.glob("*.g01.hdf"):
         hdf.unlink()
+
+    try:
+        result = RasCmdr.compute_plan(
+            "01", force_geompre=True, num_cores=2,
+        )
+    except Exception as e:
+        pytest.skip(f"HEC-RAS execution unavailable: {e}")
 
     geom_hdf = project.geometry_file.with_suffix(
         project.geometry_file.suffix + ".hdf"
     )
-
-    cmd = [
-        str(RAS_EXE), "-c",
-        str(project.prj_file), str(project.plan_file),
-    ]
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        cwd=str(project.project_dir),
-    )
-
-    try:
-        for _ in range(60):
-            time.sleep(5)
-            if proc.poll() is not None:
-                break
-            if geom_hdf.exists() and geom_hdf.stat().st_size > 1000:
-                break
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-            proc.wait(timeout=10)
-
     assert geom_hdf.exists(), f"Geometry HDF not created at {geom_hdf}"
     assert geom_hdf.stat().st_size > 1000, (
         f"Geometry HDF too small ({geom_hdf.stat().st_size} bytes) — "

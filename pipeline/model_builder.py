@@ -1176,6 +1176,23 @@ def _register_terrain_in_rasmap(rasmap_file: Path, terrain_path: Path) -> None:
     logger.info("Registered terrain in rasmap: %s -> %s", rasmap_file.name, terrain_path.name)
 
 
+_UNSUPPORTED_GEOM_PREFIXES = (
+    "Storage Area 2D PointsPerimeterTime",
+    "2D Cell Minimum Area Fraction",
+    "2D Face Area Laminar Depth",
+)
+
+
+def _strip_unsupported_geom_lines(geom_file: Path) -> None:
+    """Remove GeomStorage lines that cause HEC-RAS 6.6 to hang."""
+    text = geom_file.read_text(encoding="utf-8")
+    lines = [
+        l for l in text.splitlines()
+        if not any(l.startswith(p) for p in _UNSUPPORTED_GEOM_PREFIXES)
+    ]
+    geom_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _write_geometry_first_geom_file(
     geom_file: Path,
     area_name: str,
@@ -1212,6 +1229,9 @@ def _write_geometry_first_geom_file(
         mannings_n=mannings_n,
         create_backup=False,
     )
+
+    # Strip GeomStorage lines that HEC-RAS 6.6 can't parse (causes silent hang)
+    _strip_unsupported_geom_lines(geom_file)
 
     logger.info(
         "Wrote geometry-first .g## via GeomStorage: %s (%d vertices, cell=%dm, n=%.3f)",

@@ -1,19 +1,11 @@
 <RASMapper>
   <Version>2.0.0</Version>
   <RASProjectionFilename Filename=".\EPSG_5070.prj" />
-  <Features Expanded="True">
-    <Layer Name="Profile Lines" Type="PolylineFeatureLayer" Filename=".\Features\Profile Lines.shp" />
-  </Features>
   <Geometries />
   <Plans />
   <EventConditions />
   <Results />
-  <MapLayers Checked="True" Expanded="True">
-    <Layer Name="NHDPlus07_IL_HUC12" Type="PolygonFeatureLayer" Checked="True" Filename="..\..\workspace\NHDPlus07_IL_HUC12.geojson" />
-    <Layer Name="Google Hybrid" Type="WMSLayer" Checked="True" Filename="%LocalAppData%\HEC\Mapping\5.1\XML\Google Hybrid.xml">
-      <ResampleMethod>near</ResampleMethod>
-    </Layer>
-  </MapLayers>
+  <MapLayers />
   <Terrains />
   <CurrentView>
     <MaxX>614615.345055939</MaxX>
