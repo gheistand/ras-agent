@@ -747,6 +747,17 @@ def _centerline_count(watershed) -> int:
     return 0
 
 
+def _hdf_mesh_cell_count(geom_hdf: Path, area_name: str) -> int:
+    """Read cell count from .g01.hdf Attributes to check if mesh exists."""
+    try:
+        import h5py
+        with h5py.File(str(geom_hdf), "r") as hf:
+            attrs = hf["Geometry/2D Flow Areas/Attributes"][:]
+            return int(attrs["Cell Count"][0])
+    except Exception:
+        return 0
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
@@ -1333,6 +1344,43 @@ def _build_geometry_first(
 
     _register_files_in_prj(prj_file, geom_ext=geom_ext)
 
+    # Headless mesh generation (requires .g01.hdf from HEC-RAS preprocessing)
+    geom_hdf = geom_file.with_suffix(geom_file.suffix + ".hdf")
+    mesh_result = None
+    if geom_hdf.exists():
+        existing_cells = _hdf_mesh_cell_count(geom_hdf, area_name)
+        if existing_cells > 0:
+            logger.info(
+                "Mesh already exists: %d cells (%s) — skipping generation",
+                existing_cells, area_name,
+            )
+        else:
+            try:
+                from ras_commander.geom import GeomMesh
+                mesh_result = GeomMesh.generate(
+                    str(geom_hdf),
+                    mesh_name=area_name,
+                    cell_size=cell_size_m,
+                    max_iterations=8,
+                )
+                if mesh_result.ok:
+                    logger.info(
+                        "Mesh generated: %d cells, %d faces (%s)",
+                        mesh_result.cell_count, mesh_result.face_count, area_name,
+                    )
+                else:
+                    logger.warning(
+                        "Mesh generation incomplete: %s (fixes: %s)",
+                        mesh_result.error_message, mesh_result.fixes_applied,
+                    )
+            except Exception as exc:
+                logger.warning("Mesh generation skipped: %s", exc)
+    else:
+        logger.info(
+            "Mesh deferred: %s not found (run HEC-RAS preprocessing first)",
+            geom_hdf.name,
+        )
+
     flow_file = project_dir / f"{project_name}.u01"
     plan_file = project_dir / f"{project_name}.p01"
     plan_hdf = project_dir / f"{project_name}.p01.hdf"
@@ -1346,6 +1394,8 @@ def _build_geometry_first(
         "dem_clipped": str(getattr(watershed, "dem_clipped", "")),
         "centerline_count": _centerline_count(watershed),
         "breakline_count": len(bl) if (bl := _linework_5070(getattr(watershed, "breaklines", None))) is not None else 0,
+        "mesh_cells": mesh_result.cell_count if mesh_result and mesh_result.ok else 0,
+        "mesh_status": mesh_result.status if mesh_result else "deferred",
         "artifact_keys": sorted(list(getattr(watershed, "artifacts", {}).keys())),
     }
 
