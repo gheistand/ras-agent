@@ -13,6 +13,7 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 | `hydrograph.py` | NRCS DUH synthetic hydrographs | `HydrographResult`, `HydrographSet` |
 | `model_builder.py` | Template clone + Cartesian mesh + RC wiring + HDF5 fallback | `HecRasProject`, `build_model()`, `_fmt_coord()`, `_generate_cartesian_cell_centers()`, `_write_cell_centers_to_geometry_file()` |
 | `runner.py` | SQLite job queue + Linux geometry preprocess + RasUnsteady | `enqueue_job()`, `run_queue()` |
+| `slurm.py` | SLURM batch submission to NCSA Illinois Computes Campus Cluster | `SlurmConfig`, `SlurmJobResult`, `generate_job_script()`, `submit_slurm_job()`, `check_slurm_status()`, `wait_for_slurm_job()`, `fetch_results()`, `slurm_config_from_env()` |
 | `windows_agent.py` | Windows RASMapper mesh creation (`g01.hdf`) | `WindowsAgent`, `MeshRequest`, `MeshResult` |
 | `results.py` | HDF5 → raster/vector export + cloud-native GeoParquet via ras2cng | `FlowAreaGeometry`, `FlowAreaResults`, `export_results()`, `extract_max_velocity()`, `extract_flow_area_results()`, `export_cloud_native()` |
 | *(ras2cng)* | HEC-RAS project → GeoParquet archive, DuckDB analytics, PMTiles (MIT, optional dep) | `archive_project`, `inspect_project`, `export_results_layer`, `DuckSession` |

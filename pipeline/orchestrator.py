@@ -202,6 +202,7 @@ def run_watershed(
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
     cloud_native: bool = True,  # If True, export GeoParquet archive via ras2cng (Stage 7b)
     r2_config=None,             # Optional R2Config for cloud upload
+    slurm_config=None,      # Optional[SlurmConfig] — see pipeline/slurm.py
 ) -> OrchestratorResult:
     """
     Run the full RAS Agent pipeline for a pour point.
@@ -221,6 +222,9 @@ def run_watershed(
         notify_config:     Optional NotifyConfig for webhook/email on completion
         cloud_native:      If True, run Stage 7b GeoParquet export via ras2cng
         r2_config:         Optional R2Config for uploading results + archive to R2
+        slurm_config:      Optional SlurmConfig for submitting HEC-RAS jobs to the
+                           NCSA Illinois Computes Campus Cluster via SLURM.
+                           If None, jobs run locally (default).
 
     Returns:
         OrchestratorResult with full provenance and output paths
@@ -416,6 +420,7 @@ def run_watershed(
                 geom_ext=result.project.geom_ext,
                 return_period_yr=rp,
                 db_path=db_path,
+                execution_mode="slurm" if slurm_config is not None else "local",
             )
             result.job_ids.append(job_id)
 
@@ -426,6 +431,7 @@ def run_watershed(
             mock=mock,
             db_path=db_path,
             logs_dir=logs_dir,
+            slurm_config=slurm_config,
         )
         logger.info(
             f"[Stage 6/7] Execution complete — "

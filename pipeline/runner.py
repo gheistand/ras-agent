@@ -59,7 +59,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     log_path TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
     results_dir TEXT,         -- set after results.export_results() completes
-    preprocess_mode TEXT NOT NULL DEFAULT 'linux'  -- 'linux', 'windows', or 'skip'
+    preprocess_mode TEXT NOT NULL DEFAULT 'linux',  -- 'linux', 'windows', or 'skip'
+    execution_mode TEXT NOT NULL DEFAULT 'local',    -- 'local' or 'slurm'
+    slurm_job_id TEXT                               -- SLURM job ID when execution_mode='slurm'
 );
 """
 
@@ -89,6 +91,14 @@ def _init_db(db_path: Optional[Path] = None) -> None:
                 "ALTER TABLE jobs ADD COLUMN preprocess_mode TEXT NOT NULL DEFAULT 'linux'"
             )
             conn.commit()
+        if "execution_mode" not in cols:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'local'"
+            )
+            conn.commit()
+        if "slurm_job_id" not in cols:
+            conn.execute("ALTER TABLE jobs ADD COLUMN slurm_job_id TEXT")
+            conn.commit()
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
@@ -109,6 +119,8 @@ def enqueue_job(
     return_period_yr: Optional[int] = None,
     db_path: Optional[Path] = None,
     preprocess_mode: str = "linux",
+    execution_mode: str = "local",
+    slurm_config=None,  # Optional[SlurmConfig] from slurm.py
 ) -> str:
     """
     Insert a new job into the queue with status='queued'.
@@ -127,6 +139,10 @@ def enqueue_job(
                                           (RasPreprocess on Windows), skip recompute;
                           ``'skip'``    — geometry tables already present, just strip
                                           Results and run RasUnsteady directly.
+        execution_mode:  Execution backend: ``'local'`` (default, run on this machine)
+                         or ``'slurm'`` (submit to NCSA Illinois Computes cluster).
+        slurm_config:    Optional SlurmConfig for SLURM submission. Required when
+                         execution_mode='slurm'. See pipeline/slurm.py.
 
     Returns:
         job_id as a UUID4 string.
@@ -136,16 +152,16 @@ def enqueue_job(
     sql = """
         INSERT INTO jobs
             (id, name, project_dir, plan_hdf, geom_ext, return_period_yr,
-             status, created_at, preprocess_mode)
-        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+             status, created_at, preprocess_mode, execution_mode)
+        VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
     """
     with _get_conn(db_path) as conn:
         conn.execute(sql, (
             job_id, name, str(project_dir), str(plan_hdf),
-            geom_ext, return_period_yr, _now_iso(), preprocess_mode,
+            geom_ext, return_period_yr, _now_iso(), preprocess_mode, execution_mode,
         ))
         conn.commit()
-    logger.info(f"Enqueued job {job_id} ({name}, preprocess={preprocess_mode})")
+    logger.info(f"Enqueued job {job_id} ({name}, preprocess={preprocess_mode}, execution={execution_mode})")
     return job_id
 
 
@@ -394,6 +410,7 @@ def run_job(
     db_path: Optional[Path] = None,
     logs_dir: Optional[Path] = None,
     preprocess_mode: Optional[str] = None,
+    slurm_config=None,   # Optional[SlurmConfig] — if provided and execution_mode='slurm'
 ) -> bool:
     """
     Execute a single queued job.
@@ -419,6 +436,11 @@ def run_job(
                           ``'skip'``    — geometry tables already present, just strip
                                           Results and run RasUnsteady directly.
                           Pass ``None`` to use the value stored on the job.
+        slurm_config:     Optional SlurmConfig for SLURM execution. When the job's
+                          ``execution_mode`` is ``'slurm'`` and this is provided,
+                          the job is submitted to the NCSA Illinois Computes cluster
+                          instead of running locally. Falls back to local execution
+                          with a warning if slurm_config is None.
 
     Returns:
         True on success, False on error.
@@ -481,7 +503,85 @@ def run_job(
                             error_msg=err_msg)
                 return False
         else:
-            # ── Real execution ────────────────────────────────────────────
+            # ── SLURM execution ───────────────────────────────────────────
+            _exec_mode = job.get("execution_mode") or "local"
+            if _exec_mode == "slurm" and slurm_config is not None:
+                try:
+                    import slurm as _slurm
+                    slurm_result = _slurm.submit_slurm_job(
+                        job_id=job_id,
+                        project_dir=project_dir,
+                        plan_hdf_path=plan_hdf,
+                        geom_ext=geom_ext,
+                        config=slurm_config,
+                        mock=False,
+                    )
+                    if slurm_result.status != "submitted":
+                        err_msg = f"SLURM submission failed: {slurm_result.stderr}"
+                        logger.error(f"Job {job_id}: {err_msg}")
+                        if attempt < 2:
+                            logger.info(f"Retrying in {RETRY_DELAY_SEC}s…")
+                            time.sleep(RETRY_DELAY_SEC)
+                            continue
+                        _update_job(job_id, db_path,
+                                    status="error",
+                                    completed_at=_now_iso(),
+                                    error_msg=err_msg)
+                        return False
+                    _update_job(job_id, db_path, slurm_job_id=slurm_result.slurm_job_id)
+                    logger.info(
+                        f"Job {job_id} submitted to SLURM as job {slurm_result.slurm_job_id}"
+                    )
+                    final_status = _slurm.wait_for_slurm_job(
+                        slurm_result.slurm_job_id,
+                        slurm_config,
+                    )
+                    if final_status == "COMPLETED":
+                        fetched = _slurm.fetch_results(
+                            job_id=job_id,
+                            remote_work_dir=slurm_result.remote_work_dir,
+                            local_output_dir=project_dir,
+                            config=slurm_config,
+                        )
+                        logger.info(
+                            f"Job {job_id} SLURM complete — {len(fetched)} files fetched"
+                        )
+                        _update_job(job_id, db_path,
+                                    status="complete",
+                                    completed_at=_now_iso())
+                        return True
+                    else:
+                        err_msg = f"SLURM job {slurm_result.slurm_job_id} ended with status {final_status}"
+                        logger.error(f"Job {job_id}: {err_msg}")
+                        if attempt < 2:
+                            logger.info(f"Retrying in {RETRY_DELAY_SEC}s…")
+                            time.sleep(RETRY_DELAY_SEC)
+                            continue
+                        _update_job(job_id, db_path,
+                                    status="error",
+                                    completed_at=_now_iso(),
+                                    error_msg=err_msg)
+                        return False
+                except Exception as exc:
+                    err_msg = f"SLURM execution error: {exc}"
+                    logger.error(f"Job {job_id}: {err_msg}")
+                    if attempt < 2:
+                        logger.info(f"Retrying in {RETRY_DELAY_SEC}s…")
+                        time.sleep(RETRY_DELAY_SEC)
+                        continue
+                    _update_job(job_id, db_path,
+                                status="error",
+                                completed_at=_now_iso(),
+                                error_msg=err_msg)
+                    return False
+            elif _exec_mode == "slurm" and slurm_config is None:
+                logger.warning(
+                    "Job %s has execution_mode='slurm' but no slurm_config provided — "
+                    "falling back to local execution",
+                    job_id,
+                )
+
+            # ── Real (local) execution ────────────────────────────────────
             ras_exe_dir_path = Path(ras_exe_dir)
             lib_base = ras_exe_dir_path.parent / "libs"
             ld_path = (
@@ -627,6 +727,7 @@ def run_queue(
     db_path: Optional[Path] = None,
     logs_dir: Optional[Path] = None,
     preprocess_mode: Optional[str] = None,
+    slurm_config=None,   # Optional[SlurmConfig]
 ) -> None:
     """
     Process all queued jobs, running up to max_parallel concurrently.
@@ -643,6 +744,8 @@ def run_queue(
         logs_dir:         Override default logs directory.
         preprocess_mode:  Override preprocess_mode for all jobs in this run.
                           Pass ``None`` to use each job's stored value.
+        slurm_config:     Optional SlurmConfig passed through to run_job() for SLURM
+                          execution. Pass None to use local execution.
     """
     _init_db(db_path)
     logger.info(f"Starting queue runner (max_parallel={max_parallel}, mock={mock})")
@@ -659,7 +762,8 @@ def run_queue(
         with ThreadPoolExecutor(max_workers=max_parallel) as pool:
             futures = {
                 pool.submit(
-                    run_job, job["id"], ras_exe_dir, mock, db_path, logs_dir, preprocess_mode
+                    run_job, job["id"], ras_exe_dir, mock, db_path, logs_dir,
+                    preprocess_mode, slurm_config
                 ): job["id"]
                 for job in batch
             }

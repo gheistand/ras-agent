@@ -172,13 +172,16 @@ def test_run_watershed_mock_mode(tmp_path):
     enqueue_counter = {"n": 0}
 
     def fake_enqueue(name, project_dir, plan_hdf, geom_ext="g01",
-                     return_period_yr=None, db_path=None):
+                     return_period_yr=None, db_path=None,
+                     preprocess_mode="linux", execution_mode="local",
+                     slurm_config=None):
         idx = enqueue_counter["n"]
         enqueue_counter["n"] += 1
         return fake_job_ids[idx]
 
     def fake_run_queue(ras_exe_dir, max_parallel=2, mock=False,
-                       db_path=None, logs_dir=None):
+                       db_path=None, logs_dir=None,
+                       preprocess_mode=None, slurm_config=None):
         pass   # jobs are handled by fake_get_job
 
     def fake_get_job(job_id, db_path=None):

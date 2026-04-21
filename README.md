@@ -49,6 +49,20 @@ python3 pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output ./output/te
 python3 -m pytest tests/ -v
 ```
 
+### SLURM (NCSA Illinois Computes Campus Cluster)
+
+To submit HEC-RAS jobs to the Illinois Computes cluster, set these environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SLURM_USER` | NetID for SSH to campus cluster | *(required)* |
+| `SLURM_HOST` | Cluster login node | `cc-login.campuscluster.illinois.edu` |
+| `SLURM_PARTITION` | SLURM partition | `IllinoisComputes` |
+| `SLURM_ACCOUNT` | SLURM account | `heistand-ic` |
+| `SLURM_SSH_KEY` | Path to SSH private key (optional) | *(system default)* |
+
+All jobs default to local execution. SLURM submission requires `SLURM_USER` to be set.
+
 ---
 
 ## What It Does
