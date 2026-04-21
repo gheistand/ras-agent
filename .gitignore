@@ -74,3 +74,6 @@ agent_tasks/.agent/LEARNINGS.md
 agent_tasks/tasks/*/
 agent_tasks/.old/*/
 agent_tasks/plans/
+
+# Local vendor repos (reference only — not build dependencies)
+vendor/
