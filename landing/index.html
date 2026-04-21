@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RAS Agent — Automated 2D HEC-RAS Hydraulic Modeling</title>
-  <meta name="description" content="RAS Agent automates the full end-to-end HEC-RAS 2D hydraulic modeling workflow — terrain ingestion through flood map export. Open source, Docker-ready, 170 tests passing." />
+  <meta name="description" content="RAS Agent automates the full end-to-end HEC-RAS 2D hydraulic modeling workflow — terrain ingestion through flood map export. Open source, Docker-ready, 216 tests passing." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -472,7 +472,7 @@
       </a>
     </div>
     <div class="badge-row">
-      <span class="badge"><span class="dot"></span>170 tests passing</span>
+      <span class="badge"><span class="dot"></span>216 tests passing</span>
       <span class="badge">Apache 2.0</span>
       <span class="badge">Docker ready</span>
       <span class="badge">HEC-RAS 2D</span>
@@ -522,7 +522,7 @@
         <div class="stage-num">05</div>
         <div class="stage-icon">🏗️</div>
         <div class="stage-name">Model Builder</div>
-        <div class="stage-desc">Clone template project. Assign Manning's n from NLCD. Write mesh perimeter to .g## files.</div>
+        <div class="stage-desc">Clone template project. Generate Cartesian cell centers in HEC-RAS fixed-width format. Write perimeter + cell seeds to .g## files — preprocessor handles Voronoi tessellation automatically.</div>
       </div>
       <div class="pipeline-stage">
         <div class="stage-num">06</div>
@@ -642,13 +642,13 @@ docker run --rm ras-agent \
         <div class="feature-icon">🧪</div>
         <div class="feature-title">Mock Mode &amp; CI</div>
         <div class="feature-body">
-          Run the complete pipeline without real terrain data, a live StreamStats connection, or a HEC-RAS license. 170 tests pass in CI on every push. Every HTTP call is mocked — no network access required.
+          Run the complete pipeline without real terrain data, a live StreamStats connection, or a HEC-RAS license. 216 tests pass in CI on every push. Every HTTP call is mocked — no network access required.
         </div>
         <div class="code-block">python pipeline/orchestrator.py \
   --mock
 
 python -m pytest tests/ -v
-# 170 passed</div>
+# 216 passed</div>
       </div>
 
       <div class="feature-card">
@@ -681,16 +681,22 @@ python -m pytest tests/ -v
       </div>
       <div class="feature-card">
         <div class="feature-icon">🖥️</div>
-        <div class="feature-title">Illinois Computes Allocation</div>
+        <div class="feature-title">Cloud-Native GIS Export</div>
+          <div class="feature-desc">
+            Results export to hierarchical <strong>GeoParquet archives</strong> via <a href="https://github.com/gpt-cmdr/ras2cng" style="color:#7dd3fc;">ras2cng</a> — queryable with DuckDB SQL, serveable as PMTiles for web delivery, and syncable to PostGIS. GeoTIFF COGs also retained for ArcGIS/QGIS workflows.
+          </div>
+        </div>
+        <div class="feature-card">
+          <div class="feature-title">HPC / SLURM Batch Execution</div>
         <div class="feature-body">
-          100,000 CPU-hours/year awarded on the NCSA Campus Cluster — 16 nodes × 128 cores × 512 GB RAM. SLURM integration is in progress for production-scale statewide batch runs across all Illinois watersheds.
+          100,000 CPU-hours/year on NCSA Illinois Computes (16 nodes × 128 cores × 512 GB RAM). SLURM integration complete — jobs submitted to <code style="font-family:'JetBrains Mono',monospace;font-size:0.82em;color:#7dd3fc;">IllinoisComputes</code> partition, account <code style="font-family:'JetBrains Mono',monospace;font-size:0.82em;color:#7dd3fc;">heistand-ic</code>. Results rsynced back automatically. 5TB Taiga storage at <code style="font-family:'JetBrains Mono',monospace;font-size:0.82em;color:#7dd3fc;">/projects/illinois/eng/cee/heistand</code>.
         </div>
       </div>
       <div class="feature-card">
         <div class="feature-icon">✅</div>
-        <div class="feature-title">170 Tests Passing</div>
+        <div class="feature-title">216 Tests Passing</div>
         <div class="feature-body">
-          Full test suite runs in CI on every push. 170 tests covering all 9 pipeline stages, batch mode, results parsing, and API endpoints — with mock mode so no live data or HEC-RAS license is required.
+          Full test suite runs in CI on every push. 216 tests covering all pipeline stages, batch mode, SLURM submission, results parsing, cloud-native export, and API endpoints — with mock mode so no live data or HEC-RAS license is required.
         </div>
       </div>
     </div>
