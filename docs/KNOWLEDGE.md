@@ -11,9 +11,9 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–11 + HITL/QAQC A-C + Windows agent), 125/125 tests, ~38 commits
+- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent), 192/192 tests, 65+ commits (as of 2026-04-20)
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
-- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (GitHub collaborator, CLB Engineering)
+- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering, RASAlphaCLI/RASDecomp), Nikhil Sangwan / nikhil-yahoo (ISWS)
 
 ---
 

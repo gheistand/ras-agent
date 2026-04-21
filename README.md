@@ -4,7 +4,7 @@
 
 Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois.edu/champ) in collaboration with [CLB Engineering Corporation](https://clbengineering.com) and the [RAS Commander](https://github.com/gpt-cmdr/ras-commander) community.
 
-**125 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
+**192 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
 
 ---
 
@@ -59,9 +59,10 @@ RAS Agent automates the full HEC-RAS 2D modeling workflow:
 2. **Watershed** — Delineates watershed boundaries and stream networks from DEMs
 3. **Hydrology** — Queries the [USGS StreamStats API](https://streamstats.usgs.gov) for peak flow estimates; generates synthetic inflow hydrographs using the NRCS Unit Hydrograph method
 4. **Model Build** — Constructs HEC-RAS 6.6 input files (geometry, plan, unsteady flow, boundary conditions) using [RAS Commander](https://github.com/gpt-cmdr/ras-commander)
-5. **Windows Preprocessing** — Runs RasPreprocess on the CHAMP Dell Precision 5860 to generate `.tmp.hdf` + `.b##` + `.x##` files for Linux compute
-6. **Execution** — Runs HEC-RAS 6.6 Linux compute engine (`RasUnsteady`) headlessly; supports parallel multi-watershed execution
-7. **Results** — Exports flood inundation extents, depth grids, and velocity rasters as shapefiles, GeoPackages, and Cloud-Optimized GeoTIFFs for ArcGIS Pro and QGIS
+5. **Mesh Generation** — Writes Cartesian cell centers in HEC-RAS fixed-width format directly to `.g##` text file; geometry preprocessor handles Voronoi tessellation automatically — no RASMapper GUI needed
+6. **Linux Preprocessing** — Runs `ras_preprocess.py` ([hecras-v66-linux](https://github.com/neeraip/hecras-v66-linux)) to build hydraulic tables on Linux; verified 0.000–0.001 ft accuracy vs. GUI
+7. **Execution** — Runs HEC-RAS 6.6 Linux compute engine (`RasUnsteady`) headlessly on NCSA Illinois Computes Campus Cluster (100K CPU-hours allocated); supports parallel multi-watershed execution
+8. **Results** — Exports flood inundation extents, depth grids, and velocity rasters as shapefiles, GeoPackages, Cloud-Optimized GeoTIFFs, and **cloud-native GeoParquet archives** via [ras2cng](https://github.com/gpt-cmdr/ras2cng) for DuckDB analytics and PMTiles delivery
 
 The long-term goal: continuous automated modeling of all stream reaches in Illinois and beyond, producing base-level 2D flood inundation models at scale.
 
