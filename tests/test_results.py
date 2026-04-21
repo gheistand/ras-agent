@@ -19,6 +19,8 @@ import rasterio
 import geopandas as gpd
 from rasterio.crs import CRS
 
+import unittest.mock as mock
+
 from results import (
     get_2d_area_names,
     extract_max_depth,
@@ -28,6 +30,7 @@ from results import (
     cells_to_raster,
     extract_flood_extent,
     export_results,
+    export_cloud_native,
     detect_ras_version,
     FlowAreaGeometry,
     FlowAreaResults,
@@ -613,3 +616,52 @@ class TestExportResultsMultiArea:
         for k, v in outputs.items():
             assert isinstance(k, str)
             assert isinstance(v, Path)
+
+
+# ── Cloud-native export (ras2cng) ─────────────────────────────────────────────
+
+class TestExportCloudNative:
+    """Tests for export_cloud_native() — graceful degradation and happy path."""
+
+    def test_export_cloud_native_no_ras2cng(self, tmp_path):
+        """When ras2cng is not installed, export_cloud_native returns None gracefully."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        archive_dir = tmp_path / "archive"
+
+        with mock.patch.dict("sys.modules", {"ras2cng": None}):
+            result = export_cloud_native(project_dir, archive_dir)
+
+        assert result is None
+        # archive_dir should NOT have been created (nothing to write)
+        # (the function returns before mkdir when import fails)
+
+    def test_export_cloud_native_success(self, tmp_path):
+        """Happy path: mock archive_project returns a manifest; function returns archive dir."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        archive_dir = tmp_path / "archive"
+
+        fake_manifest = {
+            "geometries": ["geom1.parquet", "geom2.parquet"],
+            "plans": ["plan1.parquet"],
+            "files": [],  # no real files to stat
+        }
+
+        fake_ras2cng = mock.MagicMock()
+        fake_ras2cng.archive_project.return_value = fake_manifest
+
+        with mock.patch.dict("sys.modules", {"ras2cng": fake_ras2cng}):
+            # Re-import inside patch context so the lazy import picks up the mock
+            import importlib
+            import results as _results_mod
+            importlib.reload(_results_mod)
+            result = _results_mod.export_cloud_native(project_dir, archive_dir)
+
+        assert result == archive_dir
+        fake_ras2cng.archive_project.assert_called_once_with(
+            project_dir,
+            archive_dir,
+            include_results=True,
+            include_terrain=True,
+        )

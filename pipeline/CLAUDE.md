@@ -14,7 +14,8 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 | `model_builder.py` | Template clone + Cartesian mesh + RC wiring + HDF5 fallback | `HecRasProject`, `build_model()`, `_fmt_coord()`, `_generate_cartesian_cell_centers()`, `_write_cell_centers_to_geometry_file()` |
 | `runner.py` | SQLite job queue + Linux geometry preprocess + RasUnsteady | `enqueue_job()`, `run_queue()` |
 | `windows_agent.py` | Windows RASMapper mesh creation (`g01.hdf`) | `WindowsAgent`, `MeshRequest`, `MeshResult` |
-| `results.py` | HDF5 → raster/vector export | `FlowAreaGeometry`, `FlowAreaResults`, `export_results()`, `extract_max_velocity()`, `extract_flow_area_results()` |
+| `results.py` | HDF5 → raster/vector export + cloud-native GeoParquet via ras2cng | `FlowAreaGeometry`, `FlowAreaResults`, `export_results()`, `extract_max_velocity()`, `extract_flow_area_results()`, `export_cloud_native()` |
+| *(ras2cng)* | HEC-RAS project → GeoParquet archive, DuckDB analytics, PMTiles (MIT, optional dep) | `archive_project`, `inspect_project`, `export_results_layer`, `DuckSession` |
 | `api.py` | FastAPI REST endpoints | runs on `:8000` |
 | `batch.py` | Multi-watershed parallel execution | `run_batch()` |
 | `report.py` | Self-contained HTML run reports | `generate_report()` |

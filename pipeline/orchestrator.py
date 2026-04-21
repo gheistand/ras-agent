@@ -61,6 +61,7 @@ class OrchestratorResult:
     duration_sec: float
     status: str                  # "complete" | "partial" | "failed"
     errors: list                 # non-fatal errors encountered
+    archive_dir: Optional[Path] = None  # ras2cng GeoParquet archive (Stage 7b)
 
 
 class OrchestratorError(RuntimeError):
@@ -199,6 +200,8 @@ def run_watershed(
     name: Optional[str] = None,
     write_report: bool = True,
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
+    cloud_native: bool = True,  # If True, export GeoParquet archive via ras2cng (Stage 7b)
+    r2_config=None,             # Optional R2Config for cloud upload
 ) -> OrchestratorResult:
     """
     Run the full RAS Agent pipeline for a pour point.
@@ -216,6 +219,8 @@ def run_watershed(
         name:              Run name; defaults to "watershed_{lon}_{lat}"
         write_report:      If True and status != "failed", generate HTML report
         notify_config:     Optional NotifyConfig for webhook/email on completion
+        cloud_native:      If True, run Stage 7b GeoParquet export via ras2cng
+        r2_config:         Optional R2Config for uploading results + archive to R2
 
     Returns:
         OrchestratorResult with full provenance and output paths
@@ -481,6 +486,29 @@ def run_watershed(
         err = f"Stage 7 (results export) failed: {exc}"
         logger.error(err)
         result.errors.append(err)
+
+    # ── Stage 7b: Cloud-native GeoParquet export (ras2cng) ────────────────────
+    if cloud_native and not mock and result.project is not None:
+        logger.info("[Stage 7b] Exporting cloud-native archive via ras2cng …")
+        try:
+            archive_dir = _results.export_cloud_native(
+                project_dir=result.project.project_dir,
+                output_dir=output_dir / "archive",
+                include_results=True,
+                include_terrain=True,
+                r2_config=r2_config,
+            )
+            result.archive_dir = archive_dir
+            if archive_dir is not None:
+                logger.info(f"[Stage 7b] Archive written to {archive_dir}")
+            else:
+                logger.info("[Stage 7b] Cloud-native export skipped (ras2cng unavailable)")
+        except Exception as exc:
+            err = f"Stage 7b (cloud-native export) failed: {exc}"
+            logger.warning(err)
+            result.errors.append(err)
+    elif mock:
+        logger.debug("[Stage 7b] Skipped — mock mode")
 
     # ── Finalise ──────────────────────────────────────────────────────────────
     result.duration_sec = time.monotonic() - t0

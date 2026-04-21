@@ -832,6 +832,85 @@ def export_results(
     return outputs
 
 
+# ── Cloud-Native Export (ras2cng) ─────────────────────────────────────────────
+
+def export_cloud_native(
+    project_dir: Union[str, Path],
+    output_dir: Union[str, Path],
+    include_results: bool = True,
+    include_terrain: bool = True,
+    r2_config=None,
+) -> Optional[Path]:
+    """
+    Export HEC-RAS project to cloud-native GeoParquet archive via ras2cng.
+
+    Graceful degradation: returns None if ras2cng is not installed, logging a
+    warning rather than raising.  Never hard-fails on an optional dependency.
+
+    Args:
+        project_dir:      Path to the HEC-RAS project directory.
+        output_dir:       Directory to write the archive (will be created).
+        include_results:  If True, include plan result HDF5 data in archive.
+        include_terrain:  If True, include terrain data in archive.
+        r2_config:        Optional R2Config for uploading archive to Cloudflare R2.
+
+    Returns:
+        Path to the archive directory, or None if ras2cng is not available or
+        the export fails.
+    """
+    try:
+        from ras2cng import archive_project  # type: ignore[import]
+    except ImportError:
+        logger.warning(
+            "ras2cng not installed — skipping cloud-native export. "
+            "Install with: pip install ras2cng"
+        )
+        return None
+
+    project_dir = Path(project_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        manifest = archive_project(
+            project_dir,
+            output_dir,
+            include_results=include_results,
+            include_terrain=include_terrain,
+        )
+        # Log manifest summary
+        geom_count = len(manifest.get("geometries", []))
+        plan_count = len(manifest.get("plans", []))
+        files = manifest.get("files", [])
+        total_bytes = sum(
+            Path(f).stat().st_size
+            for f in files
+            if isinstance(f, (str, Path)) and Path(f).exists()
+        )
+        logger.info(
+            "[ras2cng] Archive complete — %d geometries, %d plans, %.1f MB → %s",
+            geom_count,
+            plan_count,
+            total_bytes / 1e6,
+            output_dir,
+        )
+    except Exception as exc:
+        logger.warning("[ras2cng] archive_project failed (non-fatal): %s", exc)
+        return None
+
+    # Optional R2 upload
+    if r2_config is not None:
+        try:
+            from storage import upload_results_dir  # type: ignore[import]
+            run_name = output_dir.name
+            r2_urls = upload_results_dir(output_dir, run_name, r2_config)
+            logger.info("[ras2cng] Uploaded %d archive files to R2", len(r2_urls))
+        except Exception as exc:
+            logger.warning("[ras2cng] R2 upload failed (archive still saved locally): %s", exc)
+
+    return output_dir
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def _build_cli():

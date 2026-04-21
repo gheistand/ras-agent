@@ -14,6 +14,7 @@ Endpoints:
     GET    /api/jobs/{job_id}/results             Results metadata and availability
     GET    /api/jobs/{job_id}/results/flood-extent  Flood extent GeoJSON
     GET    /api/jobs/{job_id}/results/depth-stats  Depth stats and output file list
+    GET    /api/jobs/{job_id}/results/archive     Cloud-native GeoParquet archive manifest
     GET    /api/health                            Health check
     GET    /api/stats                             Queue summary statistics
 
@@ -609,6 +610,64 @@ def get_depth_stats(
         "max_depth_m": None,      # future: read from raster stats
         "flood_area_km2": None,   # future: compute from polygon area
         "output_files": output_files,
+    }
+
+
+@app.get("/api/jobs/{job_id}/results/archive")
+def get_archive_manifest(job_id: str):
+    """
+    Return the ras2cng GeoParquet archive manifest for a completed job.
+
+    The manifest.json is written by export_cloud_native() alongside the
+    per-geometry and per-plan .parquet files in output_dir/archive/.
+
+    Returns 404 with a descriptive message if:
+    - The job does not exist
+    - No archive was generated (ras2cng not installed or mock job)
+    - manifest.json is not present in the archive directory
+    """
+    runner = _get_runner()
+    db = _db_path()
+    job = runner.get_job(job_id, db_path=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+
+    results_dir_str = job.get("results_dir")
+    if not results_dir_str:
+        raise HTTPException(
+            status_code=404,
+            detail="No results directory for this job — archive not available",
+        )
+
+    # Archive lives in output_dir/archive/ relative to results_dir parent
+    results_dir = Path(results_dir_str)
+    # results_dir is typically output_dir/results/{rp}yr; archive is output_dir/archive
+    archive_dir = results_dir.parent.parent / "archive"
+    manifest_path = archive_dir / "manifest.json"
+
+    if not manifest_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Cloud-native archive not found. "
+                "Ensure ras2cng is installed and cloud_native=True was set for this run."
+            ),
+        )
+
+    import json
+    try:
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read archive manifest: {exc}",
+        )
+
+    return {
+        "job_id": job_id,
+        "archive_dir": str(archive_dir),
+        "manifest": manifest,
     }
 
 

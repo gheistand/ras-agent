@@ -12,7 +12,7 @@ ras-commander>=0.90   # 0.90+ adds RasPreprocess.preprocess_plan() for Windows H
 h5py>=3.9
 
 # Post-processing — cloud-native GIS export (optional)
-ras2cng>=0.1          # HEC-RAS → GeoParquet + PMTiles + DuckDB (replaces/complements results.py rasterio path)
+ras2cng>=0.5.0         # HEC-RAS → GeoParquet + PMTiles + DuckDB (Bill Katzenmeyer / CLB Engineering, MIT)
 
 # USGS data
 streamstats-access>=0.1
