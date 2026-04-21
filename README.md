@@ -4,7 +4,7 @@
 
 Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois.edu/champ) in collaboration with [CLB Engineering Corporation](https://clbengineering.com) and the [RAS Commander](https://github.com/gpt-cmdr/ras-commander) community.
 
-**192 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
+**216 tests passing · Docker confirmed working · All stages run end-to-end in mock mode**
 
 ---
 
@@ -92,7 +92,21 @@ entirely on Linux via `vendor/hecras-v66-linux/ras_preprocess.py`
 ([github.com/neeraip/hecras-v66-linux](https://github.com/neeraip/hecras-v66-linux),
 verified 0.000–0.001 ft WSE accuracy vs. GUI on Muncie, BEC, VA models).
 
-**Windows is now only required for initial mesh creation in RASMapper.**
+**Windows is now only required for initial mesh creation in RASMapper** (generating the `.g01.hdf` mesh topology file). All geometry compute, preprocessing, and simulation runs on Linux.
+
+### SLURM / HPC Batch Execution (as of 2026-04)
+
+Simulation jobs can be submitted to the **NCSA Illinois Computes Campus Cluster** via SLURM:
+
+```python
+from pipeline.slurm import SlurmConfig
+from pipeline.orchestrator import run_watershed
+
+slurm = SlurmConfig(user="yournetid")  # or set SLURM_USER env var
+result = run_watershed(lon=-88.578, lat=40.021, output_dir="./output", slurm_config=slurm)
+```
+
+Jobs are submitted to `IllinoisComputes` partition under account `heistand-ic`. Results are rsynced back to local output directory on completion. Set `execution_mode="local"` (default) to run without SLURM.
 Once a `.g01.hdf` mesh topology file exists, the full pipeline runs headlessly on Linux.
 
 ```
