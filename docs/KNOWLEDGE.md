@@ -10,9 +10,9 @@ Last revised: 2026-04-24
 - `hms-commander` and `ras-commander` are the shared library/tool repos that should absorb reusable functions discovered while building `ras-agent`.
 - `hms-commander` now provides a reusable Spring Creek benchmark for study packaging, direct TauDEM execution, watershed verification, TauDEM-to-HMS assembly, parser-of-record HMS validation, and a live Atlas 14 compute demonstration.
 - Plain-text geometry should be treated as the source of truth for geometry-backed model content.
-- The current `hdf5_direct` path in `ras-agent` is an experimental placeholder and should not define the long-term architecture.
-- `template_clone` remains supported only as a fallback for environments that maintain real template inventories.
-- The repo now includes a starter HEC-RAS 6.6 template scaffold in `data/RAS_6.6_Template/`, but it is not yet a full 1D/2D template inventory.
+- The current `hdf5_direct` and `template_clone` paths in `ras-agent` are legacy compatibility surfaces and should not define the long-term architecture.
+- Mesh generation should stay geometry-first and RASMapper-aligned. Cartesian mesh generation should not be carried forward as an alternate runtime path; only compatible QA concepts or implementation details should be ported.
+- The repo now includes a starter HEC-RAS 6.6 project scaffold in `data/RAS_6.6_Template/`, but it is not yet a full 1D/2D seed-project inventory.
 
 ## Scope
 
@@ -37,7 +37,7 @@ workspace contract:
 The repo does not currently guarantee:
 
 - production-ready greenfield mesh generation without Windows regeneration
-- a finished clone-ready 1D/2D template inventory
+- a finished 1D/2D geometry-first seed-project inventory
 - non-Illinois regional defaults
 - WhiteboxTools parity in the mainline code path
 
@@ -107,8 +107,8 @@ Design rule:
 - For geometry-backed content, `.g##` should remain authoritative.
 - For land-cover roughness content, use `ras_commander.geom.GeomLandCover` and related geometry-side workflows.
 - For infiltration and soils compilation, use `ras-commander` HDF-backed workflows such as `HdfInfiltration` plus `RasMap`/terrain-side context.
-- The present `hdf5_direct` implementation in `pipeline/model_builder.py` should be treated as temporary experimental scaffolding, not the committed end state.
-- `data/RAS_6.6_Template/` is the current seed-project scaffold for template-backed work. It currently contains a `.prj` and `.rasmap` starter, and still needs real 1D/2D geometry, flow, and plan content before `template_clone` should be relied on for production workflows.
+- The present `hdf5_direct` and `template_clone` implementations in `pipeline/model_builder.py` should be treated as legacy compatibility paths, not target architecture or recommended fallbacks.
+- `data/RAS_6.6_Template/` is the current seed-project scaffold for geometry-first work. It currently contains a `.prj` and `.rasmap` starter, and still needs real 1D/2D geometry, flow, and plan content before real-run workflows should rely on it.
 - Boundary-condition mode is now scaffolded through `build_model()`, `run_watershed()`, and `run_batch()` as `headwater` vs `downstream`.
 - `headwater` remains the only implemented behavior. `downstream` currently fails fast by design so the API surface is explicit without pretending chained-basin support is complete.
 - Before enabling `downstream`, finish at least:
@@ -118,7 +118,7 @@ Design rule:
 
 ### Execution and results
 
-- `pipeline/orchestrator.py` and `pipeline/batch.py` still currently default to `hdf5_direct`; that default should be revisited as the geometry-first `ras-commander` workflow is implemented.
+- `pipeline/orchestrator.py` and `pipeline/batch.py` now default to `geometry_first`; legacy mesh strategies should not drive new work.
 - `pipeline/runner.py`, `pipeline/results.py`, `pipeline/api.py`, and `web/` remain valid, but real-run QA still depends on Windows-side regeneration and verification.
 - `pipeline/report.py` is the current Spring Creek-derived reference implementation for the self-contained base engineering HTML report.
 - `pipeline/workspace.py` is the current command surface for workspace validation and report-package generation.
@@ -147,13 +147,16 @@ Priority order:
 
 1. Keep repo ownership aligned with generalizability so reusable methods land in `hms-commander` or `ras-commander`
 2. Consume the upstream `hms-commander` Spring Creek handoff package rather than rebuilding hydrology-side provenance locally
-3. Require the upstream pre-HMS readiness gate and human-review QAQC signoff before treating generated HMS content as production-ready downstream input
-4. Replace the HDF-first model-build framing with a `ras-commander` geometry-first workflow
-5. Implement the remaining `ras-commander` features needed for watershed-driven 2D flow area creation and compilation
-6. Validate compiled geometry/regeneration workflows on Illinois basins
-7. Add benchmark fixtures and comparison reporting
-8. Keep `rivnet` / `traudem` as a reference track only
-9. Keep WhiteboxTools in a separate benchmark worktree only
+3. Use Spring Creek as the first runnable headwater pilot for BLE-style data generation and gauge calibration/validation
+4. Implement the simpler rain-on-grid AORC/MRMS setup through `ras-commander` first
+5. Continue HMS modeling in parallel through `hms-commander`, then build the HMS-linked boundary-construction workflow once the HMS path is complete enough to trust
+6. Require the upstream pre-HMS readiness gate and human-review QAQC signoff before treating generated HMS content as generalized production hydrology
+7. Keep mesh generation geometry-first and RASMapper-aligned; do not preserve Cartesian mesh generation as a fallback path
+8. Implement the remaining `ras-commander` features needed for watershed-driven 2D flow area creation and compilation
+9. Validate compiled geometry/regeneration workflows on Illinois basins
+10. Add benchmark fixtures and comparison reporting
+11. Keep `rivnet` / `traudem` as a reference track only
+12. Keep WhiteboxTools in a separate benchmark worktree only
 
 ## Benchmark Rules
 
@@ -203,9 +206,9 @@ When real-basin fixtures are added, test coverage should expand to:
 ## Open Constraints
 
 - TauDEM is an external dependency and must be installed outside Python packaging.
-- `ras-agent` currently overstates the role of `hdf5_direct`; that naming and default behavior need architectural cleanup.
-- The bundled template scaffold still needs to be matured into at least one usable 2D seed template and, if needed, a separate 1D seed template.
+- `ras-agent` still carries legacy `hdf5_direct` and `template_clone` compatibility paths; these should be retired or quarantined after the geometry-first path is fully reconciled upstream.
+- The bundled project scaffold still needs to be matured into at least one usable 2D seed project and, if needed, a separate 1D seed project.
 - The main missing `ras-commander` feature appears to be a first-class writer for watershed-derived 2D flow area perimeter geometry in `.g##`.
 - Real benchmark fixtures are not yet committed.
 - R-based comparison tooling is intentionally out of the runtime dependency chain.
-- The current upstream TauDEM-to-HMS Spring Creek benchmark is import-valid and compute-valid, but it is still not production-ready until the readiness gate, TauDEM parameter-tuning support, and human reviewer QAQC bundle are in place.
+- The current upstream TauDEM-to-HMS Spring Creek benchmark is import-valid and compute-valid. It should remain runnable for the Spring Creek headwater pilot, but it is not generalized production hydrology until the readiness gate, TauDEM parameter-tuning support, and human reviewer QAQC bundle are in place.

@@ -16,8 +16,9 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 - Reusable HEC-RAS project/geometry/execution methods should land in `ras-commander`, not stay in `ras-agent`.
 - Requests for those reusable sibling-repo features should be filed as GitHub issues in the target repo and linked from this plan.
 - Plain-text geometry is authoritative for geometry-backed project content.
-- `template_clone` remains supported only as a legacy fallback.
-- `data/RAS_6.6_Template/` is the current bundled starter project scaffold and should be matured into explicit 1D and 2D seed templates.
+- `template_clone` is a legacy compatibility path, not a target architecture or
+  recommended fallback.
+- `data/RAS_6.6_Template/` is the current bundled starter project scaffold and should be matured into explicit 1D and 2D geometry-first seed projects.
 - `rivnet` / `traudem` are reference-only validation tools.
 - WhiteboxTools belongs in a separate benchmark worktree and must not drive the mainline API.
 - Non-Illinois regional assumptions are not runtime defaults for this repo.
@@ -31,14 +32,17 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 - Updated repo docs to keep the roadmap and architecture scoped to this repo.
 - Upstream `hms-commander` now provides the reusable Spring Creek study/workspace package, direct TauDEM execution surface, watershed verification, boundary handoff outlet selection, TauDEM-to-HMS assembly/export, parser-of-record round-trip validation, and an end-to-end Atlas 14 benchmark notebook plus live compute example.
 - The shared Spring Creek benchmark is now import-valid and compute-valid from the `hms-commander` side, with durable artifacts available for downstream comparison and handoff testing.
+- Spring Creek is the first headwater pilot HUC with gauge history. Keep it
+  runnable for BLE-style data generation and use it as the calibration/validation
+  proving ground before expanding to downstream or chained-basin models.
 
 ## Next
 
 1. Separate active work by generalizability so reusable methods are upstreamed to `hms-commander` or `ras-commander` instead of accreting in `ras-agent`.
 2. For each blocking sibling-repo feature gap, file or reference a GitHub issue in the target repo and record the issue link in this plan.
 3. ~~Replace the `hdf5_direct` architectural framing with a geometry-first `ras-commander` workflow in docs and code.~~ DONE — `geometry_first` is the default strategy in orchestrator.py and batch.py (2026-04-19).
-4. ~~Retire or rename the `mesh_strategy='hdf5_direct'` contract once the geometry-first builder exists so the public API no longer implies HDF-first authoring.~~ DONE — `hdf5_direct` retained as legacy fallback, `geometry_first` is the default (2026-04-19).
-5. Mature `data/RAS_6.6_Template/` into at least one usable 2D seed template and, if needed, a separate 1D seed template with real geometry, flow, and plan files.
+4. ~~Retire or rename the `mesh_strategy='hdf5_direct'` contract once the geometry-first builder exists so the public API no longer implies HDF-first authoring.~~ DONE — `geometry_first` is the default; `hdf5_direct` remains only as a legacy compatibility path pending retirement (2026-04-19).
+5. Mature `data/RAS_6.6_Template/` into at least one usable 2D seed project and, if needed, a separate 1D seed project with real geometry, flow, and plan files.
 6. ~~Implement a first-class `ras-commander` writer for watershed-derived 2D flow area perimeter geometry in `.g##`.~~ DONE — ras-commander Issue #38 complete, integrated via `_write_geometry_first_geom_file()` (2026-04-19).
 7. Wire watershed outputs into `ras-commander` geometry, land-cover, and infiltration compilation workflows.
 8. Push reusable TauDEM example and preprocessing patterns toward `hms-commander` while keeping Illinois-specific adaptation in `ras-agent`.
@@ -46,11 +50,33 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 10. Capture Windows regeneration and QA steps for geometry recompilation and compiled HDF artifacts.
 11. Add benchmark fixtures and written comparison outputs for direct TauDEM vs reference tracks.
 12. Define acceptance tolerances for snapped outlet location, subbasin area, stream network structure, and derived channel metrics.
-13. Convert the new `boundary_condition_mode` scaffold from headwater-only plumbing into a validated downstream/chained-basin workflow.
-14. Treat the current Spring Creek TauDEM-to-HMS output from `hms-commander` as benchmark-grade, not production-grade, until the upstream pre-HMS readiness gate and human-review QAQC signoff artifact exist.
-15. Validate downstream `ras-agent` regeneration against the live Spring Creek handoff package emitted by `hms-commander`, rather than rebuilding the hydrology-side context locally.
-16. Track and consume upstream TauDEM parameter sensitivity / optimization support so delineation controls can be tuned deliberately before downstream model promotion.
-17. Record downstream acceptance rules for the first live HMS warning classes now observed upstream: missing ET/canopy methods, Muskingum stability warnings, lag-vs-time-step warnings, and negative inflow clipping.
+13. Use Spring Creek as the first headwater pilot to reproduce BLE-style data
+    generation, then calibrate/validate against the gauge before promoting the
+    workflow.
+14. Implement the simpler rain-on-grid setup first via `ras-commander`
+    AORC/MRMS support, while HMS modeling continues in parallel through
+    `hms-commander`.
+15. After the HMS modeling path is complete enough to trust, build out the
+    parallel HMS-linked boundary-construction workflow.
+16. Consume commander spatial-linking and upstream-area accounting support so
+    HMS basin area is not double counted when boundary conditions are assigned.
+17. Treat the current Spring Creek TauDEM-to-HMS output from `hms-commander` as
+    benchmark-grade, not generalized production hydrology, until the upstream
+    pre-HMS readiness gate and human-review QAQC signoff artifact exist. This
+    does not defer the Spring Creek pilot; it defines the review status of the
+    hydrology scaffold.
+18. Validate downstream `ras-agent` regeneration against the live Spring Creek
+    handoff package emitted by `hms-commander`, rather than rebuilding the
+    hydrology-side context locally.
+19. Track and consume upstream TauDEM parameter sensitivity / optimization
+    support so delineation controls can be tuned deliberately before downstream
+    model promotion.
+20. Record downstream acceptance rules for the first live HMS warning classes
+    now observed upstream: missing ET/canopy methods, Muskingum stability
+    warnings, lag-vs-time-step warnings, and negative inflow clipping.
+21. After Spring Creek headwater calibration/validation is working, convert the
+    `boundary_condition_mode` scaffold from headwater-only plumbing into a
+    validated downstream/chained-basin workflow.
 
 ## Downstream Scaffold Notes
 
@@ -60,8 +86,12 @@ Current state:
 
 - `headwater` remains the only implemented mode.
 - `downstream` is intentionally accepted at the public API/CLI layer but fails fast in the builder with a planning note.
+- Spring Creek is the immediate headwater pilot. It should remain a runnable
+  target for BLE-style data generation, gauge calibration/validation, and
+  Glenn's review before downstream chaining is expanded.
 
-Before enabling non-headwater basins, finish at least:
+Before enabling non-headwater basins, first validate the Spring Creek headwater
+pilot, then finish at least:
 
 1. Define the durable input contract for upstream inflow hydrographs and their provenance.
 2. Decide how downstream basins discover/reference upstream model outputs versus externally supplied hydrographs.

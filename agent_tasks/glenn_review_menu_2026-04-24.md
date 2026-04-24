@@ -11,9 +11,9 @@ portable work from `ras-agent`, `hms-commander`, and `ras-commander`.
 
 ### ras-agent
 
-- Working branch: `feat/bc-lines-mesh`
-- Status: dirty working tree with source/doc/test edits plus many generated or
-  scratch artifacts.
+- Working branch: `commander-coordination-branch`
+- Status: tracked coordination changes are committed and pushed; generated and
+  scratch artifacts remain deliberately excluded.
 - Integration risk: local branch is materially behind Glenn's current upstream
   `main`; this should be rebased or selectively ported before any PR.
 - QAQC fix added during review: headwater mode now preserves normal-depth-only
@@ -56,8 +56,17 @@ portable work from `ras-agent`, `hms-commander`, and `ras-commander`.
 
 Review notes before merge:
 
-- Resolve the headwater water-source contract before presenting generated
-  geometry-first runs as operational.
+- Treat Spring Creek as the immediate headwater pilot for BLE-style data
+  generation and gauge-based calibration/validation.
+- Keep downstream/model-chaining support out of scope until Spring Creek
+  headwater calibration/validation is working.
+- Implement the simpler rain-on-grid setup first via `ras-commander` AORC/MRMS
+  support, while HMS modeling continues in parallel through `hms-commander`.
+- After the HMS modeling path is complete enough to trust, build out the
+  parallel HMS-linked boundary-construction workflow.
+- Use the commander libraries' spatial-linking and upstream-area accounting
+  support so HMS basin areas are not double counted when assigning boundary
+  conditions.
 - Integrate with Glenn's current plan-HDF/preprocessor direction before real
   batch execution.
 - Use the final/smoothed 2D flow-area polygon consistently for both perimeter
@@ -107,10 +116,15 @@ Review notes before merge:
 
 ## Severity-Ranked QAQC Findings
 
-1. HIGH - `ras-agent` headwater water-source contract is unresolved.
-   Geometry-first headwater runs can produce BC files without a flow hydrograph;
-   this is only valid if rain-on-grid/met/infiltration/plan wiring is implemented
-   and validated.
+1. HIGH - Spring Creek headwater pilot needs explicit water-source selection and
+   validation. This is not a reason to defer the pilot. The branch should support
+   Glenn reproducing the Spring Creek BLE-style run, then validating/calibrating
+   against the gauge. Implement the simpler rain-on-grid path first via
+   `ras-commander` AORC/MRMS support, while HMS modeling continues in parallel
+   through `hms-commander`. After the HMS modeling path is complete enough to
+   trust, build out the parallel HMS-linked boundary-construction workflow. The
+   validation task is proving generated plan/met/BC artifacts are wired and
+   nonzero before calibration.
 
 2. HIGH - `ras-agent` real execution still depends on `.p##.hdf` plan files that
    the builder names but does not generate. Port this onto Glenn's current
@@ -126,8 +140,10 @@ Review notes before merge:
    validated polygon for both.
 
 5. MEDIUM - `ras-agent` is behind Glenn's upstream work around native
-   preprocessing, cloud-native exports, Cartesian mesh, and SLURM support. Treat
-   this as a selective porting effort.
+   preprocessing, cloud-native exports, Cartesian mesh experiments, and SLURM
+   support. Treat this as a selective porting effort: keep the geometry-first,
+   RASMapper-aligned mesh path, and mine upstream Cartesian work only for
+   compatible QA ideas or implementation details.
 
 6. MEDIUM - `hms-commander` TauDEM-to-HMS basin output uses heuristic hydrology
    and routing parameters. Keep the benchmark warning language.
@@ -166,7 +182,7 @@ Review notes before merge:
    - `pipeline/report.py`
    - related tests
 
-4. Geometry-first builder/template work
+4. Geometry-first builder/seed scaffold work
    - `pipeline/model_builder.py`
    - `pipeline/terrain.py`
    - `data/RAS_6.6_Template/TEMPLATE.rasmap`
@@ -271,7 +287,10 @@ The main proposal is to let `ras-agent` compose shared library capabilities
 rather than owning long-term reusable implementations. The work includes direct
 TauDEM watershed-processing support, Atlas 14 HMS benchmark scaffolding,
 text-first HEC-RAS geometry/mesh helpers, boundary-condition mode scaffolding,
-and Spring Creek seed-workspace integration tests.
+and Spring Creek seed-workspace integration tests. Spring Creek is intentionally
+the first identified headwater HUC with gauge history; downstream model chaining
+should follow after that headwater pilot is generated, calibrated, and
+validated.
 
 Review options:
 
@@ -281,12 +300,16 @@ Review options:
    independently.
 4. Rebase/port `ras-agent` geometry-first orchestration after upstream
    preprocessor/plan-HDF changes are reconciled.
-5. Defer operational headwater hydraulic runs until the water-source contract is
-   resolved and validated.
+5. Use Spring Creek as the first headwater pilot to reproduce BLE-style data
+   generation, then let Glenn decide how to improve and extend the
+   implementation.
 
 Known blockers before merge-ready `ras-agent` runtime support:
 
-- Geometry-first headwater path needs an explicit water-source contract.
+- Spring Creek pilot needs validated headwater source wiring: rain-on-grid via
+  AORC/MRMS first, followed by HMS-linked boundary construction once the
+  parallel HMS modeling path is complete enough to trust. Gauge
+  calibration/validation is the acceptance loop.
 - Real batch execution needs plan-HDF/preprocessor generation reconciled with
   current upstream direction.
 - Geometry and BC placement should use the same final basin/perimeter polygon.
@@ -297,6 +320,7 @@ Suggested issue links to create or reference:
 
 - `hms-commander`: production-readiness gate for TauDEM-to-HMS scaffold
   parameters.
-- `ras-commander`: authoritative mesh/preprocessor workflow consumed by
-  `ras-agent`.
-- `ras-agent`: headwater water-source contract and plan-HDF regeneration gate.
+- `ras-commander`: authoritative geometry-first, RASMapper-aligned
+  mesh/preprocessor workflow consumed by `ras-agent`.
+- `ras-agent`: Spring Creek headwater pilot source wiring, gauge validation, and
+  plan-HDF regeneration gate.

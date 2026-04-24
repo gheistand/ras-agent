@@ -2,20 +2,24 @@
 model_builder.py — HEC-RAS 6.6 project builder
 
 Builds a HEC-RAS 6.6 project directory from watershed delineation and
-design hydrograph results. Supports three mesh strategies:
+design hydrograph results. `geometry_first` is the target strategy:
 
-  template_clone   — clone an existing template project, swap terrain/BCs
-  geometry_first   — create project from template scaffold, write .g## via
+  geometry_first   — create project from project scaffold, write .g## via
                      ras-commander GeomStorage, let HEC-RAS regenerate HDF
+
+Legacy compatibility strategies still exist for older tests and workflows, but
+they should not guide new implementation:
+
+  template_clone   — legacy clone workflow pending retirement/quarantine
   hdf5_direct      — legacy experimental seed-project placeholder
-  ras2025          — use RAS2025 API for mesh generation (future)
+  ras2025          — placeholder for a future public API, not current runtime
 
 `geometry_first` is the production strategy: it writes watershed-derived
 2D flow area perimeters into plain-text `.g##` files via `ras-commander`
 `GeomStorage` and lets HEC-RAS regenerate derived HDF/preprocessor artifacts.
 
-`hdf5_direct` is retained as a legacy fallback for environments where
-ras-commander is not available.
+Mesh generation should stay RASMapper-aligned through `ras-commander`, not
+through a separate Cartesian runtime path.
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -87,7 +91,7 @@ class HecRasProject:
     plan_file: Path          # .p01
     plan_hdf: Path           # .p01.hdf (after first GUI run) or .p01.tmp.hdf
     geom_ext: str            # "g01"
-    mesh_strategy: str       # "template_clone", "hdf5_direct", "ras2025"
+    mesh_strategy: str       # "geometry_first", "template_clone", "hdf5_direct", "ras2025"
     return_periods: list
     metadata: dict = field(default_factory=dict)
 
@@ -1154,7 +1158,7 @@ def _scaffold_project_from_template(
     project_name: str,
 ) -> tuple[Path, Path, Path]:
     """
-    Copy the RAS_6.6_Template scaffold and rename files for the new project.
+    Copy the RAS_6.6_Template project scaffold and rename files for the new project.
 
     Returns (project_dir, prj_file, rasmap_file).
     """
@@ -1314,7 +1318,7 @@ def _build_geometry_first(
     """
     Build a HEC-RAS 6.6 project using the geometry-first workflow.
 
-    Copies the RAS_6.6_Template scaffold, writes watershed-derived 2D flow
+    Copies the RAS_6.6_Template project scaffold, writes watershed-derived 2D flow
     area geometry via ras-commander GeomStorage, and creates plan/flow files.
     HEC-RAS regenerates all HDF artifacts on the next compute_plan() call.
     """
@@ -1548,14 +1552,11 @@ def _build_ras2025(
 
     RAS2025 is currently in alpha (March 2026). No Linux build available yet.
     API may change. Estimated availability: 6-12 months out.
-
-    See docs/KNOWLEDGE.md § 'Three Mesh Strategy Paths' (Path C) for details.
     """
     raise NotImplementedError(
         "RAS2025 API integration not yet implemented. "
-        "Use mesh_strategy='hdf5_direct' only as the current placeholder path. "
+        "Use mesh_strategy='geometry_first' for current work. "
         "RAS2025 is alpha as of March 2026; no Linux build available. "
-        "See docs/KNOWLEDGE.md § 'Three Mesh Strategy Paths' (Path C)."
     )
 
 
@@ -1653,7 +1654,9 @@ def build_model(
         mesh_strategy:      "geometry_first" | "hdf5_direct" | "template_clone" | "ras2025"
                             default is "geometry_first", which uses
                             ras-commander GeomStorage to write .g## and
-                            lets HEC-RAS regenerate HDF artifacts
+                            lets HEC-RAS/RASMapper regenerate HDF artifacts.
+                            The other strategies are legacy compatibility paths
+                            or placeholders, not recommended fallbacks.
         boundary_condition_mode:
                             "headwater" | "downstream". The downstream option is
                             scaffolded through the API but intentionally fails

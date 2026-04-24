@@ -9,9 +9,9 @@ Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois
 - The primary Illinois watershed-processing integration in this repo uses TauDEM-backed delineation through [`pipeline/taudem.py`](pipeline/taudem.py) and [`pipeline/watershed.py`](pipeline/watershed.py).
 - The reusable hydrology-side baseline is now upstreamed substantially into `hms-commander`: Spring Creek study packaging, direct TauDEM execution, watershed verification, boundary handoff selection, TauDEM-to-HMS bootstrap, parser-of-record validation, and a live Atlas 14 compute example all exist there now.
 - The intended HEC-RAS build path is `ras-commander` driven plain-text geometry assembly, with the watershed outline inserted as a 2D flow area in the `.g##` file and HEC-RAS recompiling derived HDF/preprocessor artifacts.
-- The current `hdf5_direct` code path should be treated as an experimental placeholder, not the architectural end state.
-- `template_clone` remains supported as an opt-in fallback and seed-project path as the bundled template scaffold matures.
-- The repo now includes a starter HEC-RAS 6.6 project scaffold in `data/RAS_6.6_Template/`, but it is not yet a complete 1D/2D template inventory.
+- Mesh generation should stay geometry-first and RASMapper-aligned. Upstream Cartesian mesh work should be mined only for compatible QA ideas or implementation details, not preserved as an alternate runtime path.
+- The current `hdf5_direct` and `template_clone` code paths are legacy compatibility surfaces pending retirement, not architecture for new work.
+- The repo now includes a starter HEC-RAS 6.6 project scaffold in `data/RAS_6.6_Template/`, but it is not yet a complete 1D/2D seed-project inventory.
 - That upstream TauDEM-to-HMS path should still be treated here as benchmark-grade, not production-grade, until it has a readiness gate, TauDEM parameter-tuning support, and human reviewer QAQC signoff.
 
 ## Repo Boundaries
@@ -60,7 +60,7 @@ Boundary-condition scaffold:
 - HEC-RAS 6.6 treats the plain-text geometry file as the durable source of truth for geometry-backed content.
 - Derived geometry HDF and preprocessor files should be regenerated through HEC-RAS and `ras-commander`, not treated as primary editable assets.
 - Infiltration is the main exception: `ras-commander` documents it as HDF-backed and surviving geometry saves.
-- `data/RAS_6.6_Template/` is the current starter project scaffold for building template-backed seed projects; it still needs explicit 1D/2D geometry and plan content before `template_clone` should be treated as production-ready.
+- `data/RAS_6.6_Template/` is the current starter project scaffold for geometry-first seed projects; it still needs explicit 1D/2D geometry and plan content before real-run workflows should rely on it.
 
 ## Pipeline
 
@@ -130,7 +130,7 @@ Key implementation decisions:
 - Mock-mode orchestration, API, results export, and web UI are in place.
 - Illinois-first TauDEM wrapper and watershed integration are now the active hydro-processing path.
 - `ras-commander` already appears to cover most of the HEC-RAS-side workflow needed by `ras-agent`.
-- The remaining gap is mainly geometry-first project assembly for watershed-derived 2D flow areas, maturing the starter template scaffold into usable 1D/2D seed templates, tighter orchestration around land-cover and infiltration compilation, and a downstream consume/regenerate proof against the new upstream Spring Creek handoff package.
+- The remaining gap is mainly geometry-first project assembly for watershed-derived 2D flow areas, maturing the starter scaffold into usable geometry-first seed projects, tighter orchestration around land-cover and infiltration compilation, and a downstream consume/regenerate proof against the new upstream Spring Creek handoff package.
 - Real-basin validation, benchmark comparisons, and Windows regeneration workflows still need completion.
 - The first live upstream HMS scaffold also exposed warning classes that need downstream acceptance rules before promotion: missing ET/canopy methods, Muskingum stability warnings, lag-vs-time-step warnings, and negative inflow clipping.
 
