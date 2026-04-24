@@ -9,6 +9,8 @@ Last revised: 2026-04-24
 - `ras-commander` should be treated as the primary HEC-RAS project interface.
 - `hms-commander` and `ras-commander` are the shared library/tool repos that should absorb reusable functions discovered while building `ras-agent`.
 - `hms-commander` now provides a reusable Spring Creek benchmark for study packaging, direct TauDEM execution, watershed verification, TauDEM-to-HMS assembly, parser-of-record HMS validation, and a live Atlas 14 compute demonstration.
+- `ras-agent` should consume shared commander functionality through the latest
+  published pip packages, not through local sibling-repo working trees.
 - Plain-text geometry should be treated as the source of truth for geometry-backed model content.
 - The current `hdf5_direct` and `template_clone` paths in `ras-agent` are legacy compatibility surfaces and should not define the long-term architecture.
 - Mesh generation should stay geometry-first and RASMapper-aligned. Cartesian mesh generation should not be carried forward as an alternate runtime path; only compatible QA concepts or implementation details should be ported.

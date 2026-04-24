@@ -3,9 +3,11 @@
 Prepared: 2026-04-24
 
 Operator context: Bill/CLB is an external contributor. Treat this as a menu of
-reviewable integration slices, not a request to merge the current working trees
-as-is. The intent is to preserve Glenn's upstream direction while offering
-portable work from `ras-agent`, `hms-commander`, and `ras-commander`.
+reviewable `ras-agent` integration slices, not a request to inspect or merge
+Bill's local sibling-repo working trees. The useful `hms-commander` and
+`ras-commander` support has been pushed to those repos' `main` branches and is
+available through their latest pip packages. The only held-back feature branch
+for Glenn to reconcile is this `ras-agent` branch.
 
 ## Current Git State
 
@@ -19,24 +21,14 @@ portable work from `ras-agent`, `hms-commander`, and `ras-commander`.
 - QAQC fix added during review: headwater mode now preserves normal-depth-only
   fallback behavior when no stream/perimeter intersections are found.
 
-### hms-commander
+### Shared package dependencies
 
-- Working branch: `main`
-- Status: dirty working tree, no local commit created in this pass.
-- Main contribution: reusable TauDEM, gauge-study, terrain, watershed
-  verification, HMS basin scaffold, Atlas 14, and roundtrip validation helpers.
-- Scope note: generated HMS projects should be framed as benchmark/import-valid
-  scaffolds until hydrologic parameters receive domain review.
-
-### ras-commander
-
-- Working branch: `main`
-- Status: one local commit ahead of `origin/main`:
-  `81439b0b Release 0.95.0 mesh and land classification updates`
-- Main contribution: reusable HEC-RAS mesh/geometry, RasMap, land-classification,
-  terrain, HDF reader, GDAL/RasMapper runtime, and packaging updates.
-- QAQC fix added during review: GDAL/RasMapper bootstrap now verifies the
-  `python.exe` sibling `GDAL` bridge before loading `RasMapperLib.dll`.
+- `hms-commander`: consume from the latest pip package on `main`; do not ask
+  Glenn to review Bill's local `hms-commander` working tree as part of this PR.
+- `ras-commander`: consume from the latest pip package on `main`; do not ask
+  Glenn to review Bill's local `ras-commander` working tree as part of this PR.
+- Local sibling-repo QA notes below are retained only as dependency provenance
+  and risk context for the `ras-agent` branch.
 
 ## Changelog Draft
 
@@ -73,7 +65,7 @@ Review notes before merge:
   writing and BC placement.
 - Keep Spring Creek-specific helpers clearly labeled or parameterized.
 
-### hms-commander
+### hms-commander package dependency
 
 - Added direct TauDEM CLI workflow support with deterministic manifests, status
   reports, expected-output checks, and test wrappers.
@@ -85,14 +77,13 @@ Review notes before merge:
 
 Review notes before merge:
 
+- Treat these capabilities as packaged dependencies already available from
+  `hms-commander` main/latest pip, not as sibling-repo branch changes to review
+  in this PR.
 - Keep generated HMS models documented as benchmark scaffolds, not production
   hydrology.
-- Document the `Atlas14Storm.generate_hyetograph_from_ari` return-shape/API
-  change.
-- Exclude transient package/install artifacts and oversized generated fixtures
-  not required for tests.
 
-### ras-commander
+### ras-commander package dependency
 
 - Added text-first HEC-RAS geometry mesh/breakline support that treats `.g##`
   text geometry as authoritative.
@@ -107,14 +98,13 @@ Review notes before merge:
 
 Review notes before merge:
 
-- Stage mesh, RasMap/land-classification, HDF reader, terrain, GDAL runtime, and
-  packaging changes separately if Glenn wants smaller review slices.
-- Clear executed notebook outputs and local paths before including notebook
-  updates.
+- Treat these capabilities as packaged dependencies already available from
+  `ras-commander` main/latest pip, not as sibling-repo branch changes to review
+  in this PR.
 - Treat land-cover/soils/infiltration template defaults as starter mappings
   pending domain signoff.
 
-## Severity-Ranked QAQC Findings
+## ras-agent Severity-Ranked QAQC Findings
 
 1. HIGH - Spring Creek headwater pilot needs explicit water-source selection and
    validation. This is not a reason to defer the pilot. The branch should support
@@ -145,29 +135,25 @@ Review notes before merge:
    RASMapper-aligned mesh path, and mine upstream Cartesian work only for
    compatible QA ideas or implementation details.
 
-6. MEDIUM - `hms-commander` TauDEM-to-HMS basin output uses heuristic hydrology
-   and routing parameters. Keep the benchmark warning language.
+6. MEDIUM - The `hms-commander` TauDEM-to-HMS package output that `ras-agent`
+   may consume uses heuristic hydrology and routing parameters. Keep the
+   benchmark warning language inside `ras-agent` until the HMS path is complete
+   enough to trust.
 
 7. MEDIUM - `ras-agent` context/report helpers still contain Spring Creek
    assumptions. Label as Spring Creek-only or parameterize gauge/site IDs.
 
-8. LOW - `hms-commander` Atlas 14 return shape appears behavior-changing and
-   needs a release-note/migration note.
+8. INFO - `ras-agent` should depend on latest published `hms-commander` and
+   `ras-commander` packages for commander functionality, not local sibling-repo
+   working trees.
 
-9. LOW - `ras-commander` StoreAllMaps relocation now captures modified
-   pre-existing outputs. Keep if intentional, but document as a behavior change.
-
-10. INFO - `ras-commander` GDAL/RasMapper modal has been addressed and verified
-   locally.
-
-## Proposed Commit Grouping
-
-### ras-agent
+## Proposed ras-agent Commit Grouping
 
 1. Docs and roadmap alignment
    - `README.md`
    - `docs/KNOWLEDGE.md`
    - `agent_tasks/plans/illinois-taudem-primary.md`
+   - `pipeline/requirements.txt`
 
 2. Boundary-condition mode scaffold and fallback fix
    - `pipeline/bc_lines.py`
@@ -193,29 +179,7 @@ Review notes before merge:
    - `agent_tasks/mesh_comparison_report.md`
    - stage separately from runtime code
 
-### hms-commander
-
-1. Gauge-study workspace and terrain/input-pack primitives
-2. Direct TauDEM CLI runner
-3. Watershed verification and boundary handoff
-4. TauDEM-to-HMS basin assembly/bootstrap
-5. Atlas 14 PFDS/frequency helpers
-6. HMS roundtrip validator
-7. API docs, examples, and deterministic fixtures
-
-### ras-commander
-
-1. GDAL/RasMapper runtime bootstrap fix
-2. Text-first mesh and breakline/refinement support
-3. RasMap land-cover/soils/infiltration helpers
-4. HDF reader improvements
-5. Terrain and USGS 3DEP improvements
-6. Packaging/version cleanup
-7. Example notebooks only after output/local-path cleanup
-
 ## Explicit Exclude List
-
-### ras-agent
 
 - `=3.0.5`
 - `TASK.md`, `OUTPUT.md`
@@ -228,23 +192,6 @@ Review notes before merge:
 - ad hoc `agent_tasks/session_state_*.md` unless intentionally part of the
   public handoff
 
-### hms-commander
-
-- `0.24.0`
-- transient build, site, dist, egg-info, cache, and generated local outputs
-- notebook outputs/local machine paths unless intentionally cleaned
-
-### ras-commander
-
-- `.claude/scheduled_tasks.lock`
-- `.tmp/`, `.pytest-tmp/`
-- `TASK.md`, `OUTPUT.md`
-- `agent_tasks/session_state_*.md`
-- `example_data/`
-- `examples/out/`
-- generated probe scripts and one-off output text files
-- executed notebook copies and large generated outputs
-
 ## Validation Completed
 
 ### ras-agent
@@ -253,35 +200,27 @@ Review notes before merge:
 - Focused pytest suite passed: `95 passed`.
 - `git diff --check` is clean after fixing one trailing-whitespace line.
 
-### hms-commander
+### Package availability
 
-- Focused pytest suite previously passed: `66 passed` using global Python 3.14
-  because the repo venv lacked pytest.
-- `git diff --check` is clean.
-
-### ras-commander
-
-- GDAL/RasMapper focused tests passed: `11 passed`.
-- Broader targeted suite passed: `86 passed, 1 skipped`.
-- Real smoke test passed: `RasTerrainMod._ensure_initialized()` loaded
-  `RasMapperLib.dll` from HEC-RAS 7.0.
-- Exact missing junction from the user dialog was created and verified:
-  `C:\Users\bill\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\GDAL`
-  points to `C:\Program Files (x86)\HEC\HEC-RAS\7.0\GDAL`.
-- `git diff --check origin/main...HEAD` is clean.
+- Latest PyPI package checks on 2026-04-24 report `ras-commander==0.95.0` and
+  `hms-commander==0.3.0`.
+- `pipeline/requirements.txt` now requires those latest package floors so
+  `ras-agent` consumes published commander functionality instead of relying on
+  local sibling-repo branches.
 
 ## Draft Pull Request Text
 
 Title:
 
-Propose Illinois-first TauDEM and geometry-first integration slices for review
+Propose ras-agent Illinois-first TauDEM and geometry-first integration slices
 
 Summary:
 
 This contribution set is intended as a review menu for upstream integration,
 not a single all-or-nothing merge. It preserves the Illinois-first direction for
-`ras-agent`, moves reusable TauDEM/HMS primitives toward `hms-commander`, and
-moves reusable HEC-RAS geometry/mesh/RasMap primitives toward `ras-commander`.
+`ras-agent` while consuming reusable TauDEM/HMS primitives from the latest
+`hms-commander` package and reusable HEC-RAS geometry/mesh/RasMap primitives
+from the latest `ras-commander` package.
 
 The main proposal is to let `ras-agent` compose shared library capabilities
 rather than owning long-term reusable implementations. The work includes direct
@@ -295,12 +234,11 @@ validated.
 Review options:
 
 1. Accept low-risk documentation and roadmap alignment first.
-2. Review `hms-commander` TauDEM/HMS benchmark primitives independently.
-3. Review `ras-commander` text-first mesh, RasMap, and GDAL runtime helpers
-   independently.
-4. Rebase/port `ras-agent` geometry-first orchestration after upstream
+2. Confirm `ras-agent` should depend on latest `hms-commander` and
+   `ras-commander` pip packages for shared functionality.
+3. Rebase/port `ras-agent` geometry-first orchestration after upstream
    preprocessor/plan-HDF changes are reconciled.
-5. Use Spring Creek as the first headwater pilot to reproduce BLE-style data
+4. Use Spring Creek as the first headwater pilot to reproduce BLE-style data
    generation, then let Glenn decide how to improve and extend the
    implementation.
 

@@ -35,6 +35,9 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 - Spring Creek is the first headwater pilot HUC with gauge history. Keep it
   runnable for BLE-style data generation and use it as the calibration/validation
   proving ground before expanding to downstream or chained-basin models.
+- `ras-agent` now treats `hms-commander` and `ras-commander` as latest-pip
+  dependencies; local sibling-repo branches are not part of this integration
+  branch.
 
 ## Next
 

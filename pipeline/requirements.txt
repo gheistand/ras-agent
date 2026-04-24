@@ -10,7 +10,8 @@ pyproj>=3.6
 # TauDEM 5.x must be installed separately and available on PATH.
 
 # HEC-RAS automation
-ras-commander>=0.52
+ras-commander>=0.95.0
+hms-commander>=0.3.0
 h5py>=3.9
 
 # USGS data

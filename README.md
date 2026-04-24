@@ -9,6 +9,9 @@ Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois
 - The primary Illinois watershed-processing integration in this repo uses TauDEM-backed delineation through [`pipeline/taudem.py`](pipeline/taudem.py) and [`pipeline/watershed.py`](pipeline/watershed.py).
 - The reusable hydrology-side baseline is now upstreamed substantially into `hms-commander`: Spring Creek study packaging, direct TauDEM execution, watershed verification, boundary handoff selection, TauDEM-to-HMS bootstrap, parser-of-record validation, and a live Atlas 14 compute example all exist there now.
 - The intended HEC-RAS build path is `ras-commander` driven plain-text geometry assembly, with the watershed outline inserted as a 2D flow area in the `.g##` file and HEC-RAS recompiling derived HDF/preprocessor artifacts.
+- `ras-agent` should consume those shared capabilities from the latest
+  published `hms-commander` and `ras-commander` pip packages, not from local
+  sibling-repo working trees.
 - Mesh generation should stay geometry-first and RASMapper-aligned. Upstream Cartesian mesh work should be mined only for compatible QA ideas or implementation details, not preserved as an alternate runtime path.
 - The current `hdf5_direct` and `template_clone` code paths are legacy compatibility surfaces pending retirement, not architecture for new work.
 - The repo now includes a starter HEC-RAS 6.6 project scaffold in `data/RAS_6.6_Template/`, but it is not yet a complete 1D/2D seed-project inventory.
