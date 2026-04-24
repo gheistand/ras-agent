@@ -7,10 +7,12 @@ Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois
 ## Current Direction
 
 - The primary Illinois watershed-processing integration in this repo uses TauDEM-backed delineation through [`pipeline/taudem.py`](pipeline/taudem.py) and [`pipeline/watershed.py`](pipeline/watershed.py).
+- The reusable hydrology-side baseline is now upstreamed substantially into `hms-commander`: Spring Creek study packaging, direct TauDEM execution, watershed verification, boundary handoff selection, TauDEM-to-HMS bootstrap, parser-of-record validation, and a live Atlas 14 compute example all exist there now.
 - The intended HEC-RAS build path is `ras-commander` driven plain-text geometry assembly, with the watershed outline inserted as a 2D flow area in the `.g##` file and HEC-RAS recompiling derived HDF/preprocessor artifacts.
 - The current `hdf5_direct` code path should be treated as an experimental placeholder, not the architectural end state.
 - `template_clone` remains supported as an opt-in fallback and seed-project path as the bundled template scaffold matures.
 - The repo now includes a starter HEC-RAS 6.6 project scaffold in `data/RAS_6.6_Template/`, but it is not yet a complete 1D/2D template inventory.
+- That upstream TauDEM-to-HMS path should still be treated here as benchmark-grade, not production-grade, until it has a readiness gate, TauDEM parameter-tuning support, and human reviewer QAQC signoff.
 
 ## Repo Boundaries
 
@@ -45,6 +47,12 @@ pip install -r requirements.txt
 python pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output ./output/test --mock
 ```
 
+Boundary-condition scaffold:
+
+- `pipeline/orchestrator.py` and `pipeline/batch.py` now accept `--bc-mode headwater|downstream`.
+- `headwater` remains the only implemented mode today.
+- `downstream` is intentionally plumbed through the public API but currently fails fast until chained-basin hydrograph handoff, model provenance, and QA are designed.
+
 ### Real run notes
 
 - Watershed delineation now expects TauDEM executables.
@@ -74,17 +82,22 @@ Expected workspace package outputs:
 - `report.json`
 - `data_gap_analysis.json`
 - `manifest.json`
+- `analysis_extent.geojson`
+- `analysis_extent_5070.geojson`
+- `analysis_extent_summary.json`
 
 Use [`pipeline/workspace.py`](pipeline/workspace.py) for the current command surface:
 
 ```bash
 python pipeline/workspace.py validate-workspace --workspace-dir "workspace/Spring Creek Springfield IL"
+python pipeline/workspace.py refresh-context-layers --workspace-dir "workspace/Spring Creek Springfield IL"
 python pipeline/workspace.py build-report-package --workspace-dir "workspace/Spring Creek Springfield IL"
 ```
 
 Design rules:
 
 - The HTML report must remain self-contained with inline figures and inline MapLibre assets.
+- Informational downloads should derive from one shared buffered analysis extent instead of dataset-specific buffering.
 - Workspace gap analysis should point to upstream GitHub issues in `hms-commander` or `ras-commander` when the missing capability belongs there.
 - `ras-agent` keeps the Illinois-specific integration layer; reusable watershed and HEC-RAS primitives belong upstream.
 
@@ -110,14 +123,16 @@ Key implementation decisions:
 - `rivnet` / `traudem` are comparison tools only, not runtime dependencies.
 - WhiteboxTools belongs in a separate benchmark worktree, not the mainline API.
 - Watershed outputs are first-class artifacts for downstream debugging and provenance.
+- Boundary-condition mode is now an explicit run/build parameter, but downstream/chained-basin support is still a planned scaffold rather than a completed workflow.
 
 ## Status
 
 - Mock-mode orchestration, API, results export, and web UI are in place.
 - Illinois-first TauDEM wrapper and watershed integration are now the active hydro-processing path.
 - `ras-commander` already appears to cover most of the HEC-RAS-side workflow needed by `ras-agent`.
-- The remaining gap is mainly geometry-first project assembly for watershed-derived 2D flow areas, maturing the starter template scaffold into usable 1D/2D seed templates, and tighter orchestration around land-cover and infiltration compilation.
+- The remaining gap is mainly geometry-first project assembly for watershed-derived 2D flow areas, maturing the starter template scaffold into usable 1D/2D seed templates, tighter orchestration around land-cover and infiltration compilation, and a downstream consume/regenerate proof against the new upstream Spring Creek handoff package.
 - Real-basin validation, benchmark comparisons, and Windows regeneration workflows still need completion.
+- The first live upstream HMS scaffold also exposed warning classes that need downstream acceptance rules before promotion: missing ET/canopy methods, Muskingum stability warnings, lag-vs-time-step warnings, and negative inflow clipping.
 
 ## Validation
 

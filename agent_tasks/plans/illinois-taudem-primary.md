@@ -1,7 +1,7 @@
 # Illinois TauDEM Primary
 
 Status: active
-Last updated: 2026-04-16
+Last updated: 2026-04-24
 
 ## Objective
 
@@ -29,6 +29,8 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 - Extended `WatershedResult` to include `subbasins`, `centerlines`, `breaklines`, and `artifacts`.
 - Verified that `ras-commander` already covers most of the HEC-RAS-side workflow needed by `ras-agent`.
 - Updated repo docs to keep the roadmap and architecture scoped to this repo.
+- Upstream `hms-commander` now provides the reusable Spring Creek study/workspace package, direct TauDEM execution surface, watershed verification, boundary handoff outlet selection, TauDEM-to-HMS assembly/export, parser-of-record round-trip validation, and an end-to-end Atlas 14 benchmark notebook plus live compute example.
+- The shared Spring Creek benchmark is now import-valid and compute-valid from the `hms-commander` side, with durable artifacts available for downstream comparison and handoff testing.
 
 ## Next
 
@@ -44,6 +46,28 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 10. Capture Windows regeneration and QA steps for geometry recompilation and compiled HDF artifacts.
 11. Add benchmark fixtures and written comparison outputs for direct TauDEM vs reference tracks.
 12. Define acceptance tolerances for snapped outlet location, subbasin area, stream network structure, and derived channel metrics.
+13. Convert the new `boundary_condition_mode` scaffold from headwater-only plumbing into a validated downstream/chained-basin workflow.
+14. Treat the current Spring Creek TauDEM-to-HMS output from `hms-commander` as benchmark-grade, not production-grade, until the upstream pre-HMS readiness gate and human-review QAQC signoff artifact exist.
+15. Validate downstream `ras-agent` regeneration against the live Spring Creek handoff package emitted by `hms-commander`, rather than rebuilding the hydrology-side context locally.
+16. Track and consume upstream TauDEM parameter sensitivity / optimization support so delineation controls can be tuned deliberately before downstream model promotion.
+17. Record downstream acceptance rules for the first live HMS warning classes now observed upstream: missing ET/canopy methods, Muskingum stability warnings, lag-vs-time-step warnings, and negative inflow clipping.
+
+## Downstream Scaffold Notes
+
+The codebase now exposes `boundary_condition_mode` through `pipeline/model_builder.py`, `pipeline/orchestrator.py`, and `pipeline/batch.py`.
+
+Current state:
+
+- `headwater` remains the only implemented mode.
+- `downstream` is intentionally accepted at the public API/CLI layer but fails fast in the builder with a planning note.
+
+Before enabling non-headwater basins, finish at least:
+
+1. Define the durable input contract for upstream inflow hydrographs and their provenance.
+2. Decide how downstream basins discover/reference upstream model outputs versus externally supplied hydrographs.
+3. Revisit non-headwater BC generation in `pipeline/bc_lines.py` and confirm the AD8 weighting/fallback path against real chained-basin fixtures.
+4. Add regression coverage for builder, orchestrator, and batch paths that exercise downstream mode end-to-end.
+5. Decide how downstream-mode metadata should appear in reports, run metadata, and handoff artifacts.
 
 ## Current Upstream Issue Links
 
@@ -55,6 +79,7 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 - `ras-commander` drainage-area comparison utility: https://github.com/gpt-cmdr/ras-commander/issues/36
 - `ras-commander` model-side report and data-gap generator: https://github.com/gpt-cmdr/ras-commander/issues/37
 - `ras-commander` geometry-first 2D flow area writer: https://github.com/gpt-cmdr/ras-commander/issues/38
+- `ras-commander` headless land-cover / soils layer creation: https://github.com/gpt-cmdr/ras-commander/issues/47
 - `ras-agent` note: GitHub issues are disabled in `gpt-cmdr/ras-agent`, so repo-local items stay tracked here until issue tracking is enabled.
 
 ## Reference Track
