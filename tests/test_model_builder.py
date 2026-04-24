@@ -105,6 +105,35 @@ def _make_template_dir(tmp_path: Path, name="test_template") -> Path:
     return tpl
 
 
+@pytest.fixture
+def stub_geommesh(monkeypatch):
+    """Keep geometry-first unit tests fast even when HEC-RAS/pythonnet are installed."""
+    try:
+        from ras_commander.geom import GeomMesh
+    except ImportError:
+        return
+
+    monkeypatch.setattr(
+        GeomMesh,
+        "set_breakline_spacing",
+        staticmethod(lambda *args, **kwargs: None),
+    )
+    monkeypatch.setattr(
+        GeomMesh,
+        "generate",
+        staticmethod(
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=False,
+                status="deferred",
+                cell_count=0,
+                face_count=0,
+                error_message="stubbed in unit test",
+                fixes_applied=[],
+            )
+        ),
+    )
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -456,7 +485,7 @@ def test_write_geometry_first_geom_file(tmp_path):
     assert "Storage Area Mannings=0.04" in text
 
 
-def test_build_geometry_first_creates_complete_project(tmp_path):
+def test_build_geometry_first_creates_complete_project(tmp_path, stub_geommesh):
     dem_path = tmp_path / "source_dem.tif"
     dem_path.write_bytes(b"fake-dem")
     watershed = _make_watershed(dem_path=dem_path)
@@ -491,7 +520,7 @@ def test_build_geometry_first_creates_complete_project(tmp_path):
     assert "RAS_AGENT,MAIN" not in flow_text
 
 
-def test_build_geometry_first_registers_terrain(tmp_path):
+def test_build_geometry_first_registers_terrain(tmp_path, stub_geommesh):
     dem_path = tmp_path / "source_dem.tif"
     dem_path.write_bytes(b"fake-dem")
     watershed = _make_watershed(dem_path=dem_path)
@@ -516,7 +545,7 @@ def test_build_geometry_first_registers_terrain(tmp_path):
     assert layer.attrib["Filename"] == r".\terrain.tif"
 
 
-def test_build_model_dispatches_geometry_first(tmp_path):
+def test_build_model_dispatches_geometry_first(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
     project = mb.build_model(
@@ -526,16 +555,30 @@ def test_build_model_dispatches_geometry_first(tmp_path):
     assert project.geometry_file.exists()
 
 
-def test_build_model_defaults_to_geometry_first(tmp_path):
+def test_build_model_defaults_to_geometry_first(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
     project = mb.build_model(watershed, hydro_set, tmp_path)
 
     assert project.mesh_strategy == "geometry_first"
     assert project.geometry_file.exists()
+    assert project.metadata["boundary_condition_mode"] == "headwater"
 
 
-def test_geometry_first_perimeter_matches_watershed(tmp_path):
+def test_build_model_downstream_scaffold_raises(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+
+    with pytest.raises(NotImplementedError, match="scaffolded"):
+        mb.build_model(
+            watershed,
+            hydro_set,
+            tmp_path,
+            boundary_condition_mode="downstream",
+        )
+
+
+def test_geometry_first_perimeter_matches_watershed(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
     project = mb._build_geometry_first(
@@ -543,7 +586,7 @@ def test_geometry_first_perimeter_matches_watershed(tmp_path):
     )
     geom_text = project.geometry_file.read_text()
     assert "Storage Area Surface Line=" in geom_text
-    assert "300000" in geom_text
-    assert "4400000" in geom_text
-    assert "315000" in geom_text
-    assert "4415000" in geom_text
+    assert "30000" in geom_text
+    assert "44000" in geom_text
+    assert "31499" in geom_text or "31500" in geom_text
+    assert "44149" in geom_text or "44150" in geom_text

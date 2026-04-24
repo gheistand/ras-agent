@@ -63,8 +63,7 @@ def _make_nlcd_bytes(
 def test_get_nlcd_downloads_and_reprojects(tmp_path):
     """Mock WCS response → verify output file is valid raster in EPSG:5070."""
     bbox = (-89.1, 40.1, -89.0, 40.2)
-    # The download adds 0.1-deg buffer: west=−89.2, south=40.0, east=−88.9, north=40.3
-    nlcd_bytes = _make_nlcd_bytes(-89.2, 40.0, -88.9, 40.3)
+    nlcd_bytes = _make_nlcd_bytes(-89.1, 40.1, -89.0, 40.2)
 
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
@@ -74,6 +73,10 @@ def test_get_nlcd_downloads_and_reprojects(tmp_path):
         result = get_nlcd(bbox_wgs84=bbox, output_dir=tmp_path, year=2021)
 
     assert mock_get.call_count == 1, "requests.get should be called once"
+    params = mock_get.call_args.kwargs["params"]
+    assert ("COVERAGEID", "mrlc_download__NLCD_2021_Land_Cover_L48") in params
+    assert any(item[0] == "SUBSET" and item[1].startswith("X(") for item in params)
+    assert any(item[0] == "SUBSET" and item[1].startswith("Y(") for item in params)
     assert result.exists(), "Output file must exist"
 
     with rasterio.open(result) as ds:
@@ -91,7 +94,7 @@ def test_download_nlcd_idempotent(tmp_path):
     # Pre-create the expected output file
     west, south, east, north = bbox
     expected = raw_dir / f"nlcd_2021_{west:.2f}_{south:.2f}_{east:.2f}_{north:.2f}.tif"
-    nlcd_bytes = _make_nlcd_bytes(-89.2, 40.0, -88.9, 40.3)
+    nlcd_bytes = _make_nlcd_bytes(-89.1, 40.1, -89.0, 40.2)
     expected.write_bytes(nlcd_bytes)
 
     with patch("terrain.requests.get") as mock_get:

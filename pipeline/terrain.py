@@ -509,10 +509,18 @@ def get_terrain(
 
 # ── NLCD Land Cover ───────────────────────────────────────────────────────────
 
-# MRLC WCS endpoints — year-keyed; update when new NLCD releases are published
-NLCD_WCS_URLS: dict[int, str] = {
-    2019: "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2019_Land_Cover_L48/wcs",
-    2021: "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs",
+# MRLC WCS endpoints — year-keyed; update when new NLCD releases are published.
+# The current service advertises qualified coverage ids and uses projected
+# X/Y axis labels in EPSG:5070 for subsetting.
+NLCD_WCS_SOURCES: dict[int, dict[str, str]] = {
+    2019: {
+        "url": "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2019_Land_Cover_L48/wcs",
+        "coverage_id": "mrlc_download__NLCD_2019_Land_Cover_L48",
+    },
+    2021: {
+        "url": "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs",
+        "coverage_id": "mrlc_download__NLCD_2021_Land_Cover_L48",
+    },
 }
 
 
@@ -533,15 +541,21 @@ def download_nlcd(
         Path to downloaded GeoTIFF
 
     Notes:
-        Uses MRLC WCS endpoint. Adds 0.1-degree buffer to bbox to ensure
-        full watershed coverage. Downloads are idempotent (skips if exists).
+        Uses the requested bbox as-is. Any shared buffering must happen before
+        this function is called so all informational layers use the same extent.
+        Downloads are idempotent (skips if exists).
     """
-    if year not in NLCD_WCS_URLS:
+    if year not in NLCD_WCS_SOURCES:
         raise TerrainError(
-            f"Unsupported NLCD year: {year}. Supported: {sorted(NLCD_WCS_URLS)}"
+            f"Unsupported NLCD year: {year}. Supported: {sorted(NLCD_WCS_SOURCES)}"
         )
 
     west, south, east, north = bbox_wgs84
+    transformer = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+    xmin, ymin = transformer.transform(west, south)
+    xmax, ymax = transformer.transform(east, north)
+    xmin, xmax = sorted((xmin, xmax))
+    ymin, ymax = sorted((ymin, ymax))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -551,12 +565,9 @@ def download_nlcd(
         logger.debug(f"NLCD already downloaded: {fname.name}")
         return fname
 
-    # Expand bbox by 0.1 degrees on each side for WCS request
-    buf = 0.1
-    w, s, e, n = west - buf, south - buf, east + buf, north + buf
-
-    base_url = NLCD_WCS_URLS[year]
-    coverage_id = f"NLCD_{year}_Land_Cover_L48"
+    source = NLCD_WCS_SOURCES[year]
+    base_url = source["url"]
+    coverage_id = source["coverage_id"]
 
     # WCS 2.0.1 requires two SUBSET params — use list of tuples to allow duplication
     params = [
@@ -564,14 +575,14 @@ def download_nlcd(
         ("VERSION", "2.0.1"),
         ("REQUEST", "GetCoverage"),
         ("COVERAGEID", coverage_id),
-        ("SUBSET", f"Long({w},{e})"),
-        ("SUBSET", f"Lat({s},{n})"),
+        ("SUBSET", f"X({xmin},{xmax})"),
+        ("SUBSET", f"Y({ymin},{ymax})"),
         ("FORMAT", "image/tiff"),
     ]
 
     logger.info(
         f"Downloading NLCD {year} for bbox: "
-        f"({w:.3f},{s:.3f},{e:.3f},{n:.3f}) from MRLC WCS"
+        f"({west:.3f},{south:.3f},{east:.3f},{north:.3f}) from MRLC WCS"
     )
 
     try:
@@ -581,7 +592,7 @@ def download_nlcd(
         raise TerrainError(
             f"NLCD WCS download failed: {exc}\n"
             f"URL: {base_url}\n"
-            f"SUBSET Long({w:.4f},{e:.4f}) Lat({s:.4f},{n:.4f})"
+            f"SUBSET X({xmin:.3f},{xmax:.3f}) Y({ymin:.3f},{ymax:.3f})"
         ) from exc
 
     with open(fname, "wb") as f:

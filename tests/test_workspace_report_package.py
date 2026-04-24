@@ -18,7 +18,10 @@ def _fake_workspace_context(tmp_path: Path) -> dict:
     return {
         "workspace_dir": tmp_path,
         "manifest": {
-            "downloads": {"terrain_clipped": str(tmp_path / "04_terrain" / "dem.tif")},
+            "downloads": {
+                "terrain_clipped": str(tmp_path / "04_terrain" / "dem.tif"),
+                "analysis_extent_summary": str(tmp_path / "00_metadata" / "analysis_extent_summary.json"),
+            },
             "sources": {
                 "terrain_primary_image_server": "https://example.test/ImageServer",
                 "terrain_fallback": "https://example.test/fallback",
@@ -49,8 +52,19 @@ def _fake_workspace_context(tmp_path: Path) -> dict:
             }]
         },
         "peaks": pd.DataFrame({"peak_dt": pd.to_datetime(["2024-01-01"]), "peak_va": [1500.0]}),
+        "analysis_extent_summary": {
+            "buffer_m": 500.0,
+            "bbox_wgs84": [-89.81, 39.69, -89.76, 39.72],
+            "bbox_5070": [500000.0, 1860000.0, 501000.0, 1861000.0],
+            "source_boundary": str(tmp_path / "02_basin_outline" / "USGS_05577500_nldi_basin_5070.geojson"),
+        },
+        "analysis_extent_path": tmp_path / "00_metadata" / "analysis_extent.geojson",
+        "analysis_extent_5070_path": tmp_path / "00_metadata" / "analysis_extent_5070.geojson",
+        "flowlines_path": tmp_path / "03_nhdplus" / "USGS_05577500_upstream_flowlines_analysis_extent.geojson",
+        "soils_path": tmp_path / "06_soils" / "ssurgo_mapunitpoly_analysis_extent.geojson",
+        "soils_5070_path": tmp_path / "06_soils" / "ssurgo_mapunitpoly_analysis_extent_5070.geojson",
         "dem_path": tmp_path / "04_terrain" / "spring_creek_basin_dem_5070.tif",
-        "nlcd_path": tmp_path / "05_landcover_nlcd" / "nlcd_2021_watershed.tif",
+        "nlcd_path": tmp_path / "05_landcover_nlcd" / "nlcd_2021_analysis_extent.tif",
     }
 
 
@@ -96,5 +110,8 @@ def test_write_workspace_report_package_writes_json_outputs(tmp_path, monkeypatc
 
     assert report_json["schema_version"] == "base-engineering-report/v1"
     assert report_json["data_gaps"]["count"] == gap_json["gap_count"]
+    assert report_json["analysis_extent"]["buffer_m"] == 500.0
+    assert report_json["landcover"]["nlcd_path"].endswith("nlcd_2021_analysis_extent.tif")
+    assert report_json["soils"]["soil_geojson"].endswith("ssurgo_mapunitpoly_analysis_extent.geojson")
     assert any(gap["id"] == "streamstats-service-transition" for gap in gap_json["gaps"])
     assert any(gap["issue_url"] for gap in gap_json["gaps"])

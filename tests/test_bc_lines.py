@@ -185,7 +185,7 @@ class TestFormat2dBoundaryLocation:
         # After "Boundary Location="
         fields_str = header.split("Boundary Location=")[1]
         fields = fields_str.split(",")
-        assert len(fields) == 8
+        assert len(fields) == 9
         # Fields 1-2: 16 chars each
         assert len(fields[0]) == 16
         assert len(fields[1]) == 16
@@ -200,6 +200,8 @@ class TestFormat2dBoundaryLocation:
         assert len(fields[6]) == 16
         # Field 8: BC name 32 chars
         assert len(fields[7]) == 32
+        # Field 9: trailing 32-char blank (required v6.x+)
+        assert len(fields[8]) == 32
 
     def test_area_name_in_field_6(self):
         result = format_2d_boundary_location(
@@ -243,9 +245,10 @@ class TestFindStreamBoundaryIntersections:
         intersections = _find_stream_boundary_intersections([], box_basin)
         assert len(intersections) == 0
 
-    def test_stream_not_touching_boundary(self, box_basin):
-        interior_stream = LineString([(200, 200), (800, 800)])
-        intersections = _find_stream_boundary_intersections([interior_stream], box_basin)
+    def test_stream_not_touching_boundary(self):
+        big_box = Polygon([(0, 0), (10000, 0), (10000, 10000), (0, 10000)])
+        interior_stream = LineString([(4000, 4000), (6000, 6000)])
+        intersections = _find_stream_boundary_intersections([interior_stream], big_box)
         assert len(intersections) == 0
 
 
@@ -315,6 +318,18 @@ class TestGenerateBcLines:
             assert inflow.name.startswith("USInflow")
             assert inflow.bc_type == "flow_hydrograph"
 
+    def test_non_headwater_inflows_keep_stream_index(self, box_basin, pour_point_right):
+        stream = LineString([(-100, 500), (1100, 500)])
+        bc_set = generate_bc_lines(
+            basin=box_basin,
+            streams=[stream],
+            pour_point=pour_point_right,
+            dem_path=None,
+            headwater=False,
+        )
+        assert len(bc_set.inflows) == 1
+        assert bc_set.inflows[0].stream_index == 0
+
     def test_all_names_max_16_chars(self, box_basin, pour_point_right):
         stream = LineString([(-100, 500), (1100, 500)])
         bc_set = generate_bc_lines(
@@ -330,6 +345,33 @@ class TestGenerateBcLines:
         )
         assert len(bc_set.bc_lines) >= 2
         assert bc_set.outlet is not None
+
+    def test_headwater_no_stream_intersections_does_not_create_inflow(
+        self, box_basin, pour_point_right
+    ):
+        bc_set = generate_bc_lines(
+            basin=box_basin,
+            streams=[],
+            pour_point=pour_point_right,
+            dem_path=None,
+            headwater=True,
+        )
+        assert bc_set.outlet is not None
+        assert bc_set.inflows == []
+        assert {bc.bc_type for bc in bc_set.bc_lines} == {"normal_depth"}
+
+    def test_non_headwater_no_stream_intersections_keeps_inflow_fallback(
+        self, box_basin, pour_point_right
+    ):
+        bc_set = generate_bc_lines(
+            basin=box_basin,
+            streams=[],
+            pour_point=pour_point_right,
+            dem_path=None,
+            headwater=False,
+        )
+        assert len(bc_set.inflows) == 1
+        assert bc_set.inflows[0].name == "USInflow1"
 
     def test_coords_outside_basin(self, box_basin, pour_point_right):
         stream = LineString([(-100, 500), (1100, 500)])

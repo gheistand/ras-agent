@@ -34,6 +34,46 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+BOUNDARY_CONDITION_MODES = ("headwater", "downstream")
+DOWNSTREAM_BOUNDARY_CONDITION_TODO = (
+    "Define the durable input contract for upstream inflow hydrographs and their provenance.",
+    "Decide how downstream basins reference upstream model outputs versus external hydrograph inputs.",
+    "Add builder/orchestrator/batch regression fixtures for chained basins, including AD8 fallback weighting checks.",
+)
+
+
+def normalize_boundary_condition_mode(boundary_condition_mode: Optional[str]) -> str:
+    """Normalize supported boundary-condition mode labels."""
+    if boundary_condition_mode is None:
+        return "headwater"
+
+    normalized = str(boundary_condition_mode).strip().lower().replace("-", "_")
+    aliases = {
+        "headwater": "headwater",
+        "downstream": "downstream",
+        "non_headwater": "downstream",
+        "nonheadwater": "downstream",
+        "chained": "downstream",
+        "chained_model": "downstream",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            f"Unknown boundary_condition_mode: {boundary_condition_mode!r}. "
+            f"Valid options: {', '.join(BOUNDARY_CONDITION_MODES)}"
+        )
+    return aliases[normalized]
+
+
+def downstream_boundary_condition_scaffold_message() -> str:
+    """Return the current fail-fast note for downstream/chained basin support."""
+    todo_text = "; ".join(DOWNSTREAM_BOUNDARY_CONDITION_TODO)
+    return (
+        "boundary_condition_mode='downstream' is scaffolded through the builder "
+        "and orchestration APIs, but non-headwater basin support is not implemented "
+        f"yet. Remaining planning/work items: {todo_text}"
+    )
+
+
 # ── Data Structures ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -149,7 +189,7 @@ NLCD_MANNINGS_N: dict = {
     90: 0.075,  # Woody Wetlands
     95: 0.075,  # Emergent Herbaceous Wetlands
 }
-DEFAULT_MANNINGS_N = 0.040
+DEFAULT_MANNINGS_N = 0.060
 
 
 def get_mannings_n(nlcd_class: int) -> float:
@@ -295,7 +335,7 @@ def _write_plan_file(
         f"Program Version=6.60\n"
         f"Geom File={geom_file}\n"
         f"Flow File={flow_file}\n"
-        f"Run HTab= 0\n"
+        f"Run HTab=-1\n"
         f"Run UNet= -1\n"
         f"Run Sed= 0\n"
         f"Run WQ= 0\n"
@@ -747,13 +787,15 @@ def _centerline_count(watershed) -> int:
     return 0
 
 
-def _hdf_mesh_cell_count(geom_hdf: Path, area_name: str) -> int:
-    """Read cell count from .g01.hdf Attributes to check if mesh exists."""
+def _text_mesh_point_count(geom_file: Path, area_name: str) -> int:
+    """Check .g01 text for existing mesh seed points in the 2D flow area."""
     try:
-        import h5py
-        with h5py.File(str(geom_hdf), "r") as hf:
-            attrs = hf["Geometry/2D Flow Areas/Attributes"][:]
-            return int(attrs["Cell Count"][0])
+        text = geom_file.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.startswith("Storage Area 2D Points="):
+                count_str = line.split("=", 1)[1].strip()
+                return int(count_str) if count_str else 0
+        return 0
     except Exception:
         return 0
 
@@ -766,6 +808,7 @@ def _build_from_template(
     output_dir: Path,
     return_periods: list,
     nlcd_raster_path: Optional[Path] = None,
+    boundary_condition_mode: str = "headwater",
 ) -> HecRasProject:
     """
     Build a HEC-RAS project by cloning the closest area-matched template.
@@ -921,6 +964,9 @@ def _build_from_template(
         "template_name": template.name,
         "template_dir": str(template.template_dir),
         "template_area_mi2": template.target_area_mi2,
+        "boundary_condition_mode": normalize_boundary_condition_mode(
+            boundary_condition_mode
+        ),
         "watershed_area_mi2": watershed.characteristics.drainage_area_mi2,
         "main_channel_slope": bc_slope,
         "mannings_n": mannings_n,
@@ -955,6 +1001,7 @@ def _build_hdf5_direct(
     output_dir: Path,
     return_periods: list,
     nlcd_raster_path: Optional[Path] = None,
+    boundary_condition_mode: str = "headwater",
     **kwargs,
 ) -> HecRasProject:
     """
@@ -1059,6 +1106,9 @@ def _build_hdf5_direct(
         )
 
     metadata = {
+        "boundary_condition_mode": normalize_boundary_condition_mode(
+            boundary_condition_mode
+        ),
         "watershed_area_mi2": watershed.characteristics.drainage_area_mi2,
         "watershed_area_km2": watershed.characteristics.drainage_area_km2,
         "main_channel_slope": bc_slope,
@@ -1238,6 +1288,8 @@ def _write_geometry_first_geom_file(
         geom_file,
         area_name,
         mannings_n=mannings_n,
+        spatially_varied_mann_on_faces=True,
+        composite_classification=True,
         create_backup=False,
     )
 
@@ -1256,6 +1308,7 @@ def _build_geometry_first(
     output_dir: Path,
     return_periods: list,
     nlcd_raster_path: Optional[Path] = None,
+    boundary_condition_mode: str = "headwater",
     **kwargs,
 ) -> HecRasProject:
     """
@@ -1265,6 +1318,12 @@ def _build_geometry_first(
     area geometry via ras-commander GeomStorage, and creates plan/flow files.
     HEC-RAS regenerates all HDF artifacts on the next compute_plan() call.
     """
+    boundary_condition_mode = normalize_boundary_condition_mode(
+        boundary_condition_mode
+    )
+    if boundary_condition_mode != "headwater":
+        raise NotImplementedError(downstream_boundary_condition_scaffold_message())
+
     project_name = f"ras_agent_{watershed.characteristics.drainage_area_mi2:.0f}mi2"
     project_dir, prj_file, rasmap_file = _scaffold_project_from_template(output_dir, project_name)
 
@@ -1273,8 +1332,13 @@ def _build_geometry_first(
     geom_file = project_dir / f"{project_name}.{geom_ext}"
 
     basin_poly = _watershed_polygon_5070(watershed)
-    perimeter_coords = list(basin_poly.exterior.coords)
     cell_size_m = _cell_size_from_area_km2(watershed.characteristics.drainage_area_km2)
+
+    # Smooth perimeter to remove narrow concavities that cause Cell Area Error
+    smooth_dist = cell_size_m * 0.5
+    basin_smoothed = basin_poly.buffer(smooth_dist).buffer(-smooth_dist)
+    basin_smoothed = basin_smoothed.simplify(cell_size_m * 0.25, preserve_topology=True)
+    perimeter_coords = list(basin_smoothed.exterior.coords)
 
     if nlcd_raster_path is not None:
         mannings_n = dominant_mannings_n_from_raster(nlcd_raster_path, basin_poly)
@@ -1284,6 +1348,32 @@ def _build_geometry_first(
     _write_geometry_first_geom_file(
         geom_file, area_name, perimeter_coords, cell_size_m, mannings_n,
     )
+
+    # Insert stream centerlines as breaklines for mesh refinement
+    streams_gdf_raw = _linework_5070(getattr(watershed, "streams", None))
+    streams_5070 = list(streams_gdf_raw.geometry) if streams_gdf_raw is not None else []
+    breakline_simplify_ft = kwargs.get("breakline_simplify_ft", 10.0)
+    if streams_5070:
+        from ras_commander.geom import GeomStorage as _GeomStorageBL
+        simplify_tol_m = breakline_simplify_ft * 0.3048 if breakline_simplify_ft else 0
+        breakline_defs = []
+        for idx, geom in enumerate(streams_5070, start=1):
+            if simplify_tol_m > 0:
+                geom = geom.simplify(simplify_tol_m, preserve_topology=True)
+            breakline_defs.append({
+                "name": f"Stream{idx}",
+                "coords": list(geom.coords),
+                "cell_size_near": cell_size_m * 0.33,
+                "cell_size_far": None,
+            })
+        _GeomStorageBL.set_breaklines(
+            geom_file, area_name, breakline_defs, create_backup=False,
+        )
+        total_pts = sum(len(bl["coords"]) for bl in breakline_defs)
+        logger.info(
+            "Inserted %d stream breaklines (%d vertices, simplified at %.0fft) into %s",
+            len(breakline_defs), total_pts, breakline_simplify_ft or 0, geom_file.name,
+        )
 
     dem_clipped = getattr(watershed, "dem_clipped", None)
     terrain_file = None
@@ -1304,20 +1394,30 @@ def _build_geometry_first(
     )
     from shapely.geometry import Point as ShapelyPoint
 
-    streams_gdf = _linework_5070(getattr(watershed, "streams", None))
-    streams_5070 = list(streams_gdf.geometry) if streams_gdf is not None else []
     pp = getattr(watershed, "pour_point", None)
     pour_point_geom = ShapelyPoint(pp.x, pp.y) if pp is not None else basin_poly.centroid
 
     dem_for_bc = terrain_file
 
+    # Contributing area grid for flow splitting (optional)
+    ad8_path = None
+    artifacts = getattr(watershed, "artifacts", {})
+    if "ad8" in artifacts and Path(artifacts["ad8"]).exists():
+        ad8_path = Path(artifacts["ad8"])
+
+    # Future non-headwater/chained-basin work belongs here once the upstream
+    # hydrograph handoff contract is defined and validated. The plumbing now
+    # reaches this builder via `boundary_condition_mode`, but we intentionally
+    # fail fast above until downstream-specific inputs and QA are designed.
     bc_set = generate_bc_lines(
         basin=basin_poly,
         streams=streams_5070,
         pour_point=pour_point_geom,
         dem_path=dem_for_bc,
+        ad8_path=ad8_path,
         area_name=area_name,
         channel_slope=bc_slope,
+        headwater=True,
     )
     append_bc_lines_to_geom(geom_file, bc_set)
 
@@ -1344,48 +1444,64 @@ def _build_geometry_first(
 
     _register_files_in_prj(prj_file, geom_ext=geom_ext)
 
-    # Headless mesh generation (requires .g01.hdf from HEC-RAS preprocessing)
-    geom_hdf = geom_file.with_suffix(geom_file.suffix + ".hdf")
-    mesh_result = None
-    if geom_hdf.exists():
-        existing_cells = _hdf_mesh_cell_count(geom_hdf, area_name)
-        if existing_cells > 0:
-            logger.info(
-                "Mesh already exists: %d cells (%s) — skipping generation",
-                existing_cells, area_name,
+    # Set breakline spacing before mesh generation
+    if streams_5070:
+        try:
+            from ras_commander.geom import GeomMesh as _GeomMesh
+            _GeomMesh.set_breakline_spacing(
+                str(geom_file),
+                near=cell_size_m * 0.33,
+                far=cell_size_m,
+                all_breaklines=True,
             )
-        else:
-            try:
-                from ras_commander.geom import GeomMesh
-                mesh_result = GeomMesh.generate(
-                    str(geom_hdf),
-                    mesh_name=area_name,
-                    cell_size=cell_size_m,
-                    max_iterations=8,
-                )
-                if mesh_result.ok:
-                    logger.info(
-                        "Mesh generated: %d cells, %d faces (%s)",
-                        mesh_result.cell_count, mesh_result.face_count, area_name,
-                    )
-                else:
-                    logger.warning(
-                        "Mesh generation incomplete: %s (fixes: %s)",
-                        mesh_result.error_message, mesh_result.fixes_applied,
-                    )
-            except Exception as exc:
-                logger.warning("Mesh generation skipped: %s", exc)
-    else:
+        except ImportError:
+            logger.warning("GeomMesh not available; skipping breakline spacing")
+
+    # Headless mesh generation via RasMapperLib (operates on .g01 text)
+    mesh_result = None
+    existing_points = _text_mesh_point_count(geom_file, area_name)
+    if existing_points > 0:
         logger.info(
-            "Mesh deferred: %s not found (run HEC-RAS preprocessing first)",
-            geom_hdf.name,
+            "Mesh already exists: %d points (%s) — skipping generation",
+            existing_points, area_name,
         )
+    else:
+        try:
+            from ras_commander.geom import GeomMesh
+            mesh_result = GeomMesh.generate(
+                str(geom_file),
+                mesh_name=area_name,
+                cell_size=cell_size_m,
+                bl_spacing=cell_size_m / 2.0,
+                near_repeats=1,
+                max_iterations=8,
+            )
+            if mesh_result.ok:
+                logger.info(
+                    "Mesh generated: %d cells, %d faces (%s)",
+                    mesh_result.cell_count, mesh_result.face_count, area_name,
+                )
+            else:
+                logger.warning(
+                    "Mesh generation incomplete: %s (fixes: %s)",
+                    mesh_result.error_message, mesh_result.fixes_applied,
+                )
+        except ImportError:
+            logger.info(
+                "GeomMesh not available — open project in RAS Mapper to generate mesh",
+            )
+        except Exception as exc:
+            logger.warning("Mesh generation failed: %s", exc)
 
     flow_file = project_dir / f"{project_name}.u01"
     plan_file = project_dir / f"{project_name}.p01"
     plan_hdf = project_dir / f"{project_name}.p01.hdf"
 
     metadata = {
+        "boundary_condition_mode": boundary_condition_mode,
+        "downstream_boundary_condition_todo": list(
+            DOWNSTREAM_BOUNDARY_CONDITION_TODO
+        ),
         "watershed_area_mi2": watershed.characteristics.drainage_area_mi2,
         "watershed_area_km2": watershed.characteristics.drainage_area_km2,
         "main_channel_slope": bc_slope,
@@ -1450,6 +1566,7 @@ def _build_mock_project(
     hydro_set,
     output_dir: Path,
     return_periods: list,
+    boundary_condition_mode: str = "headwater",
 ) -> HecRasProject:
     """
     Create a dummy HEC-RAS project directory with placeholder files for mock mode.
@@ -1502,7 +1619,12 @@ def _build_mock_project(
         geom_ext="g01",
         mesh_strategy="mock",
         return_periods=return_periods,
-        metadata={"mock": True},
+        metadata={
+            "mock": True,
+            "boundary_condition_mode": normalize_boundary_condition_mode(
+                boundary_condition_mode
+            ),
+        },
     )
 
 
@@ -1512,6 +1634,7 @@ def build_model(
     output_dir: Path,
     return_periods: Optional[list] = None,
     mesh_strategy: str = "geometry_first",
+    boundary_condition_mode: str = "headwater",
     nlcd_raster_path: Optional[Path] = None,
     mock: bool = False,
     **kwargs,
@@ -1531,6 +1654,10 @@ def build_model(
                             default is "geometry_first", which uses
                             ras-commander GeomStorage to write .g## and
                             lets HEC-RAS regenerate HDF artifacts
+        boundary_condition_mode:
+                            "headwater" | "downstream". The downstream option is
+                            scaffolded through the API but intentionally fails
+                            fast until chained-basin inputs and QA are designed.
         nlcd_raster_path:   Optional NLCD 2019 GeoTIFF for Manning's n lookup
 
     Returns:
@@ -1549,26 +1676,57 @@ def build_model(
     if not return_periods:
         raise ValueError("return_periods is empty and hydro_set has no hydrographs")
 
+    boundary_condition_mode = normalize_boundary_condition_mode(
+        boundary_condition_mode
+    )
+
     logger.info(
         f"build_model: strategy={mesh_strategy}, "
+        f"bc_mode={boundary_condition_mode}, "
         f"area={watershed.characteristics.drainage_area_mi2:.1f} mi², "
         f"return_periods={return_periods}"
     )
 
+    if boundary_condition_mode != "headwater":
+        raise NotImplementedError(downstream_boundary_condition_scaffold_message())
+
     if mock:
-        return _build_mock_project(watershed, hydro_set, output_dir, return_periods)
+        return _build_mock_project(
+            watershed,
+            hydro_set,
+            output_dir,
+            return_periods,
+            boundary_condition_mode=boundary_condition_mode,
+        )
 
     if mesh_strategy == "geometry_first":
         return _build_geometry_first(
-            watershed, hydro_set, output_dir, return_periods, nlcd_raster_path, **kwargs
+            watershed,
+            hydro_set,
+            output_dir,
+            return_periods,
+            nlcd_raster_path,
+            boundary_condition_mode=boundary_condition_mode,
+            **kwargs,
         )
     elif mesh_strategy == "template_clone":
         return _build_from_template(
-            watershed, hydro_set, output_dir, return_periods, nlcd_raster_path
+            watershed,
+            hydro_set,
+            output_dir,
+            return_periods,
+            nlcd_raster_path,
+            boundary_condition_mode=boundary_condition_mode,
         )
     elif mesh_strategy == "hdf5_direct":
         return _build_hdf5_direct(
-            watershed, hydro_set, output_dir, return_periods, nlcd_raster_path, **kwargs
+            watershed,
+            hydro_set,
+            output_dir,
+            return_periods,
+            nlcd_raster_path,
+            boundary_condition_mode=boundary_condition_mode,
+            **kwargs,
         )
     elif mesh_strategy == "ras2025":
         return _build_ras2025(

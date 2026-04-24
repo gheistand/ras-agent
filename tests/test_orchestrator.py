@@ -232,7 +232,7 @@ def test_run_watershed_mock_mode(tmp_path):
          patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
          patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
          patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
-         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._model_builder.build_model", return_value=project) as mock_build, \
          patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
          patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
          patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
@@ -258,6 +258,7 @@ def test_run_watershed_mock_mode(tmp_path):
     assert len(result.job_ids) == 3
     assert result.duration_sec > 0
     assert result.errors == []
+    assert mock_build.call_args.kwargs["boundary_condition_mode"] == "headwater"
 
 
 def test_run_watershed_stage1_failure(tmp_path):

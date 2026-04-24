@@ -509,6 +509,17 @@ def _round_coords(obj, decimals: int = 5):
     return obj
 
 
+# DEV NOTE 2026-04-20:
+# These workspace report helpers are still Spring Creek seed-workspace code even
+# though their names read like generic report-package utilities.
+# Needed next steps:
+# 1. Drive station/workspace identity from manifest metadata instead of hardcoded
+#    `USGS_05577500` filenames and `Spring Creek Base Data Report` strings.
+# 2. Centralize artifact naming/path discovery so validation, context loading,
+#    JSON output, and HTML generation share one contract.
+# 3. Keep the Spring Creek case as a fixture-backed test workspace, but make the
+#    implementation reject unsupported layouts explicitly rather than silently
+#    mislabeling other studies as Spring Creek.
 def _load_workspace_context(workspace_dir: Path) -> dict:
     import pandas as pd
     import geopandas as gpd
@@ -525,6 +536,12 @@ def _load_workspace_context(workspace_dir: Path) -> dict:
     def _read_json(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def _optional_json(path: Path) -> dict:
+        return _read_json(path) if path.exists() else {}
+
+    def _pick_path(preferred: Path, fallback: Path) -> Path:
+        return preferred if preferred.exists() else fallback
+
     iv_flow = pd.read_csv(gauge_dir / "continuous" / "USGS_05577500_iv_last365d_flow.csv")
     iv_stage = pd.read_csv(gauge_dir / "continuous" / "USGS_05577500_iv_last365d_stage.csv")
     dv_flow = pd.read_csv(gauge_dir / "daily" / "USGS_05577500_dv_period_of_record_flow.csv")
@@ -537,14 +554,46 @@ def _load_workspace_context(workspace_dir: Path) -> dict:
     gauge_point_5070 = gpd.read_file(gauge_dir / "USGS_05577500_point_5070.geojson").to_crs("EPSG:5070")
     basin = gpd.read_file(basin_dir / "USGS_05577500_nldi_basin.geojson").to_crs("EPSG:4326")
     basin_5070 = gpd.read_file(basin_dir / "USGS_05577500_nldi_basin_5070.geojson").to_crs("EPSG:5070")
-    flowlines = gpd.read_file(nhd_dir / "USGS_05577500_upstream_flowlines.geojson").to_crs("EPSG:4326")
-    flowlines_5070 = gpd.read_file(nhd_dir / "USGS_05577500_upstream_flowlines_5070.geojson").to_crs("EPSG:5070")
+    analysis_extent_path = _pick_path(meta_dir / "analysis_extent.geojson", basin_dir / "USGS_05577500_nldi_basin.geojson")
+    analysis_extent_5070_path = _pick_path(meta_dir / "analysis_extent_5070.geojson", basin_dir / "USGS_05577500_nldi_basin_5070.geojson")
+    analysis_extent = gpd.read_file(analysis_extent_path).to_crs("EPSG:4326")
+    analysis_extent_5070 = gpd.read_file(analysis_extent_5070_path).to_crs("EPSG:5070")
+    flowlines_path = _pick_path(
+        nhd_dir / "USGS_05577500_upstream_flowlines_analysis_extent.geojson",
+        nhd_dir / "USGS_05577500_upstream_flowlines.geojson",
+    )
+    flowlines_5070_path = _pick_path(
+        nhd_dir / "USGS_05577500_upstream_flowlines_analysis_extent_5070.geojson",
+        nhd_dir / "USGS_05577500_upstream_flowlines_5070.geojson",
+    )
+    flowlines = gpd.read_file(flowlines_path).to_crs("EPSG:4326")
+    flowlines_5070 = gpd.read_file(flowlines_5070_path).to_crs("EPSG:5070")
     gauge_huc12 = gpd.read_file(nhd_dir / "gauge_huc12.geojson").to_crs("EPSG:4326")
     gauge_huc12_5070 = gpd.read_file(nhd_dir / "gauge_huc12_5070.geojson").to_crs("EPSG:5070")
-    hucs = gpd.read_file(nhd_dir / "basin_intersecting_huc12.geojson").to_crs("EPSG:4326")
-    hucs_5070 = gpd.read_file(nhd_dir / "basin_intersecting_huc12_5070.geojson").to_crs("EPSG:5070")
-    soils = gpd.read_file(soils_dir / "ssurgo_mapunitpoly_basin.geojson").to_crs("EPSG:4326")
-    soils_5070 = gpd.read_file(soils_dir / "ssurgo_mapunitpoly_basin_5070.geojson").to_crs("EPSG:5070")
+    hucs_path = _pick_path(
+        nhd_dir / "basin_intersecting_huc12_analysis_extent.geojson",
+        nhd_dir / "basin_intersecting_huc12.geojson",
+    )
+    hucs_5070_path = _pick_path(
+        nhd_dir / "basin_intersecting_huc12_analysis_extent_5070.geojson",
+        nhd_dir / "basin_intersecting_huc12_5070.geojson",
+    )
+    hucs = gpd.read_file(hucs_path).to_crs("EPSG:4326")
+    hucs_5070 = gpd.read_file(hucs_5070_path).to_crs("EPSG:5070")
+    soils_path = _pick_path(
+        soils_dir / "ssurgo_mapunitpoly_analysis_extent.geojson",
+        soils_dir / "ssurgo_mapunitpoly_basin.geojson",
+    )
+    soils_5070_path = _pick_path(
+        soils_dir / "ssurgo_mapunitpoly_analysis_extent_5070.geojson",
+        soils_dir / "ssurgo_mapunitpoly_basin_5070.geojson",
+    )
+    soils = gpd.read_file(soils_path).to_crs("EPSG:4326")
+    soils_5070 = gpd.read_file(soils_5070_path).to_crs("EPSG:5070")
+    nlcd_path = _pick_path(
+        landcover_dir / "nlcd_2021_analysis_extent.tif",
+        landcover_dir / "nlcd_2021_watershed.tif",
+    )
 
     peaks = pd.read_csv(
         gauge_dir / "peaks" / "USGS_05577500_annual_peaks.rdb",
@@ -573,16 +622,27 @@ def _load_workspace_context(workspace_dir: Path) -> dict:
         "gauge_point_5070": gauge_point_5070,
         "basin": basin,
         "basin_5070": basin_5070,
+        "analysis_extent": analysis_extent,
+        "analysis_extent_5070": analysis_extent_5070,
+        "analysis_extent_path": analysis_extent_path,
+        "analysis_extent_5070_path": analysis_extent_5070_path,
+        "analysis_extent_summary": _optional_json(meta_dir / "analysis_extent_summary.json"),
         "flowlines": flowlines,
         "flowlines_5070": flowlines_5070,
+        "flowlines_path": flowlines_path,
+        "flowlines_5070_path": flowlines_5070_path,
         "gauge_huc12": gauge_huc12,
         "gauge_huc12_5070": gauge_huc12_5070,
         "hucs": hucs,
         "hucs_5070": hucs_5070,
+        "hucs_path": hucs_path,
+        "hucs_5070_path": hucs_5070_path,
         "soils": soils,
         "soils_5070": soils_5070,
+        "soils_path": soils_path,
+        "soils_5070_path": soils_5070_path,
         "dem_path": terrain_dir / "spring_creek_basin_dem_5070.tif",
-        "nlcd_path": landcover_dir / "nlcd_2021_watershed.tif",
+        "nlcd_path": nlcd_path,
     }
 
 
@@ -624,6 +684,10 @@ def validate_workspace(workspace_dir: Path) -> dict:
     ]
 
     optional_checks = {
+        "analysis_extent_summary": workspace_dir / "00_metadata" / "analysis_extent_summary.json",
+        "nlcd_analysis_extent": workspace_dir / "05_landcover_nlcd" / "nlcd_2021_analysis_extent.tif",
+        "soils_analysis_extent": workspace_dir / "06_soils" / "ssurgo_mapunitpoly_analysis_extent.geojson",
+        "nhdplus_analysis_extent": workspace_dir / "03_nhdplus" / "USGS_05577500_upstream_flowlines_analysis_extent.geojson",
         "taudem_verification": workspace_dir / "09_taudem_verification" / "boundary_verification.json",
         "drainage_area_comparison": workspace_dir / "00_metadata" / "drainage_area_comparison.json",
         "model_handoff": workspace_dir / "00_metadata" / "model_handoff.json",
@@ -781,6 +845,7 @@ def build_workspace_report_json(
     gauge_huc = ctx["huc_summary"]["gauge_huc12"][0]
     manifest = ctx["manifest"]
     downloads = manifest.get("downloads", {})
+    analysis_extent_summary = ctx.get("analysis_extent_summary", {})
 
     terrain_sources = []
     for key in ("terrain_tiles_latest", "terrain_fallback_tiles_retained"):
@@ -817,7 +882,15 @@ def build_workspace_report_json(
             "intersecting_huc12_count": ctx["huc_summary"].get("intersecting_huc12_count", 0),
             "intersecting_huc12": ctx["huc_summary"].get("intersecting_huc12", []),
             "basin_geojson": str(ctx["workspace_dir"] / "02_basin_outline" / "USGS_05577500_nldi_basin.geojson"),
-            "upstream_flowlines_geojson": str(ctx["workspace_dir"] / "03_nhdplus" / "USGS_05577500_upstream_flowlines.geojson"),
+            "upstream_flowlines_geojson": str(ctx["flowlines_path"]),
+        },
+        "analysis_extent": {
+            "geojson": str(ctx["analysis_extent_path"]),
+            "geojson_5070": str(ctx["analysis_extent_5070_path"]),
+            "buffer_m": analysis_extent_summary.get("buffer_m"),
+            "bbox_wgs84": analysis_extent_summary.get("bbox_wgs84"),
+            "bbox_5070": analysis_extent_summary.get("bbox_5070"),
+            "source_boundary": analysis_extent_summary.get("source_boundary"),
         },
         "terrain": {
             "dem_path": str(ctx["dem_path"]),
@@ -830,11 +903,12 @@ def build_workspace_report_json(
             "source": manifest.get("sources", {}).get("nlcd_wcs"),
         },
         "soils": {
-            "soil_geojson": str(ctx["workspace_dir"] / "06_soils" / "ssurgo_mapunitpoly_basin.geojson"),
-            "soil_geojson_5070": str(ctx["workspace_dir"] / "06_soils" / "ssurgo_mapunitpoly_basin_5070.geojson"),
+            "soil_geojson": str(ctx["soils_path"]),
+            "soil_geojson_5070": str(ctx["soils_5070_path"]),
             "source": manifest.get("sources", {}).get("soils_wfs"),
         },
         "map_layers": [
+            "Buffered analysis extent",
             "Intersecting HUC12 fill",
             "Gauge HUC12 highlight",
             "NLDI basin outline",
@@ -927,8 +1001,9 @@ def _serialize_geojson_source(gdf, keep_props: list[str], simplify_m: float = 0.
 
 
 def _workspace_map_payload(ctx: dict) -> dict:
-    basin_bounds = list(ctx["basin"].total_bounds)
-    centroid = ctx["basin"].geometry.iloc[0].centroid
+    map_extent = ctx.get("analysis_extent", ctx["basin"])
+    basin_bounds = list(map_extent.total_bounds)
+    centroid = map_extent.geometry.iloc[0].centroid
     return {
         "bounds": [[round(basin_bounds[0], 6), round(basin_bounds[1], 6)], [round(basin_bounds[2], 6), round(basin_bounds[3], 6)]],
         "center": [round(float(centroid.x), 6), round(float(centroid.y), 6)],
@@ -1026,7 +1101,7 @@ def _plot_workspace_nlcd(ctx: dict) -> tuple[str, list[tuple[int, str]]]:
     fig, ax = plt.subplots(figsize=(8.8, 6.6))
     ax.imshow(arr, extent=[bounds.left, bounds.right, bounds.bottom, bounds.top], origin="upper", cmap=cmap, norm=norm, interpolation="nearest")
     ctx["basin_5070"].boundary.plot(ax=ax, color="#1b3c59", linewidth=1.6)
-    ax.set_title("NLCD 2021 Land Cover")
+    ax.set_title("NLCD 2021 Land Cover — Shared Analysis Extent")
     ax.set_xlabel("Easting (m, EPSG:5070)")
     ax.set_ylabel("Northing (m, EPSG:5070)")
     handles = [Patch(facecolor=nlcd_meta[v][1], edgecolor="none", label=f"{v} — {nlcd_meta[v][0]}") for v in classes]
@@ -1065,7 +1140,7 @@ def _plot_workspace_soils(ctx: dict) -> tuple[str, list[list[object]]]:
         subset.plot(ax=ax, color=color_map[group], linewidth=0.05, edgecolor="white", alpha=0.95)
     ctx["basin_5070"].boundary.plot(ax=ax, color="#173a5e", linewidth=1.2)
     ctx["gauge_point_5070"].plot(ax=ax, color="#c0362c", markersize=20, zorder=5)
-    ax.set_title("SSURGO Basin Soils — Dominant Map Units Highlighted")
+    ax.set_title("SSURGO Soils — Shared Analysis Extent")
     ax.set_xlabel("Easting (m, EPSG:5070)")
     ax.set_ylabel("Northing (m, EPSG:5070)")
     fig.tight_layout()
@@ -1249,13 +1324,13 @@ def _section_workspace_landscape(ctx: dict) -> str:
     <div class="figure-card">
       <h3>NLCD 2021 Land Cover</h3>
       <img src="{nlcd_png}" alt="NLCD 2021 land cover" />
-      <div class="figure-caption">Categorical land cover clipped to the watershed analysis extent.</div>
+      <div class="figure-caption">Categorical land cover clipped to the shared buffered analysis extent.</div>
       {_html_table_safe(["Code", "Class"], class_rows)}
     </div>
     <div class="figure-card">
       <h3>SSURGO Soils</h3>
       <img src="{soils_png}" alt="SSURGO soils" />
-      <div class="figure-caption">Dominant map units are highlighted individually; smaller units are grouped as <span class="codeish">Other</span>.</div>
+      <div class="figure-caption">Dominant map units are highlighted individually within the shared buffered analysis extent; smaller units are grouped as <span class="codeish">Other</span>.</div>
       {_html_table_safe(["MUSYM", "National Symbol", "Area (acres)"], dominant_soils, table_class="soil-table")}
     </div>
   </div>

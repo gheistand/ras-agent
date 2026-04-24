@@ -27,7 +27,8 @@ COORDS_PER_LINE = 4
 DEFAULT_THRESHOLD_FT = 30
 DEFAULT_OFFSET_FT = 500
 DEFAULT_PERIMETER_SLOPE = 0.00033
-BOUNDARY_SNAP_TOLERANCE_M = 10.0
+BOUNDARY_SNAP_TOLERANCE_M = 50.0
+STREAM_EXTEND_TOLERANCE_M = 1500.0
 WALK_STEP_M = 10.0
 
 
@@ -43,6 +44,8 @@ class BCLineSpec:
     flow_count: Optional[int] = None
     boundary_t_start: float = 0.0
     boundary_t_end: float = 0.0
+    stream_index: Optional[int] = None
+    weight: float = 1.0  # Fractional weight for flow splitting (0.0 to 1.0)
 
 
 @dataclass
@@ -62,7 +65,8 @@ class BCLineSet:
 
     @property
     def normal_depth_perimeter(self) -> list[BCLineSpec]:
-        return [bc for bc in self.bc_lines if bc.name.startswith("NormDepth")]
+        return [bc for bc in self.bc_lines
+                if bc.bc_type == "normal_depth" and bc.name != "DSOutflow"]
 
 
 # ── Formatters ────────────────────────────────────────────────────────────────
@@ -137,12 +141,9 @@ def format_2d_boundary_location(
     """
     Produce .u01 Boundary Location block for one 2D BC.
 
-    Format:
-        Boundary Location={16},{16},{8},{8},{16},{area:16},{16},{bc_name:32}
-        Friction Slope={slope},0
-        -or-
-        Interval={interval}
-        Flow Hydrograph= {N}
+    v6.x format: 9 comma-separated fixed-width fields:
+        Boundary Location={16},{16},{8},{8},{16},{area:16},{16},{bc_name:32},{32}
+    Fields 1-5 blank for 2D, field 9 = trailing 32-char blank (required v6.x+).
     """
     f1 = " " * 16  # River (blank for 2D)
     f2 = " " * 16  # Reach (blank for 2D)
@@ -152,13 +153,14 @@ def format_2d_boundary_location(
     f6 = area_name.ljust(AREA_NAME_WIDTH)
     f7 = " " * 16  # (blank)
     f8 = bc_name.ljust(BC_NAME_WIDTH)
+    f9 = " " * 32  # trailing field (required in v6.x+)
 
-    header = f"Boundary Location={f1},{f2},{f3},{f4},{f5},{f6},{f7},{f8}"
+    header = f"Boundary Location={f1},{f2},{f3},{f4},{f5},{f6},{f7},{f8},{f9}"
 
     if bc_type == "normal_depth":
         return f"{header}\nFriction Slope={slope},0\n"
     elif bc_type == "flow_hydrograph":
-        return f"{header}\nInterval={interval}\nFlow Hydrograph= {flow_count}\n"
+        return f"{header}\nInterval={interval}\nFlow Hydrograph= {flow_count} \n"
     else:
         raise ValueError(f"Unknown bc_type: {bc_type}")
 
@@ -167,17 +169,109 @@ def format_2d_boundary_location(
 
 
 def _sample_dem_elevation(dem_path: Path, point: Point) -> Optional[float]:
-    """Sample DEM elevation at a point. Returns None if nodata."""
+    """Sample DEM elevation at a point. Returns None if nodata or unreadable."""
+    try:
+        import rasterio
+
+        with rasterio.open(dem_path) as src:
+            row, col = src.index(point.x, point.y)
+            if 0 <= row < src.height and 0 <= col < src.width:
+                val = src.read(1)[row, col]
+                if val == src.nodata:
+                    return None
+                return float(val)
+    except Exception:
+        return None
+    return None
+
+
+def _sample_contributing_area(ad8_path: Path, point: Point) -> Optional[float]:
+    """Sample D8 contributing area (cell count) at a point from AreaD8 grid."""
     import rasterio
 
-    with rasterio.open(dem_path) as src:
+    with rasterio.open(ad8_path) as src:
         row, col = src.index(point.x, point.y)
         if 0 <= row < src.height and 0 <= col < src.width:
             val = src.read(1)[row, col]
-            if val == src.nodata:
+            if val == src.nodata or val <= 0:
                 return None
             return float(val)
     return None
+
+
+def _sample_ad8_for_crossing(
+    ad8_path: Path, crossing_point: Point, streams: list, stream_index: int
+) -> Optional[float]:
+    """Sample ad8 at the best point for a stream-boundary crossing.
+
+    The crossing point itself may be outside the TauDEM watershed grid (which
+    uses a different boundary than NLDI).  Walk along the original stream up
+    to 5 sample points inward from the endpoint nearest the crossing.
+    """
+    val = _sample_contributing_area(ad8_path, crossing_point)
+    if val is not None and val > 1:
+        return val
+
+    if stream_index is not None and 0 <= stream_index < len(streams):
+        stream = streams[stream_index]
+        coords = list(stream.coords)
+        start_d = crossing_point.distance(Point(coords[0]))
+        end_d = crossing_point.distance(Point(coords[-1]))
+        if start_d < end_d:
+            sample_coords = coords[:5]
+        else:
+            sample_coords = coords[-5:]
+        for x, y in sample_coords:
+            val = _sample_contributing_area(ad8_path, Point(x, y))
+            if val is not None and val > 1:
+                return val
+
+    return None
+
+
+def _assign_inflow_weights(
+    bc_set: "BCLineSet",
+    inflows: list[dict],
+    ad8_path: Optional[Path],
+    streams: Optional[list] = None,
+) -> None:
+    """Assign contributing-area-based weights to inflow BCs.
+
+    If ad8_path is provided and all inflows can be sampled, weights are
+    proportional to contributing area. Otherwise falls back to equal weighting.
+    """
+    inflow_bcs = bc_set.inflows
+    if not inflow_bcs:
+        return
+
+    n = len(inflow_bcs)
+
+    if ad8_path is not None and ad8_path.exists() and streams is not None:
+        areas = []
+        for inflow_dict in inflows:
+            val = _sample_ad8_for_crossing(
+                ad8_path, inflow_dict["point"],
+                streams, inflow_dict.get("stream_index"),
+            )
+            areas.append(val)
+
+        valid = [a for a in areas if a is not None and a > 0]
+        if len(valid) >= len(areas) * 0.5:
+            # Replace None/0 with minimum observed value so every inflow gets flow
+            min_val = min(valid) if valid else 1.0
+            areas = [a if (a is not None and a > 0) else min_val for a in areas]
+            total = sum(areas)
+            for bc, area in zip(inflow_bcs, areas):
+                bc.weight = area / total
+            logger.info(
+                "Inflow weights (contributing area): %s",
+                ", ".join(f"{bc.name}={bc.weight:.3f}" for bc in inflow_bcs),
+            )
+            return
+
+    # Fallback: equal weighting
+    for bc in inflow_bcs:
+        bc.weight = 1.0 / n
 
 
 def _sample_dem_along_boundary(
@@ -225,22 +319,70 @@ def _sample_dem_along_boundary(
 # ── Core Algorithm ────────────────────────────────────────────────────────────
 
 
+def _extend_stream_to_boundary(
+    stream: LineString, boundary, pour_point: Point, max_dist: float
+) -> LineString:
+    """Extend the downstream end of a stream to the basin boundary.
+
+    Only extends the endpoint closer to the pour_point (downstream).
+    Upstream ends are left as-is — in a headwater-first statewide build,
+    upstream BCs come from previous models, not from boundary extension.
+
+    TauDEM streams terminate at DEM pixel centers which are often hundreds of
+    meters inside the NLDI/NHDPlus basin boundary.
+    """
+    coords = list(stream.coords)
+    start = Point(coords[0])
+    end = Point(coords[-1])
+
+    # Downstream end is closer to pour point
+    start_dist_pp = start.distance(pour_point)
+    end_dist_pp = end.distance(pour_point)
+
+    if end_dist_pp <= start_dist_pp:
+        # End is downstream
+        d = boundary.distance(end)
+        if 1 < d < max_dist:
+            nearest_pt = nearest_points(end, boundary)[1]
+            coords = coords + [nearest_pt.coords[0]]
+    else:
+        # Start is downstream
+        d = boundary.distance(start)
+        if 1 < d < max_dist:
+            nearest_pt = nearest_points(start, boundary)[1]
+            coords = [nearest_pt.coords[0]] + coords
+
+    return LineString(coords) if len(coords) >= 2 else stream
+
+
 def _find_stream_boundary_intersections(
-    streams: list[LineString], basin: Polygon
+    streams: list[LineString], basin: Polygon, pour_point: Optional[Point] = None,
 ) -> list[dict]:
     """
     Find all intersection points between streams and basin boundary.
+
+    Extends the downstream end of streams to the boundary when they terminate
+    inside the basin within STREAM_EXTEND_TOLERANCE_M (common with TauDEM
+    networks derived from a DEM that doesn't perfectly match the NLDI basin
+    polygon).  Upstream ends are not extended — upstream BCs are inferred from
+    previous models in headwater-first processing.
 
     Returns list of dicts with keys: point, t (normalized boundary position),
     stream_index.
     """
     boundary = basin.boundary
+    if pour_point is None:
+        pour_point = basin.centroid
     intersections = []
 
     for idx, stream in enumerate(streams):
         if stream is None or stream.is_empty:
             continue
-        snapped = snap(stream, boundary, BOUNDARY_SNAP_TOLERANCE_M)
+
+        extended = _extend_stream_to_boundary(
+            stream, boundary, pour_point, STREAM_EXTEND_TOLERANCE_M
+        )
+        snapped = snap(extended, boundary, BOUNDARY_SNAP_TOLERANCE_M)
         isect = snapped.intersection(boundary)
 
         if isect.is_empty:
@@ -263,6 +405,16 @@ def _find_stream_boundary_intersections(
             })
 
     intersections.sort(key=lambda x: x["t"])
+
+    # De-duplicate: merge crossings within 100m of each other (shared junctions)
+    if len(intersections) > 1:
+        merged = [intersections[0]]
+        for isect in intersections[1:]:
+            if isect["point"].distance(merged[-1]["point"]) < 100:
+                continue
+            merged.append(isect)
+        intersections = merged
+
     return intersections
 
 
@@ -501,11 +653,13 @@ def generate_bc_lines(
     streams: list[LineString],
     pour_point: Point,
     dem_path: Optional[Path] = None,
+    ad8_path: Optional[Path] = None,
     area_name: str = "MainArea",
     channel_slope: float = 0.005,
     threshold_ft: float = DEFAULT_THRESHOLD_FT,
     offset_ft: float = DEFAULT_OFFSET_FT,
     perimeter_slope: float = DEFAULT_PERIMETER_SLOPE,
+    headwater: bool = True,
 ) -> BCLineSet:
     """
     Generate complete BC Line set from watershed data.
@@ -515,11 +669,16 @@ def generate_bc_lines(
         streams: TauDEM stream network LineStrings
         pour_point: Outlet point
         dem_path: Path to clipped DEM (optional; uses fallback extents if None)
+        ad8_path: Path to TauDEM AreaD8 grid (optional; for contributing area weighting)
         area_name: 2D flow area name in .g01
         channel_slope: Main channel slope (m/m) for outlet normal depth
         threshold_ft: Elevation rise threshold for BC extent (20-40 ft)
         offset_ft: BC Line offset distance from boundary (ft)
         perimeter_slope: Friction slope for perimeter normal depth BCs
+        headwater: If True, all BCs are Normal Depth (no upstream inflow).
+                   Headwater watersheds have no external inflow — runoff is
+                   internal (precipitation). Set False for downstream
+                   watersheds that receive inflow from upstream models.
 
     Returns:
         BCLineSet with all generated BC Lines
@@ -528,18 +687,28 @@ def generate_bc_lines(
     bc_set = BCLineSet(area_name=area_name)
 
     # Step 1: Find stream-boundary intersections
-    intersections = _find_stream_boundary_intersections(streams, basin)
+    intersections = _find_stream_boundary_intersections(streams, basin, pour_point)
     logger.info("Found %d stream-boundary intersections", len(intersections))
 
     if not intersections:
-        # Fallback: single outlet near pour_point + single inflow at farthest point
+        if headwater:
+            return _generate_headwater_bcs(
+                basin, boundary, None, pour_point, dem_path, area_name,
+                channel_slope, perimeter_slope, threshold_ft, offset_ft,
+            )
         return _fallback_no_intersections(basin, pour_point, dem_path, area_name,
                                           channel_slope, perimeter_slope, offset_ft)
 
     # Step 2: Classify outlet vs. inflow
     outlet, inflows = _classify_outlet(intersections, pour_point)
 
-    # Step 3-4: Generate BC Lines for each stream crossing
+    if headwater:
+        return _generate_headwater_bcs(
+            basin, boundary, outlet, pour_point, dem_path, area_name,
+            channel_slope, perimeter_slope, threshold_ft, offset_ft,
+        )
+
+    # --- Non-headwater: outlet + upstream inflow + perimeter normal depth ---
     stream_bcs = []
 
     if outlet is not None:
@@ -582,19 +751,96 @@ def generate_bc_lines(
             bc_type="flow_hydrograph",
             boundary_t_start=t_left,
             boundary_t_end=t_right,
+            stream_index=inflow.get("stream_index"),
         )
         stream_bcs.append(inflow_bc)
         bc_set.bc_lines.append(inflow_bc)
 
-    # Step 6: Fill gaps with Normal Depth
+    _assign_inflow_weights(bc_set, inflows, ad8_path, streams)
+
+    # Fill gaps with Normal Depth
     normal_depth_bcs = _fill_normal_depth_gaps(
         boundary, basin, stream_bcs, area_name, perimeter_slope, offset_ft
     )
     bc_set.bc_lines.extend(normal_depth_bcs)
 
+    n_inflows = sum(1 for bc in bc_set.bc_lines if bc.bc_type == "flow_hydrograph")
+    n_nd = sum(1 for bc in bc_set.bc_lines if bc.bc_type == "normal_depth")
     logger.info(
-        "Generated %d BC Lines: 1 outlet, %d inflows, %d normal depth",
-        len(bc_set.bc_lines), len(inflows), len(normal_depth_bcs),
+        "Generated %d BC Lines: %d inflows, %d normal depth",
+        len(bc_set.bc_lines), n_inflows, n_nd,
+    )
+    return bc_set
+
+
+def _generate_headwater_bcs(
+    basin: Polygon,
+    boundary: LineString,
+    outlet: Optional[dict],
+    pour_point: Point,
+    dem_path: Optional[Path],
+    area_name: str,
+    channel_slope: float,
+    perimeter_slope: float,
+    threshold_ft: float,
+    offset_ft: float,
+) -> BCLineSet:
+    """
+    Headwater Rain-on-Grid: exactly 2 BC Lines.
+
+    1. DSOutflow — Normal Depth at outlet (channel slope)
+    2. Perimeter  — Normal Depth covering rest of boundary (low slope)
+    """
+    bc_set = BCLineSet(area_name=area_name)
+    gap_fraction = 0.005
+
+    # Outlet BC at the downstream stream crossing
+    if outlet is not None:
+        crossing_elev = None
+        if dem_path is not None:
+            crossing_elev = _sample_dem_elevation(dem_path, outlet["point"])
+
+        t_left, t_right = _find_bc_extent_along_boundary(
+            boundary, outlet["t"], dem_path, crossing_elev, threshold_ft
+        )
+    else:
+        t_outlet = boundary.project(pour_point, normalized=True)
+        t_left = (t_outlet - 0.028) % 1.0
+        t_right = (t_outlet + 0.028) % 1.0
+
+    outlet_coords = _build_offset_polyline(
+        boundary, basin, t_left, t_right, offset_ft
+    )
+    bc_set.bc_lines.append(BCLineSpec(
+        name="DSOutflow",
+        storage_area=area_name,
+        coords=outlet_coords,
+        bc_type="normal_depth",
+        slope=channel_slope,
+        boundary_t_start=t_left,
+        boundary_t_end=t_right,
+    ))
+
+    # Perimeter BC — everything else (skip one gap from outlet ends)
+    perim_start = (t_right + gap_fraction) % 1.0
+    perim_end = (t_left - gap_fraction) % 1.0
+    perim_coords = _build_offset_polyline(
+        boundary, basin, perim_start, perim_end, offset_ft
+    )
+    if len(perim_coords) >= 2:
+        bc_set.bc_lines.append(BCLineSpec(
+            name="Perimeter",
+            storage_area=area_name,
+            coords=perim_coords,
+            bc_type="normal_depth",
+            slope=perimeter_slope,
+            boundary_t_start=perim_start,
+            boundary_t_end=perim_end,
+        ))
+
+    logger.info(
+        "Generated %d BC Lines (headwater): DSOutflow (slope=%.5f) + Perimeter (slope=%.5f)",
+        len(bc_set.bc_lines), channel_slope, perimeter_slope,
     )
     return bc_set
 
@@ -702,15 +948,20 @@ def write_unsteady_flow_file_2d(
     Each BC Line gets a Boundary Location block. Flow hydrograph BCs get the
     full hydrograph data. Normal depth BCs get friction slope.
     """
-    hydro = hydro_set.get(return_period)
-    if hydro is None:
-        raise ValueError(
-            f"Return period {return_period} not found in HydrographSet. "
-            f"Available: {sorted(hydro_set.hydrographs.keys())}"
-        )
+    has_flow_bcs = any(s.bc_type == "flow_hydrograph" for s in bc_set.bc_lines)
 
-    flows = hydro.flows_cfs
-    n_points = len(flows)
+    flows = None
+    n_points = 0
+    if has_flow_bcs:
+        hydro = hydro_set.get(return_period)
+        if hydro is None:
+            raise ValueError(
+                f"Return period {return_period} not found in HydrographSet. "
+                f"Available: {sorted(hydro_set.hydrographs.keys())}"
+            )
+        flows = hydro.flows_cfs
+        n_points = len(flows)
+
     title = f"T={return_period}yr Hydrograph"
 
     parts = [
@@ -718,12 +969,8 @@ def write_unsteady_flow_file_2d(
         "Program Version=6.60\n",
         "BEGIN FILE DESCRIPTION:\n",
         "END FILE DESCRIPTION:\n",
-        "\n",
+        "Use Restart= 0 \n",
     ]
-
-    # Count inflow BCs to split hydrograph
-    inflow_bcs = [bc for bc in bc_set.bc_lines if bc.bc_type == "flow_hydrograph"]
-    n_inflows = max(len(inflow_bcs), 1)
 
     for spec in bc_set.bc_lines:
         if spec.bc_type == "normal_depth":
@@ -731,19 +978,28 @@ def write_unsteady_flow_file_2d(
                 bc_set.area_name, spec.name, "normal_depth", slope=spec.slope,
             ))
         elif spec.bc_type == "flow_hydrograph":
-            # Split hydrograph equally among inflows
-            split_flows = [f / n_inflows for f in flows]
+            split_flows = [f * spec.weight for f in flows]
             flow_lines = []
             for i in range(0, n_points, 10):
                 chunk = split_flows[i : i + 10]
-                flow_lines.append("".join(f"{v:10.2f}" for v in chunk))
+                flow_lines.append("".join(f"{v:8.2f}" for v in chunk))
             flow_block = "\n".join(flow_lines)
 
             parts.append(format_2d_boundary_location(
                 bc_set.area_name, spec.name, "flow_hydrograph",
                 flow_count=n_points, interval=interval,
             ))
-            parts.append(f"{flow_block}\n\n")
+            parts.append(flow_block + "\n")
+            parts.append(
+                "Stage Hydrograph TW Check=0\n"
+                "Flow Hydrograph Slope= 0 \n"
+                "DSS Path=\n"
+                "Use DSS=False\n"
+                "Use Fixed Start Time=False\n"
+                "Fixed Start Date/Time=,\n"
+                "Is Critical Boundary=False\n"
+                "Critical Boundary Flow=\n"
+            )
 
     flow_file_path.write_text("".join(parts), encoding="utf-8")
     logger.info("Wrote 2D unsteady flow file: %s (%d BCs)", flow_file_path, len(bc_set.bc_lines))

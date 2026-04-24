@@ -263,6 +263,7 @@ def run_watershed(
     return_periods: Optional[list] = None,
     resolution_m: float = 3.0,
     mesh_strategy: str = "geometry_first",
+    boundary_condition_mode: str = "headwater",
     nlcd_raster_path: Optional[Path] = None,
     ras_exe_dir: Optional[Path] = None,
     max_parallel: int = 2,
@@ -282,6 +283,10 @@ def run_watershed(
         mesh_strategy:     HEC-RAS mesh build strategy (default: "geometry_first")
                            uses ras-commander GeomStorage to write .g## and
                            lets HEC-RAS regenerate HDF artifacts
+        boundary_condition_mode:
+                           "headwater" | "downstream". Downstream is scaffolded
+                           through this API but intentionally fails fast in the
+                           builder until chained-basin implementation resumes.
         nlcd_raster_path:  Optional NLCD 2019 GeoTIFF for Manning's n
         ras_exe_dir:       Path to RasUnsteady binary dir; None = mock mode
         max_parallel:      Maximum simultaneous HEC-RAS jobs
@@ -448,7 +453,7 @@ def run_watershed(
     # ── Stage 5: Model build ──────────────────────────────────────────────────
     logger.info(
         f"[Stage 5/7] Building HEC-RAS model "
-        f"(strategy={mesh_strategy}) …"
+        f"(strategy={mesh_strategy}, bc_mode={boundary_condition_mode}) …"
     )
     try:
         model_builder_mod = _require_module(_model_builder, "model_builder")
@@ -458,6 +463,7 @@ def run_watershed(
             output_dir=output_dir / "model",
             return_periods=return_periods,
             mesh_strategy=mesh_strategy,
+            boundary_condition_mode=boundary_condition_mode,
             nlcd_raster_path=nlcd_raster_path,
             mock=mock,
         )
@@ -611,11 +617,14 @@ if __name__ == "__main__":
                         help="DEM resolution in meters (default: 3.0)")
     parser.add_argument(
         "--strategy",
-        default="hdf5_direct",
-        help=(
-            "Mesh build strategy "
-            "(default: hdf5_direct; temporary placeholder path)"
-        ),
+        default="geometry_first",
+        help="Mesh build strategy (default: geometry_first)",
+    )
+    parser.add_argument(
+        "--bc-mode",
+        default="headwater",
+        choices=["headwater", "downstream"],
+        help="Boundary-condition mode scaffold (default: headwater)",
     )
     parser.add_argument("--ras-exe-dir", type=Path, default=None,
                         help="Path to RasUnsteady binary directory")
@@ -644,6 +653,7 @@ if __name__ == "__main__":
         return_periods=args.return_periods,
         resolution_m=args.resolution,
         mesh_strategy=args.strategy,
+        boundary_condition_mode=args.bc_mode,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         name=args.name,
         notify_config=notify_config,

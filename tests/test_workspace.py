@@ -39,6 +39,25 @@ def test_validate_workspace_completeness_passes_through(monkeypatch):
     assert workspace.validate_workspace_completeness("fake")["status"] == "partial"
 
 
+def test_refresh_context_layers_delegates_to_context_helper(tmp_path, monkeypatch):
+    captured = {}
+
+    def _fake_refresh(workspace_dir, buffer_m=500.0, nlcd_year=2021):
+        captured["workspace_dir"] = workspace_dir
+        captured["buffer_m"] = buffer_m
+        captured["nlcd_year"] = nlcd_year
+        return {"analysis_extent_summary": tmp_path / "analysis_extent_summary.json"}
+
+    monkeypatch.setattr(workspace.context_layers, "refresh_workspace_context_layers", _fake_refresh)
+
+    result = workspace.refresh_context_layers(tmp_path, buffer_m=750.0, nlcd_year=2019)
+
+    assert captured["workspace_dir"] == tmp_path
+    assert captured["buffer_m"] == 750.0
+    assert captured["nlcd_year"] == 2019
+    assert result["analysis_extent_summary"] == tmp_path / "analysis_extent_summary.json"
+
+
 def test_gather_base_data_delegates_to_hms_builder(tmp_path, monkeypatch):
     captured = {}
 

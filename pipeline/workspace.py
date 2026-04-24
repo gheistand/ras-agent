@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import context_layers
 import report
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,20 @@ def validate_workspace_completeness(workspace_dir: Path) -> dict:
     return report.validate_workspace(workspace_dir)
 
 
+def refresh_context_layers(
+    workspace_dir: Path,
+    *,
+    buffer_m: float = context_layers.DEFAULT_ANALYSIS_BUFFER_M,
+    nlcd_year: int = 2021,
+) -> dict[str, Path]:
+    """Refresh buffered informational layers for a workspace."""
+    return context_layers.refresh_workspace_context_layers(
+        Path(workspace_dir),
+        buffer_m=buffer_m,
+        nlcd_year=nlcd_year,
+    )
+
+
 def _resolve_hms_gauge_study_builder():
     try:
         from hms_commander import HmsGaugeStudy
@@ -183,6 +198,14 @@ def _build_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser("validate-workspace", help="Validate workspace completeness")
     validate_parser.add_argument("--workspace-dir", required=True)
 
+    refresh_parser = subparsers.add_parser(
+        "refresh-context-layers",
+        help="Refresh NLCD, soils, and NHDPlus context against the shared buffered analysis extent",
+    )
+    refresh_parser.add_argument("--workspace-dir", required=True)
+    refresh_parser.add_argument("--buffer-m", type=float, default=context_layers.DEFAULT_ANALYSIS_BUFFER_M)
+    refresh_parser.add_argument("--nlcd-year", type=int, default=2021)
+
     return parser
 
 
@@ -218,6 +241,15 @@ def main() -> int:
     if args.command == "validate-workspace":
         validation = validate_workspace_completeness(Path(args.workspace_dir))
         print(json.dumps(validation, indent=2))
+        return 0
+
+    if args.command == "refresh-context-layers":
+        outputs = refresh_context_layers(
+            Path(args.workspace_dir),
+            buffer_m=args.buffer_m,
+            nlcd_year=args.nlcd_year,
+        )
+        print(json.dumps({key: str(value) for key, value in outputs.items()}, indent=2))
         return 0
 
     parser.error(f"Unknown command: {args.command}")
