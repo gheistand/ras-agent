@@ -59,25 +59,39 @@ Make `ras-agent` the active Illinois adaptation and integration repo for TauDEM-
 14. Implement the simpler rain-on-grid setup first via `ras-commander`
     AORC/MRMS support, while HMS modeling continues in parallel through
     `hms-commander`.
-15. After the HMS modeling path is complete enough to trust, build out the
+15. Add rain-on-grid precipitation-source QAQC that compares AORC/MRMS gridded
+    accumulations against nearby station observations for calibration events,
+    flags potential rainfall undercount/data gaps, and records the evidence
+    before parameter calibration decisions are made.
+16. After the HMS modeling path is complete enough to trust, build out the
     parallel HMS-linked boundary-construction workflow.
-16. Consume commander spatial-linking and upstream-area accounting support so
+17. Consume commander spatial-linking and upstream-area accounting support so
     HMS basin area is not double counted when boundary conditions are assigned.
-17. Treat the current Spring Creek TauDEM-to-HMS output from `hms-commander` as
+18. Treat the current Spring Creek TauDEM-to-HMS output from `hms-commander` as
     benchmark-grade, not generalized production hydrology, until the upstream
     pre-HMS readiness gate and human-review QAQC signoff artifact exist. This
     does not defer the Spring Creek pilot; it defines the review status of the
     hydrology scaffold.
-18. Validate downstream `ras-agent` regeneration against the live Spring Creek
+19. Validate downstream `ras-agent` regeneration against the live Spring Creek
     handoff package emitted by `hms-commander`, rather than rebuilding the
     hydrology-side context locally.
-19. Track and consume upstream TauDEM parameter sensitivity / optimization
+20. Track and consume upstream TauDEM parameter sensitivity / optimization
     support so delineation controls can be tuned deliberately before downstream
     model promotion.
-20. Record downstream acceptance rules for the first live HMS warning classes
+21. Define a future reviewer-in-the-loop batched sensitivity, calibration, and
+    validation workflow. The workflow should start from documented base
+    hydrologic and hydraulic parameter values, run one-parameter-at-a-time
+    sensitivity batches, publish comparable run manifests/results/metrics/plots,
+    ask a human engineering reviewer to update the base parameter set, and repeat
+    until a limited multi-parameter sensitivity matrix can be justified. The
+    final calibration package should combine broad individual-parameter coverage,
+    targeted interaction checks for the most sensitive parameters, independent
+    validation events, and documented reviewer signoff so high-resolution
+    exploration is reserved for parameters that materially affect results.
+22. Record downstream acceptance rules for the first live HMS warning classes
     now observed upstream: missing ET/canopy methods, Muskingum stability
     warnings, lag-vs-time-step warnings, and negative inflow clipping.
-21. After Spring Creek headwater calibration/validation is working, convert the
+23. After Spring Creek headwater calibration/validation is working, convert the
     `boundary_condition_mode` scaffold from headwater-only plumbing into a
     validated downstream/chained-basin workflow.
 

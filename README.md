@@ -135,6 +135,9 @@ Key implementation decisions:
 - `ras-commander` already appears to cover most of the HEC-RAS-side workflow needed by `ras-agent`.
 - The remaining gap is mainly geometry-first project assembly for watershed-derived 2D flow areas, maturing the starter scaffold into usable geometry-first seed projects, tighter orchestration around land-cover and infiltration compilation, and a downstream consume/regenerate proof against the new upstream Spring Creek handoff package.
 - Real-basin validation, benchmark comparisons, and Windows regeneration workflows still need completion.
+- Future calibration work should add precipitation-source QAQC for rain-on-grid
+  events and a reviewer-in-the-loop batched sensitivity workflow that reserves
+  high-resolution parameter exploration for the most influential parameters.
 - The first live upstream HMS scaffold also exposed warning classes that need downstream acceptance rules before promotion: missing ET/canopy methods, Muskingum stability warnings, lag-vs-time-step warnings, and negative inflow clipping.
 
 ## Validation

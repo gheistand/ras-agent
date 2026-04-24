@@ -151,14 +151,16 @@ Priority order:
 2. Consume the upstream `hms-commander` Spring Creek handoff package rather than rebuilding hydrology-side provenance locally
 3. Use Spring Creek as the first runnable headwater pilot for BLE-style data generation and gauge calibration/validation
 4. Implement the simpler rain-on-grid AORC/MRMS setup through `ras-commander` first
-5. Continue HMS modeling in parallel through `hms-commander`, then build the HMS-linked boundary-construction workflow once the HMS path is complete enough to trust
-6. Require the upstream pre-HMS readiness gate and human-review QAQC signoff before treating generated HMS content as generalized production hydrology
-7. Keep mesh generation geometry-first and RASMapper-aligned; do not preserve Cartesian mesh generation as a fallback path
-8. Implement the remaining `ras-commander` features needed for watershed-driven 2D flow area creation and compilation
-9. Validate compiled geometry/regeneration workflows on Illinois basins
-10. Add benchmark fixtures and comparison reporting
-11. Keep `rivnet` / `traudem` as a reference track only
-12. Keep WhiteboxTools in a separate benchmark worktree only
+5. Add precipitation-source QAQC for rain-on-grid calibration events by comparing AORC/MRMS gridded accumulations against nearby station observations before parameter calibration decisions are made
+6. Continue HMS modeling in parallel through `hms-commander`, then build the HMS-linked boundary-construction workflow once the HMS path is complete enough to trust
+7. Require the upstream pre-HMS readiness gate and human-review QAQC signoff before treating generated HMS content as generalized production hydrology
+8. Future calibration work should be reviewer-in-the-loop and batch-oriented: begin with base hydrologic/hydraulic parameters, run individual parameter sensitivity batches, update the base set after expert review, then use the sensitivity record to define a small multi-parameter validation matrix with high-resolution sweeps only for the most influential parameters
+9. Keep mesh generation geometry-first and RASMapper-aligned; do not preserve Cartesian mesh generation as a fallback path
+10. Implement the remaining `ras-commander` features needed for watershed-driven 2D flow area creation and compilation
+11. Validate compiled geometry/regeneration workflows on Illinois basins
+12. Add benchmark fixtures and comparison reporting
+13. Keep `rivnet` / `traudem` as a reference track only
+14. Keep WhiteboxTools in a separate benchmark worktree only
 
 ## Benchmark Rules
 

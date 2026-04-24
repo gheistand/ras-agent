@@ -54,8 +54,13 @@ Review notes before merge:
   headwater calibration/validation is working.
 - Implement the simpler rain-on-grid setup first via `ras-commander` AORC/MRMS
   support, while HMS modeling continues in parallel through `hms-commander`.
+- Add precipitation-source QAQC for rain-on-grid calibration events by comparing
+  AORC/MRMS gridded accumulations against nearby station observations before
+  parameter calibration decisions are made.
 - After the HMS modeling path is complete enough to trust, build out the
   parallel HMS-linked boundary-construction workflow.
+- Treat reviewer-in-the-loop batched parameter sensitivity/calibration as future
+  roadmap scope, not an implemented capability in this branch.
 - Use the commander libraries' spatial-linking and upstream-area accounting
   support so HMS basin areas are not double counted when assigning boundary
   conditions.
@@ -143,7 +148,13 @@ Review notes before merge:
 7. MEDIUM - `ras-agent` context/report helpers still contain Spring Creek
    assumptions. Label as Spring Creek-only or parameterize gauge/site IDs.
 
-8. INFO - `ras-agent` should depend on latest published `hms-commander` and
+8. INFO - Future calibration automation should be reviewer-in-the-loop and
+   batch-oriented: start from documented base parameters, run individual
+   sensitivity batches, get human engineering review, then define a small
+   multi-parameter validation matrix with high-resolution sweeps only for the
+   most influential parameters.
+
+9. INFO - `ras-agent` should depend on latest published `hms-commander` and
    `ras-commander` packages for commander functionality, not local sibling-repo
    working trees.
 
@@ -241,6 +252,8 @@ Review options:
 4. Use Spring Creek as the first headwater pilot to reproduce BLE-style data
    generation, then let Glenn decide how to improve and extend the
    implementation.
+5. Track future precipitation-source QAQC and reviewer-in-the-loop batched
+   parameter calibration as roadmap scope after the headwater pilot is runnable.
 
 Known blockers before merge-ready `ras-agent` runtime support:
 
