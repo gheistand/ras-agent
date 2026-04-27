@@ -39,7 +39,24 @@ class TerrainError(RuntimeError):
 # EPSG:5070 = NAD83 / Conus Albers — meters, equal area, good for IL
 TARGET_CRS = CRS.from_epsg(5070)
 
-# ILHMP clearinghouse — ArcGIS REST tile service for 1/3 arc-second DEM tiles
+# CHAMP / ILHMP preferred ArcGIS ImageServer sources for Illinois DEM export.
+# The first working service whose footprint intersects the request is used.
+# Additional service URLs can be injected via CHAMP_ILHMP_IMAGE_SERVICE_URL or
+# CHAMP_ILHMP_IMAGE_SERVICE_URLS (comma-separated).
+CHAMP_IMAGE_SERVICE_URLS = tuple(
+    url for url in [
+        os.getenv("CHAMP_ILHMP_IMAGE_SERVICE_URL"),
+        *[
+            item.strip()
+            for item in os.getenv("CHAMP_ILHMP_IMAGE_SERVICE_URLS", "").split(",")
+            if item.strip()
+        ],
+        "https://data.isgs.illinois.edu/arcgis/rest/services/Elevation/IL_Sangamon_DTM_2018/ImageServer",
+    ]
+    if url
+)
+
+# Legacy ILHMP clearinghouse — ArcGIS REST tile service for 1/3 arc-second DEM tiles
 # Source: https://clearinghouse.isgs.illinois.edu/data/elevation/illinois-height-modernization-ilhmp
 ILHMP_TILE_INDEX_URL = (
     "https://clearinghouse.isgs.illinois.edu/arcgis/rest/services/"
@@ -52,6 +69,134 @@ USGS_3DEP_DATASET = "National Elevation Dataset (NED) 1/3 arc-second"
 
 
 # ── Tile Discovery ───────────────────────────────────────────────────────────
+
+def _bbox_intersects(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> bool:
+    return not (
+        left[2] < right[0]
+        or left[0] > right[2]
+        or left[3] < right[1]
+        or left[1] > right[3]
+    )
+
+
+def _get_arcgis_service_metadata(service_url: str) -> dict:
+    """Fetch ArcGIS ImageServer/MapServer metadata as JSON."""
+    with httpx.Client(timeout=30, follow_redirects=True) as client:
+        resp = client.get(service_url.rstrip("/"), params={"f": "json"})
+        resp.raise_for_status()
+        metadata = resp.json()
+    if metadata.get("error"):
+        raise TerrainError(
+            f"ArcGIS service metadata request failed for {service_url}: {metadata['error']}"
+        )
+    return metadata
+
+
+def _service_extent_to_wgs84(metadata: dict) -> tuple[float, float, float, float]:
+    """Convert ArcGIS service extent metadata into a WGS84 bounding box."""
+    extent = metadata.get("fullExtent") or metadata.get("extent")
+    if not extent:
+        raise TerrainError("ArcGIS service metadata did not include a fullExtent.")
+
+    spatial_ref = extent.get("spatialReference", {}) or {}
+    wkid = spatial_ref.get("latestWkid") or spatial_ref.get("wkid") or 4326
+    transformer = Transformer.from_crs(wkid, 4326, always_xy=True)
+    west, south = transformer.transform(extent["xmin"], extent["ymin"])
+    east, north = transformer.transform(extent["xmax"], extent["ymax"])
+    return (
+        min(west, east),
+        min(south, north),
+        max(west, east),
+        max(south, north),
+    )
+
+
+def find_champ_image_service(
+    bbox_wgs84: tuple[float, float, float, float],
+    candidate_urls: Optional[list[str]] = None,
+) -> Optional[dict]:
+    """
+    Return the first CHAMP / ILHMP ImageServer whose published extent intersects
+    the requested bbox. Returns None if no configured service matches.
+    """
+    urls = candidate_urls or list(CHAMP_IMAGE_SERVICE_URLS)
+    for service_url in urls:
+        try:
+            metadata = _get_arcgis_service_metadata(service_url)
+            service_bbox = _service_extent_to_wgs84(metadata)
+        except Exception as exc:
+            logger.debug(f"Skipping CHAMP ImageServer {service_url}: {exc}")
+            continue
+
+        if _bbox_intersects(bbox_wgs84, service_bbox):
+            logger.info(f"Using CHAMP / ILHMP ImageServer: {service_url}")
+            return {"url": service_url.rstrip("/"), "metadata": metadata, "bbox_wgs84": service_bbox}
+
+    return None
+
+
+def export_champ_image_service_dem(
+    service_url: str,
+    bbox_wgs84: tuple[float, float, float, float],
+    output_path: Path,
+    *,
+    metadata: Optional[dict] = None,
+    target_crs: CRS = TARGET_CRS,
+    resolution_m: float = 3.0,
+) -> Path:
+    """
+    Export a bbox-clipped DEM directly from a CHAMP / ILHMP ArcGIS ImageServer.
+    """
+    metadata = metadata or _get_arcgis_service_metadata(service_url)
+    transformer = Transformer.from_crs("EPSG:4326", target_crs, always_xy=True)
+    west, south, east, north = bbox_wgs84
+    xmin, ymin = transformer.transform(west, south)
+    xmax, ymax = transformer.transform(east, north)
+    xmin, xmax = sorted((xmin, xmax))
+    ymin, ymax = sorted((ymin, ymax))
+
+    width = max(1, math.ceil((xmax - xmin) / resolution_m))
+    height = max(1, math.ceil((ymax - ymin) / resolution_m))
+
+    max_width = int(metadata.get("maxImageWidth") or metadata.get("maxRecordCount") or 4096)
+    max_height = int(metadata.get("maxImageHeight") or metadata.get("maxRecordCount") or 4096)
+    if width > max_width or height > max_height:
+        raise TerrainError(
+            "Requested CHAMP / ILHMP export exceeds service limits: "
+            f"{width}x{height} requested vs {max_width}x{max_height} allowed"
+        )
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    export_url = f"{service_url.rstrip('/')}/exportImage"
+    params = {
+        "bbox": f"{xmin},{ymin},{xmax},{ymax}",
+        "bboxSR": target_crs.to_epsg(),
+        "imageSR": target_crs.to_epsg(),
+        "size": f"{width},{height}",
+        "format": "tiff",
+        "pixelType": "F32",
+        "interpolation": "RSP_BilinearInterpolation",
+        "f": "image",
+    }
+
+    logger.info(
+        "Exporting terrain from CHAMP / ILHMP ImageServer "
+        f"({width}x{height} px at {resolution_m:.1f} m)"
+    )
+    with httpx.Client(timeout=120, follow_redirects=True) as client:
+        with client.stream("GET", export_url, params=params) as resp:
+            resp.raise_for_status()
+            with open(output_path, "wb") as f:
+                for chunk in resp.iter_bytes(chunk_size=65536):
+                    f.write(chunk)
+
+    logger.info(f"Exported CHAMP / ILHMP DEM: {output_path.name}")
+    return output_path
 
 def find_ilhmp_tiles(bbox_wgs84: tuple[float, float, float, float]) -> list[dict]:
     """
@@ -335,6 +480,22 @@ def get_terrain(
         logger.info(f"Mosaic already exists: {mosaic_path}")
         return mosaic_path
 
+    champ_service = find_champ_image_service(bbox_wgs84)
+    if champ_service is not None:
+        try:
+            return export_champ_image_service_dem(
+                champ_service["url"],
+                bbox_wgs84,
+                mosaic_path,
+                metadata=champ_service["metadata"],
+                resolution_m=resolution_m,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CHAMP / ILHMP ImageServer export failed: "
+                f"{exc}. Falling back to legacy ILHMP tile discovery."
+            )
+
     tiles = find_ilhmp_tiles(bbox_wgs84)
     if not tiles:
         raise RuntimeError("No terrain tiles found for the specified bounding box.")
@@ -348,10 +509,18 @@ def get_terrain(
 
 # ── NLCD Land Cover ───────────────────────────────────────────────────────────
 
-# MRLC WCS endpoints — year-keyed; update when new NLCD releases are published
-NLCD_WCS_URLS: dict[int, str] = {
-    2019: "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2019_Land_Cover_L48/wcs",
-    2021: "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs",
+# MRLC WCS endpoints — year-keyed; update when new NLCD releases are published.
+# The current service advertises qualified coverage ids and uses projected
+# X/Y axis labels in EPSG:5070 for subsetting.
+NLCD_WCS_SOURCES: dict[int, dict[str, str]] = {
+    2019: {
+        "url": "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2019_Land_Cover_L48/wcs",
+        "coverage_id": "mrlc_download__NLCD_2019_Land_Cover_L48",
+    },
+    2021: {
+        "url": "https://www.mrlc.gov/geoserver/mrlc_download/NLCD_2021_Land_Cover_L48/wcs",
+        "coverage_id": "mrlc_download__NLCD_2021_Land_Cover_L48",
+    },
 }
 
 
@@ -372,15 +541,21 @@ def download_nlcd(
         Path to downloaded GeoTIFF
 
     Notes:
-        Uses MRLC WCS endpoint. Adds 0.1-degree buffer to bbox to ensure
-        full watershed coverage. Downloads are idempotent (skips if exists).
+        Uses the requested bbox as-is. Any shared buffering must happen before
+        this function is called so all informational layers use the same extent.
+        Downloads are idempotent (skips if exists).
     """
-    if year not in NLCD_WCS_URLS:
+    if year not in NLCD_WCS_SOURCES:
         raise TerrainError(
-            f"Unsupported NLCD year: {year}. Supported: {sorted(NLCD_WCS_URLS)}"
+            f"Unsupported NLCD year: {year}. Supported: {sorted(NLCD_WCS_SOURCES)}"
         )
 
     west, south, east, north = bbox_wgs84
+    transformer = Transformer.from_crs("EPSG:4326", TARGET_CRS, always_xy=True)
+    xmin, ymin = transformer.transform(west, south)
+    xmax, ymax = transformer.transform(east, north)
+    xmin, xmax = sorted((xmin, xmax))
+    ymin, ymax = sorted((ymin, ymax))
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,12 +565,9 @@ def download_nlcd(
         logger.debug(f"NLCD already downloaded: {fname.name}")
         return fname
 
-    # Expand bbox by 0.1 degrees on each side for WCS request
-    buf = 0.1
-    w, s, e, n = west - buf, south - buf, east + buf, north + buf
-
-    base_url = NLCD_WCS_URLS[year]
-    coverage_id = f"NLCD_{year}_Land_Cover_L48"
+    source = NLCD_WCS_SOURCES[year]
+    base_url = source["url"]
+    coverage_id = source["coverage_id"]
 
     # WCS 2.0.1 requires two SUBSET params — use list of tuples to allow duplication
     params = [
@@ -403,14 +575,14 @@ def download_nlcd(
         ("VERSION", "2.0.1"),
         ("REQUEST", "GetCoverage"),
         ("COVERAGEID", coverage_id),
-        ("SUBSET", f"Long({w},{e})"),
-        ("SUBSET", f"Lat({s},{n})"),
+        ("SUBSET", f"X({xmin},{xmax})"),
+        ("SUBSET", f"Y({ymin},{ymax})"),
         ("FORMAT", "image/tiff"),
     ]
 
     logger.info(
         f"Downloading NLCD {year} for bbox: "
-        f"({w:.3f},{s:.3f},{e:.3f},{n:.3f}) from MRLC WCS"
+        f"({west:.3f},{south:.3f},{east:.3f},{north:.3f}) from MRLC WCS"
     )
 
     try:
@@ -420,7 +592,7 @@ def download_nlcd(
         raise TerrainError(
             f"NLCD WCS download failed: {exc}\n"
             f"URL: {base_url}\n"
-            f"SUBSET Long({w:.4f},{e:.4f}) Lat({s:.4f},{n:.4f})"
+            f"SUBSET X({xmin:.3f},{xmax:.3f}) Y({ymin:.3f},{ymax:.3f})"
         ) from exc
 
     with open(fname, "wb") as f:

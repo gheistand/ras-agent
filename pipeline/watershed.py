@@ -1,61 +1,69 @@
 """
-watershed.py — DEM-based watershed delineation
+watershed.py — TauDEM-based watershed delineation
 
 Delineates watershed boundaries, stream networks, and basin characteristics
-from a DEM using pysheds. All outputs in EPSG:5070 (NAD83 Albers).
+from a DEM using direct TauDEM CLI execution. All default outputs remain in
+EPSG:5070 (NAD83 Albers) for Illinois-first processing.
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
 """
 
+from __future__ import annotations
+
 import logging
-from pathlib import Path
+import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
+import geopandas as gpd
 import numpy as np
 import rasterio
+from pyproj import Transformer
 from rasterio.crs import CRS
-from rasterio.transform import xy
-from shapely.geometry import shape, mapping, Point, LineString
+from rasterio.features import shapes as rio_shapes
+from shapely.geometry import LineString, Point, shape
 from shapely.ops import unary_union
-import geopandas as gpd
-from pysheds.grid import Grid
+
+from taudem import TauDem
 
 logger = logging.getLogger(__name__)
 
 TARGET_CRS = CRS.from_epsg(5070)
 
 
-# ── Data Structures ───────────────────────────────────────────────────────────
-
 @dataclass
 class BasinCharacteristics:
     """Basin characteristics needed for hydrology calculations."""
+
     drainage_area_km2: float
     drainage_area_mi2: float
     mean_elevation_m: float
-    relief_m: float                    # max - min elevation
+    relief_m: float
     main_channel_length_km: float
-    main_channel_slope_m_per_m: float  # 10-85% slope method
-    centroid_lat: float                # WGS84
-    centroid_lon: float                # WGS84
-    pour_point_lat: float              # WGS84
-    pour_point_lon: float              # WGS84
+    main_channel_slope_m_per_m: float
+    centroid_lat: float
+    centroid_lon: float
+    pour_point_lat: float
+    pour_point_lon: float
     extra: dict = field(default_factory=dict)
 
 
 @dataclass
 class WatershedResult:
-    """Complete watershed delineation result."""
-    basin: "gpd.GeoDataFrame"          # watershed polygon
-    streams: "gpd.GeoDataFrame"        # stream network polylines
-    pour_point: Point                  # outlet point (EPSG:5070)
+    """Complete TauDEM-backed watershed delineation result."""
+
+    basin: "gpd.GeoDataFrame"
+    streams: "gpd.GeoDataFrame"
+    subbasins: "gpd.GeoDataFrame"
+    centerlines: "gpd.GeoDataFrame"
+    breaklines: "gpd.GeoDataFrame"
+    pour_point: Point
     characteristics: BasinCharacteristics
-    dem_clipped: Path                  # clipped DEM within watershed
+    dem_clipped: Path
+    artifacts: dict[str, Path] = field(default_factory=dict)
 
-
-# ── Core Delineation ─────────────────────────────────────────────────────────
 
 def delineate_watershed(
     dem_path: Path,
@@ -63,165 +71,339 @@ def delineate_watershed(
     pour_point_lat: float,
     snap_threshold_m: float = 300.0,
     min_stream_area_km2: float = 2.0,
+    working_dir: Optional[Path] = None,
+    taudem_executable_dir: Optional[Path] = None,
+    taudem_processes: int = 1,
 ) -> WatershedResult:
     """
     Delineate a watershed from a DEM given a pour point (outlet).
 
     Args:
-        dem_path:            Path to DEM GeoTIFF (EPSG:5070)
-        pour_point_lon:      Outlet longitude (WGS84)
-        pour_point_lat:      Outlet latitude (WGS84)
-        snap_threshold_m:    Max distance to snap pour point to stream (meters)
-        min_stream_area_km2: Minimum contributing area to define a stream
+        dem_path:              Path to DEM GeoTIFF (typically EPSG:5070)
+        pour_point_lon:        Outlet longitude (WGS84)
+        pour_point_lat:        Outlet latitude (WGS84)
+        snap_threshold_m:      Max distance to snap pour point to stream (meters)
+        min_stream_area_km2:   Minimum contributing area to define a stream
+        working_dir:           Directory for TauDEM intermediate artifacts
+        taudem_executable_dir: Optional TauDEM executable directory override
+        taudem_processes:      Number of TauDEM MPI processes to request
 
     Returns:
-        WatershedResult with polygon, streams, and basin characteristics
+        WatershedResult with polygon, streams, subbasins, and model-building
+        linework derived from TauDEM outputs.
     """
-    logger.info(f"Delineating watershed for pour point: {pour_point_lat:.4f}N, {pour_point_lon:.4f}W")
+    dem_path = Path(dem_path)
+    if not dem_path.exists():
+        raise FileNotFoundError(f"DEM not found: {dem_path}")
 
-    grid = Grid.from_raster(str(dem_path))
-    dem = grid.read_raster(str(dem_path))
+    logger.info(
+        "Delineating watershed with TauDEM for pour point %.4fN, %.4fW",
+        pour_point_lat,
+        pour_point_lon,
+    )
 
-    # ── 1. Hydrological conditioning ─────────────────────────────────────────
-    logger.info("Filling pits and depressions...")
-    pit_filled = grid.fill_pits(dem)
-    flooded = grid.fill_depressions(pit_filled)
-    inflated = grid.resolve_flats(flooded)
+    TauDem.validate_environment(
+        required=[
+            "PitRemove",
+            "D8FlowDir",
+            "AreaD8",
+            "Threshold",
+            "MoveOutletsToStreams",
+            "StreamNet",
+            "Gridnet",
+        ],
+        executable_dir=taudem_executable_dir,
+    )
 
-    # ── 2. Flow direction (D8) ────────────────────────────────────────────────
-    logger.info("Computing D8 flow direction...")
-    dirmap = (64, 128, 1, 2, 4, 8, 16, 32)  # ESRI D8 encoding
-    fdir = grid.flowdir(inflated, dirmap=dirmap)
-
-    # ── 3. Flow accumulation ──────────────────────────────────────────────────
-    logger.info("Computing flow accumulation...")
-    acc = grid.accumulation(fdir, dirmap=dirmap)
-
-    # ── 4. Snap pour point to nearest high-accumulation cell ─────────────────
     with rasterio.open(dem_path) as src:
-        res_m = abs(src.transform.a)  # pixel size in meters (Albers)
-        # Convert WGS84 pour point to EPSG:5070
-        from pyproj import Transformer
-        transformer = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
-        pp_x, pp_y = transformer.transform(pour_point_lon, pour_point_lat)
+        dem_crs = src.crs
+        if dem_crs is None:
+            raise RuntimeError(f"DEM has no CRS: {dem_path}")
+        res_m = abs(src.transform.a)
+        bounds = src.bounds
+    if not dem_crs.is_projected:
+        raise RuntimeError(
+            f"TauDEM requires a projected DEM. Found non-projected CRS: {dem_crs}"
+        )
 
-    # Convert accumulation threshold from km2 to cells
-    cell_area_km2 = (res_m / 1000) ** 2
-    snap_cells = int(snap_threshold_m / res_m)
-    acc_threshold = int(min_stream_area_km2 / cell_area_km2)
+    work_dir = Path(working_dir) if working_dir else dem_path.parent / f"{dem_path.stem}_taudem"
+    work_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Snapping pour point (threshold: {snap_threshold_m}m, {snap_cells} cells)...")
-    x_snap, y_snap = grid.snap_to_mask(acc > acc_threshold, (pp_x, pp_y))
+    cell_area_km2 = (res_m / 1000.0) ** 2
+    threshold_cells = max(int(min_stream_area_km2 / max(cell_area_km2, 1e-9)), 1)
+    snap_cells = max(int(snap_threshold_m / max(res_m, 1e-9)), 1)
 
-    # ── 5. Delineate catchment ────────────────────────────────────────────────
-    logger.info("Delineating catchment polygon...")
-    catch = grid.catchment(x=x_snap, y=y_snap, fdir=fdir, dirmap=dirmap,
-                           xytype="coordinate")
-    grid.clip_to(catch)
+    outlet_path = work_dir / "outlet.shp"
+    snapped_outlet_path = work_dir / "outlet_snapped.shp"
+    transformer = Transformer.from_crs("EPSG:4326", dem_crs, always_xy=True)
+    pp_x, pp_y = transformer.transform(pour_point_lon, pour_point_lat)
+    _write_outlet_shapefile(outlet_path, dem_crs, pp_x, pp_y)
 
-    # Convert catchment raster to polygon
-    shapes_gen = grid.polygonize(catch.astype(np.uint8))
-    catch_polys = [shape(s) for s, v in shapes_gen if v == 1]
-    if not catch_polys:
-        raise RuntimeError("Watershed delineation produced no polygon. Check pour point location.")
+    fel = work_dir / "fel.tif"
+    p = work_dir / "p.tif"
+    sd8 = work_dir / "sd8.tif"
+    ad8 = work_dir / "ad8.tif"
+    src = work_dir / "src.tif"
+    plen = work_dir / "plen.tif"
+    tlen = work_dir / "tlen.tif"
+    gord = work_dir / "gord.tif"
+    ord_grid = work_dir / "ord.tif"
+    tree = work_dir / "tree.dat"
+    coord = work_dir / "coord.dat"
+    net = work_dir / "net.shp"
+    w = work_dir / "w.tif"
 
-    watershed_poly = unary_union(catch_polys)
-    basin_gdf = gpd.GeoDataFrame(
-        geometry=[watershed_poly], crs="EPSG:5070"
+    TauDem.pit_remove(
+        dem_path,
+        fel,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
+    )
+    TauDem.d8_flow_dir(
+        fel,
+        p,
+        sd8,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
+    )
+    TauDem.area_d8(
+        p,
+        ad8,
+        edge_contamination=False,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
+    )
+    TauDem.threshold(
+        ad8,
+        src,
+        threshold_cells,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
+    )
+    TauDem.move_outlets_to_streams(
+        p,
+        src,
+        outlet_path,
+        snapped_outlet_path,
+        maxdist=snap_cells,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
+    )
+    TauDem.grid_net(
+        p,
+        plen,
+        tlen,
+        gord,
+        outletfile=snapped_outlet_path,
+        maskfile=src,
+        threshold=1,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
+    )
+    TauDem.stream_net(
+        fel,
+        p,
+        ad8,
+        src,
+        ord_grid,
+        tree,
+        coord,
+        net,
+        w,
+        outletfile=snapped_outlet_path,
+        executable_dir=taudem_executable_dir,
+        processes=taudem_processes,
     )
 
-    # ── 6. Stream network ─────────────────────────────────────────────────────
-    logger.info("Extracting stream network...")
-    branches = grid.extract_river_network(
-        fdir=fdir, acc=acc,
-        threshold=acc_threshold,
-        dirmap=dirmap,
-    )
-    stream_lines = [shape(branch["geometry"]) for branch in branches["features"]]
-    streams_gdf = gpd.GeoDataFrame(
-        geometry=stream_lines, crs="EPSG:5070"
-    )
+    streams_gdf = _read_stream_network(net, dem_crs)
+    subbasins_gdf = _polygonize_watershed_grid(w, dem_crs)
+    if subbasins_gdf.empty:
+        raise RuntimeError("TauDEM produced no subbasin polygons; check DEM and outlet inputs.")
 
-    # ── 7. Basin characteristics ──────────────────────────────────────────────
-    logger.info("Computing basin characteristics...")
-    chars = _compute_basin_characteristics(
-        grid=grid,
-        dem=inflated,
-        watershed_poly=watershed_poly,
+    basin_shape = unary_union(list(subbasins_gdf.geometry))
+    basin_gdf = gpd.GeoDataFrame({"name": ["watershed"]}, geometry=[basin_shape], crs=dem_crs)
+
+    snapped_outlet_gdf = gpd.read_file(snapped_outlet_path)
+    if snapped_outlet_gdf.crs is None:
+        snapped_outlet_gdf = snapped_outlet_gdf.set_crs(dem_crs)
+    snapped_point = snapped_outlet_gdf.to_crs(dem_crs).geometry.iloc[0]
+
+    from terrain import clip_to_watershed
+
+    clipped_dem_path = work_dir / f"{dem_path.stem}_watershed.tif"
+    clipped_dem = clip_to_watershed(dem_path, basin_shape, clipped_dem_path)
+
+    centerlines_gdf = _build_centerlines(streams_gdf)
+    breaklines_gdf = _build_breaklines(basin_shape, centerlines_gdf, dem_crs)
+    characteristics = _compute_basin_characteristics(
+        basin_shape=basin_shape,
+        basin_crs=dem_crs,
+        clipped_dem_path=clipped_dem,
         streams_gdf=streams_gdf,
-        pour_point_x=x_snap,
-        pour_point_y=y_snap,
+        pour_point=snapped_point,
         pour_point_lon=pour_point_lon,
         pour_point_lat=pour_point_lat,
         cell_area_km2=cell_area_km2,
+        threshold_cells=threshold_cells,
+        source_bounds=bounds,
     )
 
-    # ── 8. Clip DEM to watershed ──────────────────────────────────────────────
-    from terrain import clip_to_watershed
-    clipped_dem_path = Path(str(dem_path).replace(".tif", "_watershed.tif"))
-    clipped_dem = clip_to_watershed(dem_path, watershed_poly, clipped_dem_path)
+    artifacts = {
+        "fel": fel,
+        "p": p,
+        "sd8": sd8,
+        "ad8": ad8,
+        "src": src,
+        "plen": plen,
+        "tlen": tlen,
+        "gord": gord,
+        "ord": ord_grid,
+        "tree": tree,
+        "coord": coord,
+        "net": net,
+        "w": w,
+        "outlet": outlet_path,
+        "snapped_outlet": snapped_outlet_path,
+        "dem_clipped": clipped_dem,
+    }
 
     logger.info(
-        f"Watershed delineated: {chars.drainage_area_km2:.1f} km² "
-        f"({chars.drainage_area_mi2:.1f} mi²)"
+        "TauDEM watershed complete: %.1f km², %d stream reaches, %d subbasins",
+        characteristics.drainage_area_km2,
+        len(streams_gdf),
+        len(subbasins_gdf),
     )
 
     return WatershedResult(
         basin=basin_gdf,
         streams=streams_gdf,
-        pour_point=Point(x_snap, y_snap),
-        characteristics=chars,
+        subbasins=subbasins_gdf,
+        centerlines=centerlines_gdf,
+        breaklines=breaklines_gdf,
+        pour_point=snapped_point,
+        characteristics=characteristics,
         dem_clipped=clipped_dem,
+        artifacts=artifacts,
+    )
+
+
+def _write_outlet_shapefile(outlet_path: Path, crs, x: float, y: float) -> None:
+    outlet_gdf = gpd.GeoDataFrame({"id": [1]}, geometry=[Point(x, y)], crs=crs)
+    outlet_gdf.to_file(outlet_path, driver="ESRI Shapefile")
+
+
+def _read_stream_network(net_path: Path, crs) -> "gpd.GeoDataFrame":
+    streams = gpd.read_file(net_path)
+    if streams.crs is None:
+        streams = streams.set_crs(crs)
+    if "stream_id" not in streams.columns:
+        streams["stream_id"] = range(1, len(streams) + 1)
+    return streams.to_crs(crs)
+
+
+def _polygonize_watershed_grid(w_path: Path, crs) -> "gpd.GeoDataFrame":
+    with rasterio.open(w_path) as src:
+        data = src.read(1)
+        mask = np.isfinite(data) & (data > 0)
+        features = []
+        for geom, value in rio_shapes(data.astype(np.int32), mask=mask, transform=src.transform):
+            value_int = int(value)
+            if value_int <= 0:
+                continue
+            features.append({"wsno": value_int, "geometry": shape(geom)})
+    if not features:
+        return gpd.GeoDataFrame({"wsno": []}, geometry=[], crs=crs)
+    gdf = gpd.GeoDataFrame(features, crs=crs)
+    return gdf.dissolve(by="wsno", as_index=False)
+
+
+def _build_centerlines(streams_gdf: "gpd.GeoDataFrame") -> "gpd.GeoDataFrame":
+    centerlines = streams_gdf.copy()
+    if "centerline_id" not in centerlines.columns:
+        centerlines["centerline_id"] = range(1, len(centerlines) + 1)
+    return centerlines
+
+
+def _build_breaklines(
+    basin_shape,
+    centerlines_gdf: "gpd.GeoDataFrame",
+    crs,
+) -> "gpd.GeoDataFrame":
+    breakline_geoms = []
+    breakline_types = []
+
+    for geom in centerlines_gdf.geometry:
+        breakline_geoms.append(geom)
+        breakline_types.append("stream")
+
+    boundary = basin_shape.boundary
+    if isinstance(boundary, LineString):
+        breakline_geoms.append(boundary)
+        breakline_types.append("boundary")
+    else:
+        for geom in getattr(boundary, "geoms", []):
+            breakline_geoms.append(geom)
+            breakline_types.append("boundary")
+
+    return gpd.GeoDataFrame(
+        {"breakline_type": breakline_types},
+        geometry=breakline_geoms,
+        crs=crs,
     )
 
 
 def _compute_basin_characteristics(
-    grid, dem, watershed_poly, streams_gdf,
-    pour_point_x, pour_point_y,
-    pour_point_lon, pour_point_lat,
-    cell_area_km2,
+    basin_shape,
+    basin_crs,
+    clipped_dem_path: Path,
+    streams_gdf: "gpd.GeoDataFrame",
+    pour_point: Point,
+    pour_point_lon: float,
+    pour_point_lat: float,
+    cell_area_km2: float,
+    threshold_cells: int,
+    source_bounds,
 ) -> BasinCharacteristics:
-    """Compute basin characteristics from delineated watershed."""
-    from pyproj import Transformer
-
-    # Area
-    area_km2 = watershed_poly.area / 1e6
+    area_km2 = basin_shape.area / 1e6
     area_mi2 = area_km2 * 0.386102
 
-    # Elevation statistics
-    dem_array = np.array(dem)
-    valid_cells = dem_array[dem_array > -9000]
-    mean_elev = float(np.mean(valid_cells)) if len(valid_cells) > 0 else 0.0
-    relief = float(np.max(valid_cells) - np.min(valid_cells)) if len(valid_cells) > 0 else 0.0
+    with rasterio.open(clipped_dem_path) as src:
+        dem = src.read(1, masked=True)
+        valid = np.asarray(dem.compressed(), dtype=float)
 
-    # Main channel: longest stream segment
-    if len(streams_gdf) > 0:
-        streams_gdf = streams_gdf.copy()
-        streams_gdf["length_km"] = streams_gdf.geometry.length / 1000
-        main_channel_km = float(streams_gdf["length_km"].max())
-
-        # 10-85% slope method (standard NRCS approach)
-        main_channel = streams_gdf.loc[streams_gdf["length_km"].idxmax(), "geometry"]
-        if hasattr(main_channel, "coords"):
-            coords = list(main_channel.coords)
-            if len(coords) >= 2:
-                p10_idx = int(len(coords) * 0.10)
-                p85_idx = int(len(coords) * 0.85)
-                # Slope = elevation difference / horizontal distance
-                # Elevation lookup from DEM would be ideal; use relief as approximation
-                slope = relief / max(main_channel_km * 1000, 1.0)
-            else:
-                slope = 0.001
-        else:
-            slope = 0.001
+    if valid.size > 0:
+        mean_elev = float(valid.mean())
+        relief = float(valid.max() - valid.min())
     else:
-        main_channel_km = math.sqrt(area_km2)  # rough estimate
-        slope = 0.001
+        mean_elev = 0.0
+        relief = 0.0
 
-    # Centroid (convert EPSG:5070 to WGS84)
-    centroid = watershed_poly.centroid
-    transformer = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
-    centroid_lon, centroid_lat = transformer.transform(centroid.x, centroid.y)
+    slope = 0.001
+    main_channel_km = math.sqrt(max(area_km2, cell_area_km2))
+    if len(streams_gdf) > 0:
+        streams = streams_gdf.copy()
+        streams["length_km"] = streams.geometry.length / 1000.0
+        idx = streams["length_km"].idxmax()
+        main_channel_km = float(streams.loc[idx, "length_km"])
+        slope_candidates = []
+        for col in ("Slope", "strmDrop", "Length"):
+            if col in streams.columns:
+                slope_candidates.append(col)
+        if "Slope" in streams.columns:
+            slope_value = streams.loc[idx, "Slope"]
+            if slope_value is not None and np.isfinite(float(slope_value)):
+                slope = max(float(slope_value), 1e-6)
+        elif "strmDrop" in streams.columns and "Length" in streams.columns:
+            drop = float(streams.loc[idx, "strmDrop"])
+            length = float(streams.loc[idx, "Length"])
+            if length > 0:
+                slope = max(drop / length, 1e-6)
+        elif relief > 0 and main_channel_km > 0:
+            slope = max(relief / (main_channel_km * 1000.0), 1e-6)
+
+    centroid = basin_shape.centroid
+    to_wgs84 = Transformer.from_crs(basin_crs, "EPSG:4326", always_xy=True)
+    centroid_lon, centroid_lat = to_wgs84.transform(centroid.x, centroid.y)
 
     return BasinCharacteristics(
         drainage_area_km2=area_km2,
@@ -234,13 +416,18 @@ def _compute_basin_characteristics(
         centroid_lon=centroid_lon,
         pour_point_lat=pour_point_lat,
         pour_point_lon=pour_point_lon,
+        extra={
+            "threshold_cells": threshold_cells,
+            "cell_area_km2": cell_area_km2,
+            "source_bounds": tuple(source_bounds),
+            "snapped_pour_point_x": float(pour_point.x),
+            "snapped_pour_point_y": float(pour_point.y),
+        },
     )
 
 
-# ── Export ────────────────────────────────────────────────────────────────────
-
 def save_watershed(result: WatershedResult, output_dir: Path) -> dict[str, Path]:
-    """Save watershed outputs to GeoPackage files."""
+    """Save watershed outputs and return the written paths."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -254,22 +441,38 @@ def save_watershed(result: WatershedResult, output_dir: Path) -> dict[str, Path]
     result.streams.to_file(streams_path, driver="GPKG")
     paths["streams"] = streams_path
 
-    logger.info(f"Saved watershed outputs to {output_dir}")
+    subbasins_path = output_dir / "subbasins.gpkg"
+    result.subbasins.to_file(subbasins_path, driver="GPKG")
+    paths["subbasins"] = subbasins_path
+
+    centerlines_path = output_dir / "river_centerlines.gpkg"
+    result.centerlines.to_file(centerlines_path, driver="GPKG")
+    paths["centerlines"] = centerlines_path
+
+    breaklines_path = output_dir / "breaklines.gpkg"
+    result.breaklines.to_file(breaklines_path, driver="GPKG")
+    paths["breaklines"] = breaklines_path
+
+    paths.update(result.artifacts)
+
+    logger.info("Saved watershed outputs to %s", output_dir)
     return paths
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    import argparse, math
+    import argparse
+
     logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 
-    parser = argparse.ArgumentParser(description="Delineate watershed from DEM")
+    parser = argparse.ArgumentParser(description="Delineate watershed from DEM using TauDEM")
     parser.add_argument("--dem", required=True, help="Path to DEM GeoTIFF")
     parser.add_argument("--lon", type=float, required=True, help="Pour point longitude (WGS84)")
     parser.add_argument("--lat", type=float, required=True, help="Pour point latitude (WGS84)")
     parser.add_argument("--output", default="data/watershed")
     parser.add_argument("--snap", type=float, default=300.0, help="Snap threshold in meters")
+    parser.add_argument("--stream-area", type=float, default=2.0, help="Minimum stream area in km^2")
+    parser.add_argument("--taudem-dir", default=None, help="Optional TauDEM executable directory")
+    parser.add_argument("--processes", type=int, default=1, help="TauDEM MPI process count")
     args = parser.parse_args()
 
     result = delineate_watershed(
@@ -277,12 +480,15 @@ if __name__ == "__main__":
         pour_point_lon=args.lon,
         pour_point_lat=args.lat,
         snap_threshold_m=args.snap,
+        min_stream_area_km2=args.stream_area,
+        taudem_executable_dir=Path(args.taudem_dir) if args.taudem_dir else None,
+        taudem_processes=args.processes,
     )
     paths = save_watershed(result, Path(args.output))
     chars = result.characteristics
-    print(f"\nWatershed delineated:")
-    print(f"  Area:          {chars.drainage_area_km2:.2f} km² ({chars.drainage_area_mi2:.2f} mi²)")
-    print(f"  Relief:        {chars.relief_m:.1f} m")
-    print(f"  Channel length:{chars.main_channel_length_km:.2f} km")
-    print(f"  Channel slope: {chars.main_channel_slope_m_per_m:.5f} m/m")
-    print(f"  Outputs:       {paths}")
+    print("\nWatershed delineated:")
+    print(f"  Area:           {chars.drainage_area_km2:.2f} km^2 ({chars.drainage_area_mi2:.2f} mi^2)")
+    print(f"  Relief:         {chars.relief_m:.1f} m")
+    print(f"  Channel length: {chars.main_channel_length_km:.2f} km")
+    print(f"  Channel slope:  {chars.main_channel_slope_m_per_m:.5f} m/m")
+    print(f"  Outputs:        {paths}")

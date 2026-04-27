@@ -22,10 +22,12 @@ from shapely.geometry import box
 
 from terrain import (
     TerrainError,
+    find_champ_image_service,
     download_nlcd,
     reproject_nlcd,
     clip_nlcd_to_watershed,
     get_nlcd,
+    get_terrain,
 )
 
 
@@ -61,8 +63,7 @@ def _make_nlcd_bytes(
 def test_get_nlcd_downloads_and_reprojects(tmp_path):
     """Mock WCS response → verify output file is valid raster in EPSG:5070."""
     bbox = (-89.1, 40.1, -89.0, 40.2)
-    # The download adds 0.1-deg buffer: west=−89.2, south=40.0, east=−88.9, north=40.3
-    nlcd_bytes = _make_nlcd_bytes(-89.2, 40.0, -88.9, 40.3)
+    nlcd_bytes = _make_nlcd_bytes(-89.1, 40.1, -89.0, 40.2)
 
     mock_resp = MagicMock()
     mock_resp.raise_for_status = MagicMock()
@@ -72,6 +73,10 @@ def test_get_nlcd_downloads_and_reprojects(tmp_path):
         result = get_nlcd(bbox_wgs84=bbox, output_dir=tmp_path, year=2021)
 
     assert mock_get.call_count == 1, "requests.get should be called once"
+    params = mock_get.call_args.kwargs["params"]
+    assert ("COVERAGEID", "mrlc_download__NLCD_2021_Land_Cover_L48") in params
+    assert any(item[0] == "SUBSET" and item[1].startswith("X(") for item in params)
+    assert any(item[0] == "SUBSET" and item[1].startswith("Y(") for item in params)
     assert result.exists(), "Output file must exist"
 
     with rasterio.open(result) as ds:
@@ -89,7 +94,7 @@ def test_download_nlcd_idempotent(tmp_path):
     # Pre-create the expected output file
     west, south, east, north = bbox
     expected = raw_dir / f"nlcd_2021_{west:.2f}_{south:.2f}_{east:.2f}_{north:.2f}.tif"
-    nlcd_bytes = _make_nlcd_bytes(-89.2, 40.0, -88.9, 40.3)
+    nlcd_bytes = _make_nlcd_bytes(-89.1, 40.1, -89.0, 40.2)
     expected.write_bytes(nlcd_bytes)
 
     with patch("terrain.requests.get") as mock_get:
@@ -137,3 +142,52 @@ def test_clip_nlcd_to_watershed(tmp_path):
         assert ds.crs == CRS.from_epsg(5070)
         arr = ds.read(1)
         assert arr.size > 0, "Clipped raster must have pixels"
+
+
+def test_find_champ_image_service_returns_intersecting_service(monkeypatch):
+    bbox = (-89.8, 39.6, -89.4, 40.0)
+    metadata = {
+        "fullExtent": {
+            "xmin": -90.0,
+            "ymin": 39.4,
+            "xmax": -89.0,
+            "ymax": 40.4,
+            "spatialReference": {"wkid": 4326},
+        },
+        "maxImageWidth": 4096,
+        "maxImageHeight": 4096,
+    }
+
+    monkeypatch.setattr("terrain._get_arcgis_service_metadata", lambda url: metadata)
+    result = find_champ_image_service(bbox, candidate_urls=["https://example.test/ImageServer"])
+
+    assert result is not None
+    assert result["url"] == "https://example.test/ImageServer"
+
+
+def test_get_terrain_prefers_champ_image_service(tmp_path, monkeypatch):
+    bbox = (-89.8, 39.6, -89.4, 40.0)
+    output_dir = tmp_path / "terrain"
+    champ_service = {
+        "url": "https://example.test/ImageServer",
+        "metadata": {"maxImageWidth": 4096, "maxImageHeight": 4096},
+    }
+
+    monkeypatch.setattr("terrain.find_champ_image_service", lambda bbox_wgs84: champ_service)
+
+    def _fake_export(service_url, bbox_wgs84, output_path, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake-dem")
+        return output_path
+
+    monkeypatch.setattr("terrain.export_champ_image_service_dem", _fake_export)
+
+    def _unexpected_tiles(*args, **kwargs):
+        raise AssertionError("Legacy tile discovery should not be used when CHAMP succeeds")
+
+    monkeypatch.setattr("terrain.find_ilhmp_tiles", _unexpected_tiles)
+
+    result = get_terrain(bbox_wgs84=bbox, output_dir=output_dir, resolution_m=3.0)
+
+    assert result.exists()
+    assert result.name == "dem_mosaic.tif"

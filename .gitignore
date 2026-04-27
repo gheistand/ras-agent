@@ -77,3 +77,6 @@ agent_tasks/plans/
 
 # Local vendor repos (reference only — not build dependencies)
 vendor/
+
+# Workspace (downloaded data, intermediate outputs)
+workspace/
