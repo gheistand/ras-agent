@@ -7,8 +7,12 @@ shapely>=2.0
 fiona>=1.9
 pyproj>=3.6
 
+# External CLI dependency for real watershed delineation:
+# TauDEM 5.x must be installed separately and available on PATH.
+
 # HEC-RAS automation
-ras-commander>=0.90   # 0.90+ adds RasPreprocess.preprocess_plan() for Windows HEC-RAS preprocessing (Bill K. commit 8c0c1c8); tested baseline 0.93.0 (2026-04-07)
+ras-commander>=0.95.0  # latest package floor for geometry/RASMapper/AORC-MRMS helpers
+hms-commander>=0.3.0   # latest package floor for Spring Creek/TauDEM/HMS handoff helpers
 h5py>=3.9
 
 # Post-processing — cloud-native GIS export (optional)

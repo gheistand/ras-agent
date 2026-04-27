@@ -21,7 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from loguru import logger
+try:
+    from loguru import logger
+except ImportError:  # pragma: no cover - fallback for lean test environments
+    import logging
+    logger = logging.getLogger(__name__)
 
 import orchestrator as _orchestrator
 from orchestrator import OrchestratorResult, run_watershed
@@ -152,6 +156,7 @@ def _write_run_metadata(
     spec: WatershedSpec,
     result: OrchestratorResult,
     duration_sec: float,
+    boundary_condition_mode: str,
 ) -> None:
     """Write run_metadata.json to the watershed output directory."""
     ws_dir = result.output_dir
@@ -184,6 +189,7 @@ def _write_run_metadata(
         "name": spec.name,
         "pour_point": [spec.lon, spec.lat],
         "return_periods": spec.return_periods,
+        "boundary_condition_mode": boundary_condition_mode,
         "status": result.status,
         "duration_sec": round(duration_sec, 2),
         "drainage_area_mi2": (
@@ -208,7 +214,8 @@ def run_batch(
     output_dir: Path,
     max_workers: int = 3,
     resolution_m: float = 3.0,
-    mesh_strategy: str = "template_clone",
+    mesh_strategy: str = "geometry_first",
+    boundary_condition_mode: str = "headwater",
     ras_exe_dir: Optional[Path] = None,
     resume: bool = True,
     dry_run: bool = False,
@@ -228,7 +235,13 @@ def run_batch(
         output_dir:     Root output directory
         max_workers:    ThreadPoolExecutor concurrency limit
         resolution_m:   DEM resolution in meters
-        mesh_strategy:  HEC-RAS mesh build strategy
+        mesh_strategy:  HEC-RAS mesh build strategy (default: geometry_first)
+                        uses ras-commander GeomStorage to write .g## and
+                        lets HEC-RAS regenerate HDF artifacts
+        boundary_condition_mode:
+                        "headwater" | "downstream". Downstream is scaffolded
+                        through batch/orchestrator but still fails fast in the
+                        builder until chained-basin implementation resumes.
         ras_exe_dir:    Path to RasUnsteady binary dir; None = mock mode
         resume:         Skip watersheds with existing completed output
         dry_run:        Load + validate specs, print plan, exit without running
@@ -246,7 +259,8 @@ def run_batch(
     logger.info(
         f"Batch: {total} watersheds from {input_file.name}, "
         f"output_dir={output_dir}, max_workers={max_workers}, "
-        f"resume={resume}, dry_run={dry_run}"
+        f"resume={resume}, dry_run={dry_run}, "
+        f"bc_mode={boundary_condition_mode}"
     )
 
     summary_csv = output_dir / "batch_summary.csv"
@@ -259,7 +273,7 @@ def run_batch(
             logger.info(
                 f"  [{i}/{total}] {spec.name}  "
                 f"lon={spec.lon}, lat={spec.lat}, "
-                f"rps={spec.return_periods}{tag}"
+                f"rps={spec.return_periods}, bc_mode={boundary_condition_mode}{tag}"
             )
         logger.info("Dry-run complete — no execution.")
         return BatchResult(
@@ -311,11 +325,12 @@ def run_batch(
             return_periods=spec.return_periods,
             resolution_m=resolution_m,
             mesh_strategy=mesh_strategy,
+            boundary_condition_mode=boundary_condition_mode,
             ras_exe_dir=ras_exe_dir,
             name=spec.name,
         )
         dur = time.monotonic() - t_start
-        _write_run_metadata(spec, result, dur)
+        _write_run_metadata(spec, result, dur, boundary_condition_mode)
         if (
             notify_config is not None
             and notify_config.on_complete
@@ -470,6 +485,17 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--ras-exe-dir", type=Path, default=None)
+    parser.add_argument(
+        "--strategy",
+        default="geometry_first",
+        help="Mesh build strategy (default: geometry_first)",
+    )
+    parser.add_argument(
+        "--bc-mode",
+        default="headwater",
+        choices=["headwater", "downstream"],
+        help="Boundary-condition mode scaffold (default: headwater)",
+    )
     parser.add_argument("--no-resume", action="store_true",
                         help="Re-run even if output exists")
     parser.add_argument("--dry-run", action="store_true")
@@ -491,6 +517,8 @@ if __name__ == "__main__":
         args.input_file,
         args.output_dir,
         max_workers=args.workers,
+        mesh_strategy=args.strategy,
+        boundary_condition_mode=args.bc_mode,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         resume=not args.no_resume,
         dry_run=args.dry_run,

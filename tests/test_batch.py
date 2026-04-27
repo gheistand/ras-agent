@@ -255,6 +255,38 @@ def test_run_batch_one_failure_continues(tmp_path):
     assert "simulated terrain failure" in result.errors["Beta"]
 
 
+def test_run_batch_forwards_boundary_condition_mode(tmp_path):
+    csv_file = tmp_path / "ws.csv"
+    _write_csv(
+        csv_file,
+        rows=[
+            {"name": "Alpha", "lon": "-88.578", "lat": "40.021",
+             "return_periods": "100", "notes": ""},
+        ],
+        fieldnames=["name", "lon", "lat", "return_periods", "notes"],
+    )
+    output_dir = tmp_path / "out"
+
+    def _fake_run_watershed(pour_point_lon, pour_point_lat, output_dir,
+                             name=None, **kwargs):
+        ws_dir = Path(output_dir)
+        return _make_mock_orchestrator_result(name, pour_point_lon,
+                                              pour_point_lat, ws_dir)
+
+    with patch("batch.run_watershed", side_effect=_fake_run_watershed) as mock_rw:
+        result = run_batch(
+            csv_file,
+            output_dir,
+            max_workers=1,
+            boundary_condition_mode="downstream",
+        )
+
+    assert result.completed == 1
+    assert mock_rw.call_args.kwargs["boundary_condition_mode"] == "downstream"
+    run_metadata = json.loads((output_dir / "Alpha" / "run_metadata.json").read_text())
+    assert run_metadata["boundary_condition_mode"] == "downstream"
+
+
 # ── Tests: write_summary_csv ───────────────────────────────────────────────────
 
 def test_write_summary_csv(tmp_path):
