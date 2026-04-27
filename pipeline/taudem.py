@@ -14,7 +14,7 @@ import logging
 import shutil
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class TauDem:
         mpiexec = TauDem._resolve_mpiexec(resolved_dir)
         install_dir = None
         if executables:
-            install_dir = next(iter(executables.values())).parent
+            install_dir = TauDem._reported_parent(next(iter(executables.values())))
 
         return {
             "installed": len(missing) == 0,
@@ -78,6 +78,15 @@ class TauDem:
             "missing": missing,
             "mpiexec": mpiexec,
         }
+
+    @staticmethod
+    def _reported_parent(path: Path) -> Path:
+        """Return the parent directory for native and Windows-style paths."""
+        raw_path = str(path)
+        windows_path = PureWindowsPath(raw_path)
+        if windows_path.drive or raw_path.startswith("\\\\"):
+            return Path(str(windows_path.parent))
+        return path.parent
 
     @staticmethod
     def validate_environment(
