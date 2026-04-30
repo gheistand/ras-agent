@@ -132,9 +132,10 @@ def delineate_watershed(
 
     # ── 6. Stream network ─────────────────────────────────────────────────────
     logger.info("Extracting stream network...")
+    # pysheds 0.5 changed the API: pass a boolean mask instead of acc+threshold
+    stream_mask = acc > acc_threshold
     branches = grid.extract_river_network(
-        fdir=fdir, acc=acc,
-        threshold=acc_threshold,
+        fdir=fdir, mask=stream_mask,
         dirmap=dirmap,
     )
     stream_lines = [shape(branch["geometry"]) for branch in branches["features"]]

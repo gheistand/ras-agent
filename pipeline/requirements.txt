@@ -19,7 +19,7 @@ streamstats-access>=0.1
 dataretrieval>=1.0
 
 # Numerical
-numpy>=1.24
+numpy>=1.24,<2.0  # pysheds 0.5 uses np.in1d removed in NumPy 2.0; pin until pysheds fixes upstream
 scipy>=1.11
 pandas>=2.0
 
