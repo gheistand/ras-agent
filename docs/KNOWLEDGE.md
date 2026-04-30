@@ -11,7 +11,7 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM), 216/216 tests, 65+ commits (as of 2026-04-30)
+- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM), 222/222 tests, 70+ commits (as of 2026-04-30)
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
 - **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering), Nikhil Sangwan / nikhil-yahoo (ISWS)
 
@@ -109,7 +109,7 @@ Web (Cloudflare Pages):
 - **Terrain:** ILHMP LiDAR clearinghouse (Illinois) → https://clearinghouse.isgs.illinois.edu/data/elevation/illinois-height-modernization-ilhmp
   - REST tile index: `https://clearinghouse.isgs.illinois.edu/arcgis/rest/services/Elevation/IL_Height_Modernization_DEM/MapServer/0/query`
   - Fallback: USGS 3DEP 1/3 arc-second via National Map API
-- **Hydrology:** USGS StreamStats REST API → https://streamstats.usgs.gov/streamstatsservices
+- **Hydrology:** USGS StreamStats REST API (legacy, decommissioned Jan 2026) → migrated to ss-delineate: https://streamstats.usgs.gov/ss-delineate
   - Region code: `IL`
   - Fallback: Illinois regression equations (USGS SIR 2008-5176, Soong et al. 2008)
   - Returns Q2, Q5, Q10, Q25, Q50, Q100, Q500 in CFS
@@ -168,7 +168,9 @@ Web (Cloudflare Pages):
 
 ### streamstats.py
 - `get_peak_flows(pour_point_lon, pour_point_lat, drainage_area_mi2, channel_slope_m_per_m, region='IL')` → `PeakFlowEstimates`
-- Tries StreamStats API first (delineate workspace → get flow statistics → parse IL codes)
+- Delineation: `ss-delineate` API (`GET /v1/delineate/sshydro/{region}?lat=&lon=`) — legacy `streamstatsservices` decommissioned Jan 2026
+- Flow statistics: falls through to Illinois regression equations immediately (no direct peak flow endpoint in new API)
+- Gauged site path: `get_peak_flows_from_rdb(rdb_path)` — LP3 fitting per Bulletin 17C from USGS annual peaks RDB
 - Falls back to Illinois regression equations by latitude region (northern/central/southern)
 - `PeakFlowEstimates`: Q2, Q5, Q10, Q25, Q50, Q100, Q500 in CFS; source field indicates API vs regression
 
@@ -601,7 +603,7 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 | ras-commander | `>=0.89` | 0.89+ has Windows→Linux preprocessing, RasProcess |
 | ras2cng | `>=0.1` | Optional; cloud-native GIS post-processing |
 | rasterio | `>=1.3` | |
-| pysheds | `>=0.4` | |
+| pysheds | `>=0.4,<0.6` | pysheds 0.5 breaks with numpy>=2.0; numpy pinned <2.0 until pysheds fixes upstream |
 | geopandas | `>=0.14` | |
 | h5py | `>=3.9` | HDF5 fallback when RC unavailable |
 | fastapi | `>=0.110` | |
@@ -617,17 +619,20 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 4. ~~Windows agent scaffold~~ ✅ Done (pipeline/windows_agent.py, 8 tests)
 5. ~~RasPreprocess integration~~ ✅ Done (commit 8c0c1c8, _generate_local() implemented)
 6. ~~SLURM batch submission~~ ✅ Done (commit 132f148, 216/216 tests)
-7. ~~Cartesian mesh generation~~ ✅ Done (commit 02b79b4 — confirmed forward path for mesh)
-8. **Send OTM email** (Glenn — otm@illinois.edu from heistand@illinois.edu) — still pending
-9. **Resolve plan HDF gap** — model_builder.py names but doesn't generate valid .p##.hdf; end-to-end blocker; agenda item for May 1 call with Bill
-10. **Wire rain-on-grid (AORC/MRMS)** — ras-commander has retrieval functions; wire into pipeline; adapt GHNCD comparison tool from DSS-Commander as storm QC/selection step
-11. **Spring Creek (Springfield IL) end-to-end run** — pilot target; acceptance: plan/met/BC artifacts wired and nonzero before calibration
-12. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²) on Dell Precision 5860
-13. **Add Nikhil Sangwan** to heistand-ic cluster group at NCSA Illinois Computes
-14. **TauDEM integration** — Bill's next focus; will replace/augment pysheds D8 watershed delineation
-15. **Batched-parameter calibration** — after Spring Creek runs cleanly; based on Bill's LWI manual calibration methodology
-16. **Phase 12:** ras2cng integration into results.py
-17. **Future:** FIRM validation, NHD batch input generator, user auth for API
+7. ~~Cartesian mesh generation~~ ✅ Done (commit 02b79b4)
+8. ~~Resolve plan HDF gap~~ ✅ Fixed (commit 1b71f9f — `_remove_geometry_hdfs()` deletes stale .g##.hdf after template clone; forces ras_preprocess Workflow C; 218 tests)
+9. ~~StreamStats 404~~ ✅ Fixed (commit f148eaa — migrated to ss-delineate API + LP3 gauge peaks path; 222 tests)
+10. ~~pysheds NumPy 2.0 compat~~ ✅ Fixed (commit 355c92e — np.in1d patch + extract_river_network API update; numpy pinned <2.0)
+11. ~~Spring Creek mock end-to-end~~ ✅ All 6 stages pass (commit 355c92e — `trial_spring_creek.py`; real artifacts in `workspace/spring_creek/08_model_validation/ras_agent_95mi2/`)
+12. **Send OTM email** (Glenn — otm@illinois.edu from heistand@illinois.edu) — still pending
+13. **Fix Spring Creek drainage area** — pysheds delineates 2.0 mi² (expected 95 mi²); gauge location is outside DEM extent; use `boundary_handoff` outlet at (531443, 1883487) EPSG:5070 (from `09_taudem_verification/taudem_boundary_handoff_outlet.geojson`); discuss with Bill on May 1 call
+14. **Wire rain-on-grid (AORC/MRMS)** — ras-commander has retrieval functions; wire into pipeline; adapt GHNCD comparison tool from DSS-Commander as storm QC/selection step
+15. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²) on Dell Precision 5860
+16. **Add Nikhil Sangwan** to heistand-ic cluster group at NCSA Illinois Computes
+17. **TauDEM integration** — Bill's next focus; will replace/augment pysheds D8 watershed delineation
+18. **Batched-parameter calibration** — after Spring Creek runs cleanly; based on Bill's LWI manual calibration methodology
+19. **Phase 12:** ras2cng integration into results.py
+20. **Future:** FIRM validation, NHD batch input generator, user auth for API
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
