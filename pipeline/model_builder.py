@@ -365,6 +365,46 @@ def _update_terrain_reference(geom_hdf_path: Path, new_terrain_path: Path) -> No
         logger.warning(f"Could not open geometry HDF {geom_hdf_path}: {exc}")
 
 
+def _remove_geometry_hdfs(project_dir: Path) -> int:
+    """Delete stale geometry HDF files (.g##.hdf) from a cloned project directory.
+
+    Removing these files forces ``ras_preprocess.py`` into Workflow C on the
+    next run: it reads Cartesian cell centers from the ASCII ``.g##`` file and
+    regenerates the mesh via Voronoi tessellation — our new watershed mesh, not
+    the template's.
+
+    ``.p##.hdf`` plan HDF files are intentionally left untouched.
+
+    Args:
+        project_dir: Root directory of the cloned HEC-RAS project.
+
+    Returns:
+        Number of geometry HDF files successfully deleted.
+    """
+    import re
+
+    deleted = 0
+    for hdf_path in list(project_dir.glob("*.g*.hdf")):
+        # Match only .g##.hdf (one or two digits), not .p##.hdf
+        if not re.search(r"\.g\d{2}\.hdf$", hdf_path.name):
+            continue
+        try:
+            hdf_path.unlink()
+            logger.info(
+                "[template-clone] Deleted stale geometry HDF %s — "
+                "ras_preprocess.py will regenerate via Workflow C",
+                hdf_path.name,
+            )
+            deleted += 1
+        except OSError as exc:
+            logger.warning(
+                "[template-clone] Could not delete geometry HDF %s: %s",
+                hdf_path.name,
+                exc,
+            )
+    return deleted
+
+
 # ── RAS Commander Utilities ───────────────────────────────────────────────────
 
 # RAS Commander — optional dependency, imported lazily
@@ -1015,6 +1055,11 @@ def _build_from_template(
             "No .g01.hdf geometry HDF found in cloned project; "
             "terrain reference not updated. May need first GUI run on Windows."
         )
+
+    # ── 5b. Remove geometry HDF(s) so ras_preprocess.py uses Workflow C
+    # (Workflow C reads Cartesian cell centers from ASCII .g## and regenerates
+    # the HDF via Voronoi tessellation — our new watershed mesh, not the template)
+    _remove_geometry_hdfs(project_dir)
 
     # ── 6. Write unsteady flow files + plan files
     bc_slope = watershed.characteristics.main_channel_slope_m_per_m

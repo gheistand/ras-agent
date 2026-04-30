@@ -454,6 +454,37 @@ def test_write_cell_centers_to_geometry_file(tmp_path):
     assert bak.exists()
 
 
+def test_remove_geometry_hdfs(tmp_path):
+    """_remove_geometry_hdfs deletes .g##.hdf files and leaves .p##.hdf alone."""
+    import h5py
+
+    # Create files that should be deleted
+    g01_hdf = tmp_path / "project.g01.hdf"
+    g02_hdf = tmp_path / "project.g02.hdf"
+    # Create files that must NOT be deleted
+    p01_hdf = tmp_path / "project.p01.hdf"
+    other_txt = tmp_path / "project.g01"
+
+    for f in (g01_hdf, g02_hdf, p01_hdf):
+        with h5py.File(f, "w"):
+            pass
+    other_txt.write_text("Geom Title=Test\n")
+
+    count = mb._remove_geometry_hdfs(tmp_path)
+
+    assert count == 2
+    assert not g01_hdf.exists(), ".g01.hdf should have been deleted"
+    assert not g02_hdf.exists(), ".g02.hdf should have been deleted"
+    assert p01_hdf.exists(), ".p01.hdf must not be deleted"
+    assert other_txt.exists(), "ASCII geometry file must not be deleted"
+
+
+def test_remove_geometry_hdfs_empty_dir(tmp_path):
+    """_remove_geometry_hdfs returns 0 when no geometry HDFs are present."""
+    count = mb._remove_geometry_hdfs(tmp_path)
+    assert count == 0
+
+
 def test_grid_shift_avoids_voronoi_conflicts():
     """Grid shift search finds a configuration without VB-vertex conflicts."""
     pytest.importorskip("shapely")
