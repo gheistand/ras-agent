@@ -11,9 +11,9 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM), 216/216 tests, 65+ commits (as of 2026-04-20)
+- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM), 216/216 tests, 65+ commits (as of 2026-04-30)
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
-- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering, RASAlphaCLI/RASDecomp), Nikhil Sangwan / nikhil-yahoo (ISWS)
+- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering), Nikhil Sangwan / nikhil-yahoo (ISWS)
 
 ---
 
@@ -616,14 +616,18 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 3. ~~Bump ras-commander version pin~~ ✅ Done (PR #5, >=0.89)
 4. ~~Windows agent scaffold~~ ✅ Done (pipeline/windows_agent.py, 8 tests)
 5. ~~RasPreprocess integration~~ ✅ Done (commit 8c0c1c8, _generate_local() implemented)
-6. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-7. **Send reply to Bill re: RasPreprocess integration** (draft ready)
-8. **Call with Bill + Ajith** — scheduled, not yet happened as of 2026-03-17 (mesh regen + gui-subpackage)
-9. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²)
-10. **Docker smoke test with real run** once Windows template exists
-11. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
-12. **Phase 12:** ras2cng integration into results.py (post-call)
-13. **Future:** FIRM validation, NHD batch input generator, user auth for API
+6. ~~SLURM batch submission~~ ✅ Done (commit 132f148, 216/216 tests)
+7. ~~Cartesian mesh generation~~ ✅ Done (commit 02b79b4 — confirmed forward path for mesh)
+8. **Send OTM email** (Glenn — otm@illinois.edu from heistand@illinois.edu) — still pending
+9. **Resolve plan HDF gap** — model_builder.py names but doesn't generate valid .p##.hdf; end-to-end blocker; agenda item for May 1 call with Bill
+10. **Wire rain-on-grid (AORC/MRMS)** — ras-commander has retrieval functions; wire into pipeline; adapt GHNCD comparison tool from DSS-Commander as storm QC/selection step
+11. **Spring Creek (Springfield IL) end-to-end run** — pilot target; acceptance: plan/met/BC artifacts wired and nonzero before calibration
+12. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²) on Dell Precision 5860
+13. **Add Nikhil Sangwan** to heistand-ic cluster group at NCSA Illinois Computes
+14. **TauDEM integration** — Bill's next focus; will replace/augment pysheds D8 watershed delineation
+15. **Batched-parameter calibration** — after Spring Creek runs cleanly; based on Bill's LWI manual calibration methodology
+16. **Phase 12:** ras2cng integration into results.py
+17. **Future:** FIRM validation, NHD batch input generator, user auth for API
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`
