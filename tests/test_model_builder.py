@@ -519,6 +519,12 @@ def test_build_geometry_first_creates_complete_project(tmp_path, stub_geommesh):
     assert "MainArea" in flow_text
     assert "RAS_AGENT,MAIN" not in flow_text
 
+    qa_artifacts = project.metadata["mesh_qa_artifacts"]
+    assert project.metadata["mesh_qa_status"] == "review_flags"
+    assert Path(qa_artifacts["metrics_json"]).exists()
+    assert Path(qa_artifacts["summary_csv"]).exists()
+    assert Path(qa_artifacts["flags_csv"]).exists()
+
 
 def test_build_geometry_first_registers_terrain(tmp_path, stub_geommesh):
     dem_path = tmp_path / "source_dem.tif"
