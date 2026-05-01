@@ -147,3 +147,104 @@ def test_taudem_qaqc_signoff_gate_requires_human_approval(tmp_path):
     signoff = taudem_qaqc.require_taudem_qaqc_signoff(outputs["bundle_dir"])
     assert signoff["approved_for_production"] is True
     assert signoff["production_promotion"]["allowed"] is True
+
+
+def test_generate_taudem_qaqc_bundle_preserves_signed_signoff_on_regeneration(tmp_path):
+    watershed = _small_watershed(tmp_path)
+    bundle_dir = tmp_path / "qaqc_bundle"
+    outputs = taudem_qaqc.generate_taudem_qaqc_bundle(
+        watershed,
+        bundle_dir,
+        snap_threshold_m=100.0,
+    )
+    taudem_qaqc.record_taudem_qaqc_signoff(
+        outputs["bundle_dir"],
+        reviewer="Bill Reviewer",
+        reviewer_role="engineer",
+        decision="approved",
+        notes="Approved before bundle regeneration.",
+        approved_for_production=True,
+        reviewed_at="2026-05-01T12:00:00Z",
+    )
+    signed_before = json.loads(outputs["signoff"].read_text(encoding="utf-8"))
+
+    taudem_qaqc.generate_taudem_qaqc_bundle(
+        watershed,
+        bundle_dir,
+        snap_threshold_m=100.0,
+    )
+    signed_after = json.loads(outputs["signoff"].read_text(encoding="utf-8"))
+
+    assert signed_after == signed_before
+
+
+def test_generate_taudem_qaqc_bundle_invalidates_signed_signoff_on_source_change(tmp_path):
+    watershed = _small_watershed(tmp_path)
+    bundle_dir = tmp_path / "qaqc_bundle"
+    outputs = taudem_qaqc.generate_taudem_qaqc_bundle(
+        watershed,
+        bundle_dir,
+        snap_threshold_m=100.0,
+    )
+    taudem_qaqc.record_taudem_qaqc_signoff(
+        outputs["bundle_dir"],
+        reviewer="Bill Reviewer",
+        decision="approved",
+        notes="Approved before source inputs changed.",
+        approved_for_production=True,
+        reviewed_at="2026-05-01T12:00:00Z",
+    )
+    previous = json.loads(outputs["signoff"].read_text(encoding="utf-8"))
+
+    taudem_qaqc.generate_taudem_qaqc_bundle(
+        watershed,
+        bundle_dir,
+        snap_threshold_m=25.0,
+    )
+    signoff = json.loads(outputs["signoff"].read_text(encoding="utf-8"))
+
+    assert signoff["status"] == "pending"
+    assert signoff["approved_for_production"] is False
+    assert signoff["source_fingerprint"]["value"] != previous["source_fingerprint"]["value"]
+    assert signoff["previous_signoff_invalidated"]["reason"] == "source_inputs_changed"
+    assert signoff["previous_signoff_invalidated"]["previous_status"] == "signed"
+
+
+def test_generate_taudem_qaqc_bundle_can_explicitly_reset_signed_signoff(tmp_path):
+    watershed = _small_watershed(tmp_path)
+    bundle_dir = tmp_path / "qaqc_bundle"
+    outputs = taudem_qaqc.generate_taudem_qaqc_bundle(watershed, bundle_dir)
+    taudem_qaqc.record_taudem_qaqc_signoff(
+        outputs["bundle_dir"],
+        reviewer="Bill Reviewer",
+        decision="approved",
+        notes="Approved before explicit reset.",
+        approved_for_production=True,
+        reviewed_at="2026-05-01T12:00:00Z",
+    )
+
+    taudem_qaqc.generate_taudem_qaqc_bundle(
+        watershed,
+        bundle_dir,
+        reset_signoff=True,
+    )
+    signoff = json.loads(outputs["signoff"].read_text(encoding="utf-8"))
+
+    assert signoff["status"] == "pending"
+    assert signoff["approved_for_production"] is False
+    assert signoff["previous_signoff_reset"]["reason"] == "explicit_reset"
+    assert signoff["previous_signoff_reset"]["previous_status"] == "signed"
+
+
+def test_slope_check_uses_configured_low_slope_threshold(tmp_path):
+    watershed = _small_watershed(tmp_path)
+
+    diagnostics = taudem_qaqc.build_taudem_qaqc_diagnostics(
+        watershed,
+        thresholds=taudem_qaqc.QaqcThresholds(low_slope_m_per_m=0.0001),
+    )
+    slope_check = next(check for check in diagnostics["checks"] if check["id"] == "slope")
+
+    assert slope_check["status"] == "review"
+    assert slope_check["severity"] == "info"
+    assert slope_check["metrics"]["low_slope_threshold_m_per_m"] == 0.0001

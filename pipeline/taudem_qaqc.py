@@ -10,6 +10,7 @@ watershed can be promoted to production-quality model build inputs.
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import json
 import math
@@ -83,6 +84,7 @@ def generate_taudem_qaqc_bundle(
     taudem_commands: Optional[Iterable[Any]] = None,
     thresholds: Optional[QaqcThresholds | dict[str, float]] = None,
     notes: Optional[dict[str, Any]] = None,
+    reset_signoff: bool = False,
 ) -> dict[str, Path]:
     """
     Write a self-contained TauDEM delineation QAQC bundle.
@@ -99,6 +101,8 @@ def generate_taudem_qaqc_bundle(
         taudem_commands: TauDEM command result objects to record as provenance.
         thresholds: Optional attention thresholds.
         notes: Optional freeform provenance notes.
+        reset_signoff: When True, replace any existing human signoff with a
+            fresh pending signoff template.
 
     Returns:
         Mapping of artifact keys to paths written in the bundle.
@@ -141,7 +145,19 @@ def generate_taudem_qaqc_bundle(
     prompts_path.write_text(_review_prompts_markdown(diagnostics), encoding="utf-8")
 
     signoff_path = output_dir / "signoff.json"
-    signoff_path.write_text(_to_json(_pending_signoff()), encoding="utf-8")
+    source_fingerprint = _signoff_source_fingerprint(
+        watershed=watershed,
+        diagnostics=diagnostics,
+        source_dem=source_dem,
+        snap_threshold_m=snap_threshold_m,
+        min_stream_area_km2=min_stream_area_km2,
+        thresholds=threshold_values,
+    )
+    _write_or_preserve_signoff(
+        signoff_path,
+        source_fingerprint=source_fingerprint,
+        reset_signoff=reset_signoff,
+    )
 
     manifest = _build_manifest(
         watershed=watershed,
@@ -218,7 +234,7 @@ def build_taudem_qaqc_diagnostics(
         _stream_order_check(streams_gdf, artifacts),
         _drainage_area_check(watershed, basin_geom, subbasins_gdf, thresholds),
         _subbasin_geometry_check(subbasins_gdf, basin_geom, thresholds),
-        _slope_check(characteristics),
+        _slope_check(characteristics, thresholds),
         _low_relief_check(characteristics, thresholds),
         _dem_boundary_check(basin_geom, source_bounds, cell_size_m, thresholds),
     ]
@@ -579,7 +595,7 @@ def _subbasin_geometry_check(
     )
 
 
-def _slope_check(characteristics: Any) -> dict[str, Any]:
+def _slope_check(characteristics: Any, thresholds: QaqcThresholds) -> dict[str, Any]:
     slope = _float_or_none(getattr(characteristics, "main_channel_slope_m_per_m", None))
     length = _float_or_none(getattr(characteristics, "main_channel_length_km", None))
     relief = _float_or_none(getattr(characteristics, "relief_m", None))
@@ -589,7 +605,7 @@ def _slope_check(characteristics: Any) -> dict[str, Any]:
     if slope is None or slope <= 0:
         status = "needs_attention"
         severity = "high"
-    elif slope < 0.0005:
+    elif slope < thresholds.low_slope_m_per_m:
         status = "needs_attention"
         severity = "medium"
     elif slope > 0.05:
@@ -605,6 +621,7 @@ def _slope_check(characteristics: Any) -> dict[str, Any]:
             "main_channel_slope_m_per_m": slope,
             "main_channel_length_km": length,
             "relief_m": relief,
+            "low_slope_threshold_m_per_m": thresholds.low_slope_m_per_m,
         },
         prompt=(
             "Confirm the computed main-channel slope is plausible for the selected "
@@ -897,8 +914,197 @@ def _build_manifest(
     }
 
 
-def _pending_signoff() -> dict[str, Any]:
+def _write_or_preserve_signoff(
+    signoff_path: Path,
+    *,
+    source_fingerprint: dict[str, Any],
+    reset_signoff: bool,
+) -> None:
+    pending = _pending_signoff(source_fingerprint=source_fingerprint)
+    existing = _read_signoff(signoff_path)
+
+    if reset_signoff:
+        if existing is not None:
+            pending["previous_signoff_reset"] = _signoff_snapshot(existing, reason="explicit_reset")
+        signoff_path.write_text(_to_json(pending), encoding="utf-8")
+        return
+
+    if existing is None:
+        signoff_path.write_text(_to_json(pending), encoding="utf-8")
+        return
+
+    previous_value = _source_fingerprint_value(existing.get("source_fingerprint"))
+    current_value = _source_fingerprint_value(source_fingerprint)
+    if previous_value and previous_value != current_value:
+        if _has_human_signoff(existing):
+            pending["previous_signoff_invalidated"] = _signoff_snapshot(
+                existing,
+                reason="source_inputs_changed",
+            )
+        signoff_path.write_text(_to_json(pending), encoding="utf-8")
+        return
+
+    if _has_human_signoff(existing):
+        return
+
+    if previous_value == current_value:
+        return
+
+    signoff_path.write_text(_to_json(pending), encoding="utf-8")
+
+
+def _read_signoff(signoff_path: Path) -> Optional[dict[str, Any]]:
+    if not signoff_path.exists():
+        return None
+    try:
+        payload = json.loads(signoff_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _has_human_signoff(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("status") or "").lower()
+    return (
+        status not in {"", "pending"}
+        or bool(payload.get("reviewer"))
+        or bool(payload.get("reviewed_at"))
+        or bool(payload.get("decision"))
+        or bool(payload.get("approved_for_production"))
+    )
+
+
+def _signoff_snapshot(payload: dict[str, Any], *, reason: str) -> dict[str, Any]:
     return {
+        "reason": reason,
+        "recorded_at": _utcnow(),
+        "previous_status": payload.get("status"),
+        "previous_reviewer": payload.get("reviewer"),
+        "previous_reviewer_role": payload.get("reviewer_role"),
+        "previous_reviewed_at": payload.get("reviewed_at"),
+        "previous_decision": payload.get("decision"),
+        "previous_approved_for_production": payload.get("approved_for_production"),
+        "previous_source_fingerprint": payload.get("source_fingerprint"),
+    }
+
+
+def _signoff_source_fingerprint(
+    *,
+    watershed: Any,
+    diagnostics: dict[str, Any],
+    source_dem: Optional[Path],
+    snap_threshold_m: Optional[float],
+    min_stream_area_km2: Optional[float],
+    thresholds: QaqcThresholds,
+) -> dict[str, Any]:
+    artifacts = _artifact_paths(getattr(watershed, "artifacts", {}) or {})
+    metrics = diagnostics.get("metrics", {})
+    inputs = {
+        "source_dem": _path_identity(source_dem, include_mtime=True),
+        "snap_threshold_m": _fingerprint_scalar(snap_threshold_m),
+        "min_stream_area_km2": _fingerprint_scalar(min_stream_area_km2),
+        "thresholds": {
+            key: _fingerprint_scalar(value)
+            for key, value in asdict(thresholds).items()
+        },
+        "metrics": {
+            key: _fingerprint_scalar(metrics.get(key))
+            for key in sorted(metrics)
+            if key != "source_dem"
+        },
+        "pour_point": _geometry_summary(getattr(watershed, "pour_point", None)),
+        "basin": _geodataframe_summary(getattr(watershed, "basin", None)),
+        "streams": _geodataframe_summary(getattr(watershed, "streams", None)),
+        "subbasins": _geodataframe_summary(getattr(watershed, "subbasins", None)),
+        "artifacts": {
+            key: _path_identity(path, include_mtime=False)
+            for key, path in sorted(artifacts.items())
+        },
+    }
+    encoded = json.dumps(inputs, sort_keys=True, default=_json_default)
+    return {
+        "algorithm": "sha256",
+        "value": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+        "inputs": inputs,
+    }
+
+
+def _source_fingerprint_value(value: Any) -> Optional[str]:
+    if isinstance(value, dict):
+        digest = value.get("value")
+        return str(digest) if digest else None
+    return str(value) if value else None
+
+
+def _path_identity(path: Optional[Path], *, include_mtime: bool) -> Optional[dict[str, Any]]:
+    if path is None:
+        return None
+    path = Path(path)
+    identity: dict[str, Any] = {"path": str(path)}
+    try:
+        stat = path.stat()
+    except OSError:
+        identity["exists"] = False
+        return identity
+    identity.update({"exists": True, "size_bytes": stat.st_size})
+    if include_mtime:
+        identity["mtime_ns"] = stat.st_mtime_ns
+    return identity
+
+
+def _geodataframe_summary(gdf: Any) -> dict[str, Any]:
+    summary: dict[str, Any] = {"count": _safe_len(gdf)}
+    if summary["count"] == 0:
+        return summary
+    summary["crs"] = str(getattr(gdf, "crs", None))
+    try:
+        geom = _union_geometry(gdf)
+    except Exception:
+        geom = None
+    summary.update(_geometry_summary(geom) or {})
+    return summary
+
+
+def _geometry_summary(geom: Any) -> Optional[dict[str, Any]]:
+    if geom is None or getattr(geom, "is_empty", False):
+        return None
+    summary: dict[str, Any] = {
+        "geom_type": getattr(geom, "geom_type", None),
+        "bounds": _rounded_bounds(getattr(geom, "bounds", None)),
+        "area": _fingerprint_scalar(getattr(geom, "area", None)),
+        "length": _fingerprint_scalar(getattr(geom, "length", None)),
+    }
+    if isinstance(geom, Point):
+        summary["x"] = _fingerprint_scalar(geom.x)
+        summary["y"] = _fingerprint_scalar(geom.y)
+    return summary
+
+
+def _rounded_bounds(bounds: Any) -> Optional[list[float]]:
+    values = _bounds_tuple(bounds)
+    if values is None:
+        return None
+    return [_fingerprint_scalar(value) for value in values]
+
+
+def _fingerprint_scalar(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    number = _float_or_none(value)
+    if number is not None:
+        return round(number, 9)
+    if isinstance(value, (str, bool)) or value is None:
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _pending_signoff(
+    *,
+    source_fingerprint: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    payload = {
         "schema_version": SIGNOFF_SCHEMA_VERSION,
         "status": "pending",
         "reviewer": None,
@@ -913,6 +1119,9 @@ def _pending_signoff() -> dict[str, Any]:
             "reason": "Human engineering signoff is required before production promotion.",
         },
     }
+    if source_fingerprint is not None:
+        payload["source_fingerprint"] = source_fingerprint
+    return payload
 
 
 def _review_prompts_markdown(diagnostics: dict[str, Any]) -> str:
