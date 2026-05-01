@@ -101,6 +101,33 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 
 ---
 
+## Pilot-Channel Terrain-Mod Proposals
+
+`pipeline/pilot_channel.py` generates conservative LiDAR pilot-channel
+terrain-mod proposal packages from TauDEM centerlines, stream order, drainage
+area, and sampled terrain-profile diagnostics. It writes review artifacts only:
+JSON handoff metadata, CSV STA/ELEV profiles, segment cut/fill summaries,
+reviewer flags, a centerline artifact, plan/profile figures, and an HTML report.
+
+The workflow is proposal-only. It does not edit production DEMs, RASMapper
+terrain-mod layers, HEC-RAS geometry, or compiled HDF artifacts. Every package
+records that human engineering signoff is required before production use and
+points to the HEC-Commander LiDAR terrain-mod method note:
+<https://github.com/gpt-cmdr/HEC-Commander/blob/main/Blog/5._Terrain_Mod_Your_LIDAR_defined_Channels.md>.
+
+CLI example from prepared TauDEM artifacts:
+
+```bash
+python pipeline/pilot_channel.py \
+  --dem path/to/dem_watershed.tif \
+  --centerlines path/to/river_centerlines.gpkg \
+  --ad8 path/to/ad8.tif \
+  --basin path/to/watershed_boundary.gpkg \
+  --output path/to/pilot_channel_review
+```
+
+---
+
 ## Architecture
 
 ### Linux Geometry Preprocessing (as of 2026-03)

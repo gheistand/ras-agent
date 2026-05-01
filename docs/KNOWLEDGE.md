@@ -214,6 +214,36 @@ Immediate boundary-condition direction:
   update the base set after expert review, then define a limited multi-parameter
   validation matrix with high-resolution sweeps only for influential parameters.
 
+## LiDAR-Defined Channel Terrain-Mod Proposal Workflow 2026-05-01
+
+CLB-357 adds a conservative first-pass proposal workflow for LiDAR-defined
+channels whose sampled low-flow profiles are flat, noisy, or abrupt enough to
+hurt 2D BLE stability and runtime. The workflow belongs in `ras-agent` as an
+Illinois-first orchestration and human-review package, while any reusable
+HEC-RAS terrain-mod application primitive belongs upstream in `ras-commander`.
+
+Accepted constraints:
+
+- Use TauDEM centerlines, stream order, D8 drainage area, and sampled terrain
+  slope diagnostics to identify candidate pilot-channel terrain modifications.
+- Emit proposal artifacts only: centerline layer, STA/ELEV profile table,
+  segment summary, reviewer flags, plan/profile figures, HTML report, and JSON
+  handoff metadata.
+- Do not silently mutate production terrain, RASMapper terrain modifications,
+  HEC-RAS geometry, or compiled HDF artifacts.
+- Require human engineering signoff before any proposal is applied to a
+  production terrain-mod layer.
+- Make positive longitudinal profile slope checks explicit in the segment
+  summary and report.
+- Flag abrupt drops, flat or reverse-slope intervals, excessive cuts, and
+  uncertain channel evidence.
+- Reference the HEC-Commander method note:
+  https://github.com/gpt-cmdr/HEC-Commander/blob/main/Blog/5._Terrain_Mod_Your_LIDAR_defined_Channels.md
+
+Implementation entry point:
+
+- `pipeline/pilot_channel.py`
+
 ### Manning's n Table (NLCD classes → standard IL values)
 - Open water: 0.035
 - Developed low intensity: 0.080
