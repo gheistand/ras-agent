@@ -28,6 +28,11 @@ from typing import Optional
 
 import h5py
 
+try:
+    import hecras_readiness as _hecras_readiness
+except ImportError:  # pragma: no cover - optional in lean test environments
+    _hecras_readiness = None
+
 logger = logging.getLogger(__name__)
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -252,12 +257,19 @@ def _dos2unix_dir(project_dir: Path) -> None:
                 logger.warning(f"dos2unix skipped {fpath.name}: {exc}")
 
 
-def _prepare_run(project_dir: Path, plan_hdf: Path) -> Path:
+def _prepare_run(
+    project_dir: Path,
+    plan_hdf: Path,
+    geom_ext: str = "g01",
+    pre_run_gate: bool = True,
+    readiness_report_dir: Optional[Path] = None,
+) -> Path:
     """
     Prepare the project directory for a RasUnsteady run.
 
-    1. dos2unix all .b## and .g## text files in project_dir.
-    2. Copy plan_hdf → plan_hdf.stem + '.tmp.hdf', then delete the Results
+    1. Verify/regenerate compiled geometry, terrain, and plan artifacts.
+    2. dos2unix all .b## and .g## text files in project_dir.
+    3. Copy plan_hdf -> plan_hdf.stem + '.tmp.hdf', then delete the Results
        group from the copy so RasUnsteady starts with a clean slate.
 
     Args:
@@ -271,6 +283,26 @@ def _prepare_run(project_dir: Path, plan_hdf: Path) -> Path:
         FileNotFoundError: If plan_hdf does not exist.
         OSError:           On copy or HDF write failure.
     """
+    if pre_run_gate:
+        if _hecras_readiness is None:
+            raise RuntimeError(
+                "hecras_readiness module is unavailable; cannot verify HEC-RAS "
+                "compiled artifacts before compute"
+            )
+        report_path = project_dir / f"{plan_hdf.stem}_readiness.json"
+        if readiness_report_dir is not None:
+            report_path = Path(readiness_report_dir) / f"{plan_hdf.stem}_readiness.json"
+        report = _hecras_readiness.check_hecras_readiness(
+            project_dir=project_dir,
+            plan_hdf=plan_hdf,
+            geom_ext=geom_ext,
+            regenerate=True,
+            write_report=True,
+            report_path=report_path,
+        )
+        if not report.ready:
+            raise _hecras_readiness.HecRasReadinessError(report)
+
     _dos2unix_dir(project_dir)
 
     # Build .tmp.hdf path: Muncie.p04.hdf → Muncie.p04.tmp.hdf
@@ -411,6 +443,8 @@ def run_job(
     logs_dir: Optional[Path] = None,
     preprocess_mode: Optional[str] = None,
     slurm_config=None,   # Optional[SlurmConfig] — if provided and execution_mode='slurm'
+    pre_run_gate: bool = True,
+    readiness_report_dir: Optional[Path] = None,
 ) -> bool:
     """
     Execute a single queued job.
@@ -441,6 +475,10 @@ def run_job(
                           the job is submitted to the NCSA Illinois Computes cluster
                           instead of running locally. Falls back to local execution
                           with a warning if slurm_config is None.
+        pre_run_gate: Verify/regenerate HEC-RAS compiled artifacts before
+                      non-mock compute.
+        readiness_report_dir:
+                      Optional directory for pre-run readiness JSON reports.
 
     Returns:
         True on success, False on error.
@@ -600,7 +638,13 @@ def run_job(
                     tmp_hdf = _run_linux_preprocess(project_dir, plan_hdf, log_path, env)
                 else:
                     # "windows" or "skip": geometry already computed; strip Results + run
-                    tmp_hdf = _prepare_run(project_dir, plan_hdf)
+                    tmp_hdf = _prepare_run(
+                        project_dir,
+                        plan_hdf,
+                        geom_ext=geom_ext,
+                        pre_run_gate=pre_run_gate,
+                        readiness_report_dir=readiness_report_dir,
+                    )
             except Exception as exc:
                 err_msg = f"Pre-run preparation failed: {exc}"
                 logger.error(f"Job {job_id}: {err_msg}")
@@ -728,6 +772,8 @@ def run_queue(
     logs_dir: Optional[Path] = None,
     preprocess_mode: Optional[str] = None,
     slurm_config=None,   # Optional[SlurmConfig]
+    pre_run_gate: bool = True,
+    readiness_report_dir: Optional[Path] = None,
 ) -> None:
     """
     Process all queued jobs, running up to max_parallel concurrently.
@@ -746,6 +792,10 @@ def run_queue(
                           Pass ``None`` to use each job's stored value.
         slurm_config:     Optional SlurmConfig passed through to run_job() for SLURM
                           execution. Pass None to use local execution.
+        pre_run_gate: Verify/regenerate HEC-RAS compiled artifacts before
+                      each non-mock job.
+        readiness_report_dir:
+                      Optional directory for pre-run readiness JSON reports.
     """
     _init_db(db_path)
     logger.info(f"Starting queue runner (max_parallel={max_parallel}, mock={mock})")
@@ -762,8 +812,16 @@ def run_queue(
         with ThreadPoolExecutor(max_workers=max_parallel) as pool:
             futures = {
                 pool.submit(
-                    run_job, job["id"], ras_exe_dir, mock, db_path, logs_dir,
-                    preprocess_mode, slurm_config
+                    run_job,
+                    job["id"],
+                    ras_exe_dir,
+                    mock=mock,
+                    db_path=db_path,
+                    logs_dir=logs_dir,
+                    preprocess_mode=preprocess_mode,
+                    slurm_config=slurm_config,
+                    pre_run_gate=pre_run_gate,
+                    readiness_report_dir=readiness_report_dir,
                 ): job["id"]
                 for job in batch
             }

@@ -29,6 +29,16 @@ except ImportError:  # pragma: no cover - fallback for lean test environments
 import numpy as np
 
 try:
+    import runner as _runner
+except ImportError:
+    _runner = None
+
+try:
+    import hecras_readiness as _hecras_readiness
+except ImportError:
+    _hecras_readiness = None
+
+try:
     import terrain as _terrain
 except ImportError:
     _terrain = None
@@ -63,11 +73,6 @@ except ImportError:
     HecRasProject = Any
 
 try:
-    import runner as _runner
-except ImportError:
-    _runner = None
-
-try:
     import results as _results
 except ImportError:
     _results = None
@@ -98,6 +103,7 @@ class OrchestratorResult:
     status: str                  # "complete" | "partial" | "failed"
     errors: list                 # non-fatal errors encountered
     archive_dir: Optional[Path] = None  # ras2cng GeoParquet archive (Stage 7b)
+    pre_run_readiness: Optional[list[dict]] = None
 
 
 class OrchestratorError(RuntimeError):
@@ -336,6 +342,7 @@ def run_watershed(
         duration_sec=0.0,
         status="partial",
         errors=[],
+        pre_run_readiness=None,
     )
 
     # ── Stage 1: Terrain ──────────────────────────────────────────────────────
@@ -495,6 +502,34 @@ def run_watershed(
     )
     try:
         runner_mod = _require_module(_runner, "runner")
+        if not mock:
+            readiness_mod = _require_module(
+                _hecras_readiness,
+                "hecras_readiness",
+            )
+            readiness_reports = []
+            for i, rp in enumerate(return_periods, 1):
+                rp_plan_hdf = _plan_hdf_for_rp(result.project, i)
+                report = readiness_mod.check_hecras_readiness(
+                    project_dir=result.project.project_dir,
+                    plan_hdf=rp_plan_hdf,
+                    geom_ext=result.project.geom_ext,
+                    regenerate=True,
+                    write_report=True,
+                    report_path=(
+                        result.project.project_dir
+                        / f"{rp_plan_hdf.stem}_readiness.json"
+                    ),
+                )
+                readiness_reports.append(report.to_dict())
+                if not report.ready:
+                    raise readiness_mod.HecRasReadinessError(report)
+                logger.info(
+                    f"[Stage 6/7] Pre-run readiness T={rp}yr — {report.status}"
+                )
+            result.pre_run_readiness = readiness_reports
+            result.project.metadata["pre_run_readiness"] = readiness_reports
+
         for i, rp in enumerate(return_periods, 1):
             rp_plan_hdf = _plan_hdf_for_rp(result.project, i)
             job_id = runner_mod.enqueue_job(
@@ -509,14 +544,17 @@ def run_watershed(
             result.job_ids.append(job_id)
 
         exe_dir = ras_exe_dir if ras_exe_dir is not None else Path("/nonexistent")
-        runner_mod.run_queue(
-            ras_exe_dir=exe_dir,
-            max_parallel=max_parallel,
-            mock=mock,
-            db_path=db_path,
-            logs_dir=logs_dir,
-            slurm_config=slurm_config,
-        )
+        run_queue_kwargs = {
+            "ras_exe_dir": exe_dir,
+            "max_parallel": max_parallel,
+            "mock": mock,
+            "db_path": db_path,
+            "logs_dir": logs_dir,
+            "slurm_config": slurm_config,
+        }
+        if not mock:
+            run_queue_kwargs["pre_run_gate"] = False
+        runner_mod.run_queue(**run_queue_kwargs)
         logger.info(
             f"[Stage 6/7] Execution complete — "
             f"{len(result.job_ids)} jobs processed"
