@@ -58,6 +58,32 @@ def test_refresh_context_layers_delegates_to_context_helper(tmp_path, monkeypatc
     assert result["analysis_extent_summary"] == tmp_path / "analysis_extent_summary.json"
 
 
+def test_write_station_precip_qaqc_artifacts_delegates_to_precip_helper(tmp_path, monkeypatch):
+    captured = {}
+
+    def _fake_build(**kwargs):
+        captured.update(kwargs)
+        return {"artifacts": {"station_qaqc_json": tmp_path / "08_report" / "station_precip_qaqc.json"}}
+
+    monkeypatch.setattr(workspace.precip_qaqc, "build_station_precip_qaqc", _fake_build)
+
+    result = workspace.write_station_precip_qaqc_artifacts(
+        tmp_path,
+        stations=[{"station_id": "GHCND:A", "observed_depth_in": 4.0}],
+        event_start="2024-07-14T00:00",
+        event_end="2024-07-15T00:00",
+        gridded_source="AORC",
+        gridded_depth_in=3.8,
+        noaa_token_available=True,
+        search_radius_mi=25.0,
+    )
+
+    assert captured["output_dir"] == tmp_path / "08_report"
+    assert captured["gridded_source"] == "AORC"
+    assert captured["stations"][0]["station_id"] == "GHCND:A"
+    assert result["artifacts"]["station_qaqc_json"].name == "station_precip_qaqc.json"
+
+
 def test_gather_base_data_delegates_to_hms_builder(tmp_path, monkeypatch):
     captured = {}
 
