@@ -485,6 +485,117 @@ def test_remove_geometry_hdfs_empty_dir(tmp_path):
     assert count == 0
 
 
+# ── Tests: Storage Area 2D format support ────────────────────────────────────
+
+SAMPLE_STORAGE_AREA_GEOM = """\
+Geom Title=Test Geometry
+Program Version=6.60
+
+Storage Area=Mud Creek       ,,
+Storage Area Surface Line= 4
+579232.667593894635304.752861105
+579716.601763544635278.493759864
+579716.601763544635778.493759864
+579232.667593894635304.752861105
+Storage Area Type= 1
+Storage Area Area=
+Storage Area Min Elev=
+Storage Area Is2D=-1
+Storage Area Point Generation Data=,,250,250
+Storage Area 2D Points= 2
+579088.843868944635179.752861105579338.843868944635179.752861105
+Storage Area 2D PointsPerimeterTime=18Dec2025 15:57:11
+Storage Area Mannings=0.06
+"""
+
+
+def test_detect_geom_format_storage_area(tmp_path):
+    """_detect_geom_format returns 'storage_area' when Storage Area Is2D=-1 is present."""
+    f = tmp_path / "project.g01"
+    f.write_text(SAMPLE_STORAGE_AREA_GEOM)
+    assert mb._detect_geom_format(f) == "storage_area"
+
+
+def test_detect_geom_format_2d_flow_area(tmp_path):
+    """_detect_geom_format returns '2d_flow_area' for modern 2D Flow Area format."""
+    f = _write_sample_geom(tmp_path)
+    assert mb._detect_geom_format(f) == "2d_flow_area"
+
+
+def test_get_2d_area_name_storage_area(tmp_path):
+    """_get_2d_area_name_from_geometry_file parses Storage Area 2D format correctly."""
+    f = tmp_path / "project.g01"
+    f.write_text(SAMPLE_STORAGE_AREA_GEOM)
+    name = mb._get_2d_area_name_from_geometry_file(f)
+    assert name == "Mud Creek"
+
+
+def test_write_perimeter_storage_area_format(tmp_path):
+    """_write_perimeter_to_geometry_file handles Storage Area 2D format."""
+    f = tmp_path / "project.g01"
+    f.write_text(SAMPLE_STORAGE_AREA_GEOM)
+
+    new_coords = [
+        (579000.0, 635100.0),
+        (579500.0, 635100.0),
+        (579500.0, 635600.0),
+        (579250.0, 635800.0),
+        (579000.0, 635600.0),
+    ]
+    result = mb._write_perimeter_to_geometry_file(f, "Mud Creek", new_coords)
+    assert result is True
+
+    content = f.read_text()
+
+    # Closed polygon: 5 coords + 1 closing = 6
+    assert "Storage Area Surface Line= 6" in content
+
+    # Coordinates must be in 16-char fixed-width format (no commas)
+    lines = content.splitlines()
+    coord_lines = [
+        l for l in lines
+        if len(l) == 32 and l[0].isdigit()
+    ]
+    assert len(coord_lines) == 6, (
+        f"Expected 6 coord lines (32 chars each), got {len(coord_lines)}"
+    )
+    for cl in coord_lines:
+        assert "," not in cl, f"Storage Area coord line must not contain comma: {cl!r}"
+
+    # Original area header still present
+    assert "Storage Area=Mud Creek" in content
+
+    # Must NOT contain 2D Flow Area perimeter header
+    assert "2D Flow Area Perimeter=" not in content
+
+    # Backup created
+    assert (tmp_path / "project.g01.bak").exists()
+
+
+def test_write_perimeter_2d_flow_area_format(tmp_path):
+    """_write_perimeter_to_geometry_file uses comma-space format for 2D Flow Area files."""
+    geom = _write_sample_geom(tmp_path)
+    coords = [(300000.0, 4400000.0), (301000.0, 4400000.0), (301000.0, 4401000.0)]
+    result = mb._write_perimeter_to_geometry_file(geom, "Perimeter 1", coords)
+    assert result is True
+
+    content = geom.read_text()
+
+    # Must use comma-space format
+    assert "2D Flow Area Perimeter= 4" in content
+    coord_lines = [
+        l for l in content.splitlines()
+        if "," in l and "Flow" not in l and "Mann" not in l
+        and "Title" not in l and "Version" not in l
+    ]
+    assert len(coord_lines) == 4
+    for cl in coord_lines:
+        assert "," in cl, f"2D Flow Area coord line must contain comma: {cl!r}"
+
+    # Storage Area Surface Line must NOT appear
+    assert "Storage Area Surface Line=" not in content
+
+
 def test_grid_shift_avoids_voronoi_conflicts():
     """Grid shift search finds a configuration without VB-vertex conflicts."""
     pytest.importorskip("shapely")
