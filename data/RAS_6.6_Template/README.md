@@ -4,13 +4,14 @@ This folder is the starter HEC-RAS 6.6 project scaffold currently bundled with `
 
 Current contents:
 
-- `TEMPLATE.prj`
 - `TEMPLATE.rasmap`
 
 Current status:
 
 - This is a real seed project scaffold, not just a placeholder path.
 - It is not yet a clone-ready 1D or 2D template.
+- `ras-agent` generates a minimal project `.prj` file when cloning this
+  scaffold until a real `TEMPLATE.prj` is added.
 - `template_clone` should not rely on this folder until it has at least the geometry, flow, and plan files needed for the intended template type.
 
 Recommended next additions for a 2D seed template:

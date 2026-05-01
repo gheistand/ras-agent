@@ -1184,7 +1184,10 @@ def _scaffold_project_from_template(
     src_rasmap = project_dir / "TEMPLATE.rasmap"
     dst_rasmap = project_dir / f"{project_name}.rasmap"
     if src_rasmap.exists():
-        dst_rasmap.write_text(src_rasmap.read_text(encoding="utf-8"), encoding="utf-8")
+        dst_rasmap.write_text(
+            src_rasmap.read_text(encoding="utf-8").replace("TEMPLATE", project_name),
+            encoding="utf-8",
+        )
         src_rasmap.unlink()
     else:
         dst_rasmap.write_text(
