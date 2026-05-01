@@ -28,6 +28,7 @@ data/processed/
 *.shx
 *.prj
 *.geojson
+!data/RAS_6.6_Template/TEMPLATE.prj
 
 # HEC-RAS project files (keep templates in data/sample/ only)
 *.p0*.hdf

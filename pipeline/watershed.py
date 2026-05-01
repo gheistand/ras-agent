@@ -74,6 +74,9 @@ def delineate_watershed(
     working_dir: Optional[Path] = None,
     taudem_executable_dir: Optional[Path] = None,
     taudem_processes: int = 1,
+    emit_qaqc_bundle: bool = True,
+    qaqc_detail_level: str = "first_pass",
+    qaqc_output_dir: Optional[Path] = None,
 ) -> WatershedResult:
     """
     Delineate a watershed from a DEM given a pour point (outlet).
@@ -87,6 +90,9 @@ def delineate_watershed(
         working_dir:           Directory for TauDEM intermediate artifacts
         taudem_executable_dir: Optional TauDEM executable directory override
         taudem_processes:      Number of TauDEM MPI processes to request
+        emit_qaqc_bundle:      If True, write reviewer QAQC bundle artifacts
+        qaqc_detail_level:     "first_pass" or "production_review"
+        qaqc_output_dir:       Optional QAQC bundle directory
 
     Returns:
         WatershedResult with polygon, streams, subbasins, and model-building
@@ -153,66 +159,81 @@ def delineate_watershed(
     net = work_dir / "net.shp"
     w = work_dir / "w.tif"
 
-    TauDem.pit_remove(
-        dem_path,
-        fel,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands = []
+    taudem_commands.append(
+        TauDem.pit_remove(
+            dem_path,
+            fel,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
-    TauDem.d8_flow_dir(
-        fel,
-        p,
-        sd8,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands.append(
+        TauDem.d8_flow_dir(
+            fel,
+            p,
+            sd8,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
-    TauDem.area_d8(
-        p,
-        ad8,
-        edge_contamination=False,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands.append(
+        TauDem.area_d8(
+            p,
+            ad8,
+            edge_contamination=False,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
-    TauDem.threshold(
-        ad8,
-        src,
-        threshold_cells,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands.append(
+        TauDem.threshold(
+            ad8,
+            src,
+            threshold_cells,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
-    TauDem.move_outlets_to_streams(
-        p,
-        src,
-        outlet_path,
-        snapped_outlet_path,
-        maxdist=snap_cells,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands.append(
+        TauDem.move_outlets_to_streams(
+            p,
+            src,
+            outlet_path,
+            snapped_outlet_path,
+            maxdist=snap_cells,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
-    TauDem.grid_net(
-        p,
-        plen,
-        tlen,
-        gord,
-        outletfile=snapped_outlet_path,
-        maskfile=src,
-        threshold=1,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands.append(
+        TauDem.grid_net(
+            p,
+            plen,
+            tlen,
+            gord,
+            outletfile=snapped_outlet_path,
+            maskfile=src,
+            threshold=1,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
-    TauDem.stream_net(
-        fel,
-        p,
-        ad8,
-        src,
-        ord_grid,
-        tree,
-        coord,
-        net,
-        w,
-        outletfile=snapped_outlet_path,
-        executable_dir=taudem_executable_dir,
-        processes=taudem_processes,
+    taudem_commands.append(
+        TauDem.stream_net(
+            fel,
+            p,
+            ad8,
+            src,
+            ord_grid,
+            tree,
+            coord,
+            net,
+            w,
+            outletfile=snapped_outlet_path,
+            executable_dir=taudem_executable_dir,
+            processes=taudem_processes,
+        )
     )
 
     streams_gdf = _read_stream_network(net, dem_crs)
@@ -274,7 +295,7 @@ def delineate_watershed(
         len(subbasins_gdf),
     )
 
-    return WatershedResult(
+    result = WatershedResult(
         basin=basin_gdf,
         streams=streams_gdf,
         subbasins=subbasins_gdf,
@@ -285,6 +306,30 @@ def delineate_watershed(
         dem_clipped=clipped_dem,
         artifacts=artifacts,
     )
+
+    if emit_qaqc_bundle:
+        from taudem_qaqc import generate_taudem_qaqc_bundle
+
+        bundle_dir = Path(qaqc_output_dir) if qaqc_output_dir else work_dir / "qaqc_bundle"
+        qaqc_paths = generate_taudem_qaqc_bundle(
+            result,
+            bundle_dir,
+            detail_level=qaqc_detail_level,
+            source_dem=dem_path,
+            snap_threshold_m=snap_threshold_m,
+            min_stream_area_km2=min_stream_area_km2,
+            taudem_commands=taudem_commands,
+            notes={
+                "taudem_processes": taudem_processes,
+                "snap_threshold_m": snap_threshold_m,
+                "snap_threshold_cells": snap_cells,
+                "min_stream_area_km2": min_stream_area_km2,
+                "threshold_cells": threshold_cells,
+            },
+        )
+        result.artifacts.update({f"qaqc_{key}": path for key, path in qaqc_paths.items()})
+
+    return result
 
 
 def _write_outlet_shapefile(outlet_path: Path, crs, x: float, y: float) -> None:
@@ -473,6 +518,14 @@ if __name__ == "__main__":
     parser.add_argument("--stream-area", type=float, default=2.0, help="Minimum stream area in km^2")
     parser.add_argument("--taudem-dir", default=None, help="Optional TauDEM executable directory")
     parser.add_argument("--processes", type=int, default=1, help="TauDEM MPI process count")
+    parser.add_argument("--no-qaqc", action="store_true", help="Skip TauDEM delineation QAQC bundle generation")
+    parser.add_argument(
+        "--qaqc-detail",
+        default="first_pass",
+        choices=["first_pass", "production_review"],
+        help="QAQC bundle detail level",
+    )
+    parser.add_argument("--qaqc-output", type=Path, default=None, help="Optional QAQC bundle output directory")
     args = parser.parse_args()
 
     result = delineate_watershed(
@@ -483,6 +536,9 @@ if __name__ == "__main__":
         min_stream_area_km2=args.stream_area,
         taudem_executable_dir=Path(args.taudem_dir) if args.taudem_dir else None,
         taudem_processes=args.processes,
+        emit_qaqc_bundle=not args.no_qaqc,
+        qaqc_detail_level=args.qaqc_detail,
+        qaqc_output_dir=args.qaqc_output,
     )
     paths = save_watershed(result, Path(args.output))
     chars = result.characteristics
