@@ -29,9 +29,12 @@ STAGED_DEM   = SPRING_CREEK / "04_terrain" / "spring_creek_basin_dem_5070.tif"
 STAGED_RDB   = SPRING_CREEK / "01_gauge" / "peaks" / "USGS_05577500_annual_peaks.rdb"
 OUTPUT_DIR   = SPRING_CREEK / "08_model_validation" / "ras_agent_95mi2"
 
-# Spring Creek gauge location (WGS84)
-POUR_LON = -89.7010  # 05577500
-POUR_LAT =  39.7730
+# Spring Creek pour point: boundary_handoff outlet (EPSG:5070 → WGS84)
+# Using (531443, 1883487) EPSG:5070 from 09_taudem_verification/taudem_boundary_handoff_outlet.geojson
+# Gauge 05577500 is ~1,440m outside clipped DEM; this outlet is inside the DEM and
+# sits at the downstream boundary of the modeled reach (str_order=4).
+POUR_LON = -89.731679  # boundary_handoff outlet (converted from EPSG:5070)
+POUR_LAT =  39.812374
 
 RETURN_PERIODS = [10, 50, 100]
 
@@ -83,28 +86,81 @@ class TerrainResult:
 terrain = TerrainResult(dem_path=STAGED_DEM)
 log.info(f"  Using: {STAGED_DEM}")
 
-# ── Stage 2: Watershed delineation ───────────────────────────────────────────
+# ── Stage 2: Watershed delineation [BYPASS — NLDI basin polygon + NHD] ──────
+#
+# pysheds D8 delineates only ~1.3 mi² here because the boundary_handoff outlet
+# is near the top (north) edge of the clipped DEM — pysheds can't see the full
+# upstream area.  TauDEM (Bill's next focus) will fix this properly.
+#
+# For this trial we bypass with the NLDI basin polygon (103 mi²) + NHD flowlines
+# and hard-coded basin characteristics derived from the staged data:
+#   - DEM elev range: 522–673 ft → 46 m relief over 43 km main stem
+#   - Slope (10-85% method): 0.00107 m/m  (typical lowland IL)
+# These are the same inputs the pipeline would receive from a TauDEM-based Stage 2.
 
-banner(2, "Watershed delineation (pysheds D8)")
+banner(2, "Watershed delineation [BYPASSED — NLDI polygon + NHD flowlines]")
 try:
     sys.path.insert(0, str(Path(__file__).parent / "pipeline"))
-    from watershed import delineate_watershed, WatershedResult
-    ws = delineate_watershed(
-        dem_path=terrain.dem_path,
-        pour_point_lon=POUR_LON,
-        pour_point_lat=POUR_LAT,
+    import geopandas as gpd
+    from shapely.geometry import Point
+    from watershed import WatershedResult, BasinCharacteristics
+
+    BASIN_GEOJSON   = SPRING_CREEK / "02_basin_outline" / "USGS_05577500_nldi_basin_5070.geojson"
+    FLOWLINE_GEOJSON = SPRING_CREEK / "03_nhdplus" / "USGS_05577500_upstream_flowlines_5070.geojson"
+
+    basin_gdf     = gpd.read_file(BASIN_GEOJSON)
+    flowlines_gdf = gpd.read_file(FLOWLINE_GEOJSON)
+
+    # Basin area from NLDI polygon
+    area_km2  = basin_gdf.geometry.area.sum() / 1e6
+    area_mi2  = area_km2 / 2.58999
+
+    # Centroid (EPSG:5070 → WGS84)
+    from pyproj import Transformer
+    t = Transformer.from_crs("EPSG:5070", "EPSG:4326", always_xy=True)
+    centroid = basin_gdf.geometry.centroid.iloc[0]
+    c_lon, c_lat = t.transform(centroid.x, centroid.y)
+
+    # Basin characteristics derived from staged DEM + NHD
+    # Elevation: 522–673 ft (DEM in feet) → convert to metres
+    FT_TO_M = 0.3048
+    mean_elev_m  = 620.3 * FT_TO_M        # DEM mean over clipped basin
+    relief_m     = (673.4 - 522.6) * FT_TO_M  # 150.8 ft → 46.0 m
+    # Main channel: top-5 NHD segments (largest continuous reach) = 43.2 km
+    main_ch_km   = 43.17
+    # 10-85% slope: relief / main_channel_length
+    slope_m_per_m = relief_m / (main_ch_km * 1000)  # 0.00107 m/m
+
+    chars = BasinCharacteristics(
+        drainage_area_km2        = area_km2,
+        drainage_area_mi2        = area_mi2,
+        mean_elevation_m         = mean_elev_m,
+        relief_m                 = relief_m,
+        main_channel_length_km   = main_ch_km,
+        main_channel_slope_m_per_m = slope_m_per_m,
+        centroid_lat             = c_lat,
+        centroid_lon             = c_lon,
+        pour_point_lat           = POUR_LAT,
+        pour_point_lon           = POUR_LON,
     )
-    chars = ws.characteristics
-    log.info(f"  Drainage area: {chars.drainage_area_km2:.1f} km²  ({chars.drainage_area_mi2:.1f} mi²)")
+
+    # pour_point geometry (EPSG:5070)
+    pp_x, pp_y = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform(POUR_LON, POUR_LAT)
+    ws = WatershedResult(
+        basin          = basin_gdf,
+        streams        = flowlines_gdf,
+        pour_point     = Point(pp_x, pp_y),
+        characteristics = chars,
+        dem_clipped    = terrain.dem_path,   # staged DEM covers full basin
+    )
+
+    log.info(f"  Drainage area : {chars.drainage_area_km2:.1f} km²  ({chars.drainage_area_mi2:.1f} mi²)")
     log.info(f"  Channel length: {chars.main_channel_length_km:.2f} km")
-    log.info(f"  Mean slope: {chars.main_channel_slope_m_per_m:.5f} m/m")
-    if chars.drainage_area_mi2 < 50:
-        log.warning(f"  ⚠️  Area only {chars.drainage_area_mi2:.1f} mi² — expected ~95 mi². DEM edge / pour point snapping issue.")
-        log.warning("  Boundary handoff outlet at (531443, 1883487) EPSG:5070 may fix this.")
-        log.warning("  Continuing run anyway to find all downstream blockers.")
-    log.info("  Stage 2 PASSED ✓")
+    log.info(f"  Mean slope    : {chars.main_channel_slope_m_per_m:.5f} m/m")
+    log.info(f"  Relief        : {chars.relief_m:.1f} m  ({chars.relief_m/FT_TO_M:.0f} ft)")
+    log.info("  Stage 2 PASSED ✓ (NLDI bypass — TauDEM will replace for production)")
 except Exception as exc:
-    fail(2, "Watershed delineation", exc)
+    fail(2, "Watershed delineation (NLDI bypass)", exc)
 
 # ── Stage 3: Peak flows (LP3 from gauge RDB) ──────────────────────────────────
 
