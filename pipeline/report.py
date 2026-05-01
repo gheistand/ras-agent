@@ -94,6 +94,23 @@ def _status_span(status: str) -> str:
     return f'<span class="status-{status}">{status.upper()}</span>'
 
 
+def _water_source_from_result(result) -> dict:
+    water_source = getattr(result, "water_source", None)
+    if not water_source and getattr(result, "project", None) is not None:
+        water_source = result.project.metadata.get("water_source", {})
+    return water_source or {
+        "mode": "unknown",
+        "contract_status": "not_recorded",
+        "production_ready": False,
+        "provenance": {},
+        "diagnostics": ["No water-source metadata was recorded for this run."],
+    }
+
+
+def _bool_label(value: object) -> str:
+    return "yes" if bool(value) else "no"
+
+
 # ── Plot Generation ───────────────────────────────────────────────────────────
 
 def _plot_hydrographs(hydro_set, output_periods: list) -> str:
@@ -276,6 +293,27 @@ def _section_peak_flows(result) -> str:
     return html + _html_table(["Return Period", "Statistic", "Peak Flow (CFS)"], rows)
 
 
+def _section_water_source(result) -> str:
+    html = "<h2>Water Source Readiness</h2>"
+    water_source = _water_source_from_result(result)
+    provenance = water_source.get("provenance") or {}
+    diagnostics = water_source.get("diagnostics") or []
+    warnings = water_source.get("warnings") or []
+    diagnostic_text = "; ".join(str(item) for item in diagnostics[:3]) or "None"
+    warning_text = "; ".join(str(item) for item in warnings[:3]) or "None"
+    rows = [
+        ["Mode", water_source.get("mode", "unknown")],
+        ["Contract status", water_source.get("contract_status", "not_recorded")],
+        ["Production ready", _bool_label(water_source.get("production_ready"))],
+        ["Screening only", _bool_label(water_source.get("screening_only"))],
+        ["Provenance source", provenance.get("source") or provenance.get("dataset") or "not recorded"],
+        ["Validation artifact", water_source.get("validation_path") or "not recorded"],
+        ["Diagnostics", diagnostic_text],
+        ["Warnings", warning_text],
+    ]
+    return html + _html_table(["Item", "Value"], rows)
+
+
 def _section_hydrographs(result, include_plots: bool) -> str:
     html = "<h2>Hydrograph Plots</h2>"
     if not include_plots:
@@ -396,6 +434,7 @@ def generate_report(
 
     sections = [
         _section_header(result, git_commit, run_ts),
+        _section_water_source(result),
         _section_basin(result),
         _section_peak_flows(result),
         _section_hydrographs(result, include_plots),
@@ -739,6 +778,86 @@ def validate_workspace(workspace_dir: Path) -> dict:
     }
 
 
+def _coerce_workspace_water_source(value, *, source: str) -> Optional[dict]:
+    if not value:
+        return None
+    if isinstance(value, str):
+        return {
+            "mode": value,
+            "contract_status": "not_validated",
+            "production_ready": False,
+            "source_artifact": source,
+            "provenance": {},
+            "diagnostics": [
+                "Water-source status was recorded as text, not a validated contract."
+            ],
+        }
+    if isinstance(value, dict):
+        status = dict(value)
+        status.setdefault("mode", "unknown")
+        status.setdefault("contract_status", "not_validated")
+        status.setdefault("production_ready", False)
+        status.setdefault("provenance", {})
+        status.setdefault("diagnostics", [])
+        status.setdefault("source_artifact", source)
+        return status
+    return None
+
+
+def _workspace_water_source_status(ctx: dict, validation: Optional[dict] = None) -> dict:
+    workspace_dir = Path(ctx["workspace_dir"])
+    manifest = ctx.get("manifest", {})
+
+    candidates = [
+        (manifest.get("water_source"), "00_metadata/manifest.json:water_source"),
+        (
+            manifest.get("model", {}).get("water_source")
+            if isinstance(manifest.get("model"), dict)
+            else None,
+            "00_metadata/manifest.json:model.water_source",
+        ),
+    ]
+
+    model_handoff = workspace_dir / "00_metadata" / "model_handoff.json"
+    if model_handoff.exists():
+        try:
+            handoff = json.loads(model_handoff.read_text(encoding="utf-8"))
+            candidates.extend([
+                (handoff.get("water_source"), "00_metadata/model_handoff.json:water_source"),
+                (
+                    handoff.get("model", {}).get("water_source")
+                    if isinstance(handoff.get("model"), dict)
+                    else None,
+                    "00_metadata/model_handoff.json:model.water_source",
+                ),
+            ])
+        except Exception as exc:
+            return {
+                "mode": "unknown",
+                "contract_status": "invalid_metadata",
+                "production_ready": False,
+                "source_artifact": "00_metadata/model_handoff.json",
+                "provenance": {},
+                "diagnostics": [f"Could not read model_handoff water-source metadata: {exc}"],
+            }
+
+    for value, source in candidates:
+        status = _coerce_workspace_water_source(value, source=source)
+        if status is not None:
+            return status
+
+    return {
+        "mode": "unknown",
+        "contract_status": "not_recorded",
+        "production_ready": False,
+        "source_artifact": None,
+        "provenance": {},
+        "diagnostics": [
+            "No headwater water-source contract was found in manifest or model_handoff metadata."
+        ],
+    }
+
+
 def build_workspace_gap_analysis(
     ctx: dict,
     *,
@@ -751,6 +870,7 @@ def build_workspace_gap_analysis(
     issue_urls = issue_urls or {}
     validation = validation or validate_workspace(ctx["workspace_dir"])
     manifest_notes = ctx["manifest"].get("notes", {})
+    water_source = _workspace_water_source_status(ctx, validation)
     gaps = []
 
     for rel_path in validation.get("missing_required_artifacts", []):
@@ -859,6 +979,14 @@ def build_workspace_gap_analysis(
                 "the rain-on-grid review package."
             ),
             "affected_artifact": "08_report/station_precip_qaqc.json",
+    if not water_source.get("production_ready", False):
+            "id": "headwater-water-source-contract-not-production-ready",
+            "category": "model-readiness",
+            "severity": "high",
+                "The workspace does not record a production-ready headwater water "
+                "source. A generated model must identify AORC/MRMS rain-on-grid, "
+                "a valid hydrograph source, or explicit mock/low-detail screening mode."
+            "affected_artifact": water_source.get("source_artifact") or "00_metadata/model_handoff.json",
             "owner_repo": "ras-agent",
             "issue_url": issue_urls.get("ras_agent_report_contract"),
             "blocking_for": "model-readiness",
@@ -901,6 +1029,8 @@ def build_workspace_gap_analysis(
                     "treat recalibration or regridding as a follow-up decision."
                 ),
             })
+                "Record and validate the water-source contract before treating the "
+                "workspace as ready for HEC-RAS execution."
 
     return {
         "schema_version": _WORKSPACE_GAP_SCHEMA_VERSION,
@@ -962,6 +1092,7 @@ def build_workspace_report_json(
     git_commit = git_commit or _get_git_commit()
     validation = validation or validate_workspace(ctx["workspace_dir"])
     gap_analysis = gap_analysis or build_workspace_gap_analysis(ctx, validation=validation)
+    water_source = _workspace_water_source_status(ctx, validation)
 
     gauge_props = ctx["gauge_feature"]["features"][0]["properties"]
     gauge_huc = ctx["huc_summary"]["gauge_huc12"][0]
@@ -1041,6 +1172,7 @@ def build_workspace_report_json(
             "source": manifest.get("sources", {}).get("soils_wfs"),
         },
         "precipitation_qaqc": _workspace_precip_qaqc_json(ctx),
+        "water_source": water_source,
         "map_layers": [
             "Buffered analysis extent",
             "Intersecting HUC12 fill",
@@ -1434,6 +1566,25 @@ def _section_workspace_context(ctx: dict) -> str:
     return html
 
 
+def _section_workspace_water_source(ctx: dict) -> str:
+    water_source = _workspace_water_source_status(ctx)
+    provenance = water_source.get("provenance") or {}
+    diagnostics = water_source.get("diagnostics") or []
+    rows = [
+        ["Mode", water_source.get("mode", "unknown")],
+        ["Contract status", water_source.get("contract_status", "not_recorded")],
+        ["Production ready", _bool_label(water_source.get("production_ready"))],
+        ["Screening only", _bool_label(water_source.get("screening_only"))],
+        ["Source artifact", water_source.get("source_artifact") or "not recorded"],
+        ["Provenance source", provenance.get("source") or provenance.get("dataset") or "not recorded"],
+        ["Diagnostics", "; ".join(str(item) for item in diagnostics[:3]) or "None"],
+    ]
+    html = '<section class="section"><h2>Water Source Readiness</h2>'
+    html += _html_table_safe(["Item", "Value"], rows)
+    html += "</section>"
+    return html
+
+
 def _section_workspace_landscape(ctx: dict) -> str:
     terrain_png = _plot_workspace_terrain(ctx)
     nlcd_png, nlcd_classes = _plot_workspace_nlcd(ctx)
@@ -1719,6 +1870,7 @@ def generate_workspace_report(
         _section_workspace_header(ctx, git_commit, run_ts),
         map_section,
         _section_workspace_context(ctx),
+        _section_workspace_water_source(ctx),
         _section_workspace_landscape(ctx),
         _section_workspace_observed(ctx),
         _section_workspace_precip_qaqc(ctx),

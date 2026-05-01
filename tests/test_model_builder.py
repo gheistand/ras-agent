@@ -7,6 +7,7 @@ Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
 """
 
+import json
 import os
 import shutil
 import sys
@@ -23,6 +24,7 @@ from shapely.geometry import LineString, box
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 
 import model_builder as mb
+import water_source as ws
 
 
 # ── Minimal mock objects ──────────────────────────────────────────────────────
@@ -103,6 +105,37 @@ def _make_template_dir(tmp_path: Path, name="test_template") -> Path:
     (tpl / "template_project.prj").write_text("HEC-RAS Version=6.60\n")
     (tpl / "template_project.g01").write_text("Geom Title=Test Geometry\n")
     return tpl
+
+
+def _make_water_source_project(tmp_path: Path, flow_body: str):
+    project_dir = tmp_path / "ras_project"
+    project_dir.mkdir()
+    plan_file = project_dir / "ras_project.p01"
+    flow_file = project_dir / "ras_project.u01"
+    plan_file.write_text(
+        "Plan Title=Test Plan\n"
+        "Program Version=6.60\n"
+        "Geom File=g01\n"
+        "Flow File=u01\n"
+        "Simulation Date=01JAN2000,0000,02JAN2000,0000\n",
+        encoding="utf-8",
+    )
+    flow_file.write_text(
+        "Flow Title=Test Flow\n"
+        "Program Version=6.60\n"
+        "Boundary Location=RAS_AGENT,MAIN,1.0\n"
+        "Interval=15MIN\n"
+        "Flow Hydrograph= 3\n"
+        f"{flow_body}"
+        "Stage Hydrograph TW Check=0\n",
+        encoding="utf-8",
+    )
+    return SimpleNamespace(
+        project_dir=project_dir,
+        plan_file=plan_file,
+        flow_file=flow_file,
+        metadata={},
+    )
 
 
 @pytest.fixture
@@ -268,6 +301,8 @@ def test_build_hdf5_direct_creates_seed_project(tmp_path):
     assert project.metadata["centerline_count"] == 1
     assert project.metadata["breakline_count"] >= 2
     assert project.metadata["artifact_keys"] == ["ad8", "fel"]
+    assert project.metadata["water_source"]["mode"] == "external_hydrograph"
+    assert project.metadata["water_source"]["production_ready"] is True
 
     geom_text = project.geometry_file.read_text()
     assert "2D Flow Area=" in geom_text
@@ -549,20 +584,74 @@ def test_build_model_dispatches_geometry_first(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
     project = mb.build_model(
-        watershed, hydro_set, tmp_path, mesh_strategy="geometry_first",
+        watershed,
+        hydro_set,
+        tmp_path,
+        mesh_strategy="geometry_first",
+        water_source_mode="mock_screening",
     )
     assert project.mesh_strategy == "geometry_first"
     assert project.geometry_file.exists()
+    assert project.metadata["water_source"]["contract_status"] == "screening_only"
+    assert project.metadata["model_readiness"] == "screening_only"
 
 
-def test_build_model_defaults_to_geometry_first(tmp_path, stub_geommesh):
+def test_build_model_defaults_to_geometry_first_rejects_dry_headwater(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
-    project = mb.build_model(watershed, hydro_set, tmp_path)
 
-    assert project.mesh_strategy == "geometry_first"
-    assert project.geometry_file.exists()
-    assert project.metadata["boundary_condition_mode"] == "headwater"
+    with pytest.raises(mb.WaterSourceContractError, match="No defensible water source"):
+        mb.build_model(watershed, hydro_set, tmp_path)
+
+    validation_files = list(tmp_path.glob("ras_agent_*mi2/water_source_validation.json"))
+    assert validation_files
+    validation = json.loads(validation_files[0].read_text(encoding="utf-8"))
+    assert validation["mode"] == "none"
+    assert validation["contract_status"] == "invalid"
+    assert validation["production_ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("flow_body", "expected_diagnostic"),
+    [
+        ("    0.00    0.00    0.00\n", "all-zero/non-positive"),
+        ("", "only 0 numeric values were found"),
+    ],
+)
+def test_external_hydrograph_requires_positive_values(
+    tmp_path,
+    flow_body,
+    expected_diagnostic,
+):
+    project = _make_water_source_project(tmp_path, flow_body)
+
+    validation = ws.validate_project_water_source(
+        project,
+        water_source_mode="external_hydrograph",
+        water_source_provenance={"source": "test_fixture"},
+    )
+
+    assert validation["contract_status"] == "invalid"
+    assert validation["production_ready"] is False
+    assert validation["file_evidence"]["has_external_hydrograph"] is False
+    assert any(
+        expected_diagnostic in diagnostic
+        for diagnostic in validation["diagnostics"]
+    )
+    block = validation["file_evidence"]["flow_files"][0]["flow_hydrograph_blocks"][0]
+    assert block["valid_positive"] is False
+
+
+def test_build_model_mock_mode_records_screening_water_source(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+
+    project = mb.build_model(watershed, hydro_set, tmp_path, mock=True)
+
+    assert project.mesh_strategy == "mock"
+    assert project.metadata["water_source"]["mode"] == "mock_screening"
+    assert project.metadata["water_source"]["contract_status"] == "screening_only"
+    assert project.metadata["water_source"]["production_ready"] is False
 
 
 def test_build_model_downstream_scaffold_raises(tmp_path):

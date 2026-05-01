@@ -24,6 +24,7 @@ from shapely.geometry import LineString, Point, box
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 
 import orchestrator as orch
+import model_builder as mb
 from orchestrator import (
     OrchestratorError,
     OrchestratorResult,
@@ -335,6 +336,58 @@ def test_run_watershed_stage5_partial(tmp_path):
     assert result.project is None
     assert result.job_ids == []
     assert result.results == {}
+
+
+def test_run_watershed_preserves_water_source_validation_on_block(tmp_path):
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project_dir = tmp_path / "model" / "ras_agent_50mi2"
+    validation = {
+        "schema_version": "ras-agent-water-source/v1",
+        "mode": "none",
+        "requested_mode": "auto",
+        "contract_status": "invalid",
+        "production_ready": False,
+        "screening_only": False,
+        "provenance": {"source": "generated_design_hydrograph"},
+        "diagnostics": ["No defensible water source was found."],
+        "warnings": [],
+        "file_evidence": {
+            "plan_files": [{"path": str(project_dir / "ras_agent_50mi2.p01")}],
+            "flow_files": [{"path": str(project_dir / "ras_agent_50mi2.u01")}],
+        },
+    }
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch(
+             "orchestrator._model_builder.build_model",
+             side_effect=mb.WaterSourceContractError(
+                 "Generated model is not production-ready",
+                 validation=validation,
+             ),
+         ):
+
+        result = run_watershed(
+            pour_point_lon=-89.5,
+            pour_point_lat=40.5,
+            output_dir=tmp_path,
+            return_periods=[100],
+            ras_exe_dir=None,
+        )
+
+    assert result.status == "partial"
+    assert result.project is None
+    assert result.water_source["mode"] == "none"
+    assert result.water_source["contract_status"] == "invalid"
+    assert result.water_source["production_ready"] is False
+    assert result.water_source["validation_path"].endswith(
+        "water_source_validation.json"
+    )
 
 
 def test_cli_help():

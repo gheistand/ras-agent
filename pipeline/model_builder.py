@@ -37,6 +37,19 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+try:
+    from water_source import (
+        WaterSourceContractError,
+        ensure_project_water_source_ready,
+        normalize_water_source_mode,
+    )
+except ImportError:  # pragma: no cover - package-style import fallback
+    from pipeline.water_source import (
+        WaterSourceContractError,
+        ensure_project_water_source_ready,
+        normalize_water_source_mode,
+    )
+
 
 BOUNDARY_CONDITION_MODES = ("headwater", "downstream")
 DOWNSTREAM_BOUNDARY_CONDITION_TODO = (
@@ -1646,6 +1659,47 @@ def _build_mock_project(
     )
 
 
+def _hydrograph_water_source_provenance(hydro_set, return_periods: list) -> dict:
+    """Build a compact provenance payload for generated boundary hydrographs."""
+    hydrographs = {}
+    for rp in return_periods:
+        hydro = hydro_set.get(rp)
+        if hydro is None:
+            continue
+        flows = getattr(hydro, "flows_cfs", [])
+        try:
+            point_count = len(flows)
+        except TypeError:
+            point_count = 0
+        hydrographs[str(rp)] = {
+            "source": getattr(hydro, "source", None),
+            "peak_flow_cfs": getattr(hydro, "peak_flow_cfs", None),
+            "duration_hr": getattr(hydro, "duration_hr", None),
+            "time_step_hr": getattr(hydro, "time_step_hr", None),
+            "point_count": point_count,
+        }
+    return {
+        "source": "generated_design_hydrograph",
+        "method": "hydrograph.generate_hydrograph_set",
+        "return_periods": list(return_periods),
+        "hydrographs": hydrographs,
+    }
+
+
+def _default_water_source_provenance(
+    hydro_set,
+    return_periods: list,
+    *,
+    mock: bool,
+) -> dict:
+    if mock:
+        return {
+            "source": "mock_screening",
+            "method": "synthetic test model; no production water source",
+        }
+    return _hydrograph_water_source_provenance(hydro_set, return_periods)
+
+
 def build_model(
     watershed,
     hydro_set,
@@ -1654,6 +1708,9 @@ def build_model(
     mesh_strategy: str = "geometry_first",
     boundary_condition_mode: str = "headwater",
     nlcd_raster_path: Optional[Path] = None,
+    water_source_mode: Optional[str] = "auto",
+    water_source_provenance: Optional[dict] = None,
+    allow_low_detail_screening: bool = False,
     mock: bool = False,
     **kwargs,
 ) -> HecRasProject:
@@ -1679,6 +1736,15 @@ def build_model(
                             scaffolded through the API but intentionally fails
                             fast until chained-basin inputs and QA are designed.
         nlcd_raster_path:   Optional NLCD 2019 GeoTIFF for Manning's n lookup
+        water_source_mode:  "auto" | "rain_on_grid" | "external_hydrograph" |
+                            "mock_screening" | "none". Production headwater
+                            builds must validate a defensible water source.
+        water_source_provenance:
+                            Optional source/provenance payload to store in
+                            project metadata and validation artifacts.
+        allow_low_detail_screening:
+                            Allow explicit low-detail screening output that is
+                            not production-ready.
 
     Returns:
         HecRasProject ready for runner.py
@@ -1700,9 +1766,16 @@ def build_model(
         boundary_condition_mode
     )
 
+    normalized_water_source_mode = normalize_water_source_mode(
+        water_source_mode,
+        mock=mock,
+        allow_low_detail_screening=allow_low_detail_screening,
+    )
+
     logger.info(
         f"build_model: strategy={mesh_strategy}, "
         f"bc_mode={boundary_condition_mode}, "
+        f"water_source={normalized_water_source_mode}, "
         f"area={watershed.characteristics.drainage_area_mi2:.1f} mi², "
         f"return_periods={return_periods}"
     )
@@ -1711,16 +1784,15 @@ def build_model(
         raise NotImplementedError(downstream_boundary_condition_scaffold_message())
 
     if mock:
-        return _build_mock_project(
+        project = _build_mock_project(
             watershed,
             hydro_set,
             output_dir,
             return_periods,
             boundary_condition_mode=boundary_condition_mode,
         )
-
-    if mesh_strategy == "geometry_first":
-        return _build_geometry_first(
+    elif mesh_strategy == "geometry_first":
+        project = _build_geometry_first(
             watershed,
             hydro_set,
             output_dir,
@@ -1730,7 +1802,7 @@ def build_model(
             **kwargs,
         )
     elif mesh_strategy == "template_clone":
-        return _build_from_template(
+        project = _build_from_template(
             watershed,
             hydro_set,
             output_dir,
@@ -1739,7 +1811,7 @@ def build_model(
             boundary_condition_mode=boundary_condition_mode,
         )
     elif mesh_strategy == "hdf5_direct":
-        return _build_hdf5_direct(
+        project = _build_hdf5_direct(
             watershed,
             hydro_set,
             output_dir,
@@ -1749,7 +1821,7 @@ def build_model(
             **kwargs,
         )
     elif mesh_strategy == "ras2025":
-        return _build_ras2025(
+        project = _build_ras2025(
             watershed, hydro_set, output_dir, return_periods, nlcd_raster_path, **kwargs
         )
     else:
@@ -1757,3 +1829,32 @@ def build_model(
             f"Unknown mesh_strategy: '{mesh_strategy}'. "
             "Valid options: 'geometry_first', 'template_clone', 'hdf5_direct', 'ras2025'"
         )
+
+    provenance = (
+        water_source_provenance
+        if water_source_provenance is not None
+        else _default_water_source_provenance(
+            hydro_set,
+            return_periods,
+            mock=mock,
+        )
+    )
+    explicit_screening = normalized_water_source_mode == "mock_screening"
+    require_production_ready = not (
+        mock or explicit_screening or allow_low_detail_screening
+    )
+    validation = ensure_project_water_source_ready(
+        project,
+        water_source_mode=normalized_water_source_mode,
+        water_source_provenance=provenance,
+        mock=mock,
+        allow_low_detail_screening=allow_low_detail_screening,
+        require_production_ready=require_production_ready,
+    )
+    logger.info(
+        "Water-source validation: mode=%s status=%s production_ready=%s",
+        validation["mode"],
+        validation["contract_status"],
+        validation["production_ready"],
+    )
+    return project
