@@ -956,6 +956,192 @@ def _text_mesh_point_count(geom_file: Path, area_name: str) -> int:
         return 0
 
 
+# ── Cartesian Mesh Generation ────────────────────────────────────────────────
+
+
+def _fmt_coord(x: float) -> str:
+    """
+    16-character fixed-width HEC-RAS coordinate encoder.
+
+    CRITICAL: Do not change this function. HEC-RAS 6.6 parses the Storage
+    Area 2D Points section using 16-character fixed-width fields. A naive
+    ``f"{x:.6f}"`` produces 14 characters — the parser reads the next
+    coordinate starting at the wrong column and the cell centers are garbage.
+
+    Args:
+        x: Coordinate value (non-negative; EPSG:5070 meters)
+
+    Returns:
+        Exactly 16 characters: integer digits + decimal point + decimal digits.
+    """
+    n_int = len(str(int(abs(x))))
+    n_dec = 16 - n_int - 1
+    return f"{x:.{n_dec}f}"
+
+
+def _generate_cartesian_cell_centers(
+    watershed_polygon,
+    cell_size_m: float,
+    min_face_length_ratio: float = 0.05,
+    max_shift_tries: int = 200,
+) -> tuple:
+    """
+    Generate Cartesian cell centers for a HEC-RAS 2D mesh.
+
+    Scans grid origin offsets (dx_shift, dy_shift) ∈ [0, cell_size_m) × [0,
+    cell_size_m) to find a position where no Voronoi boundary (VB) falls
+    within ``tol = min_face_length_ratio × cell_size_m`` of any polygon
+    vertex coordinate.
+
+    Args:
+        watershed_polygon:    Shapely Polygon in project CRS (EPSG:5070, meters)
+        cell_size_m:          Mesh cell size in meters
+        min_face_length_ratio: HEC-RAS MinFaceLength / CellSize ratio (default 0.05)
+        max_shift_tries:      Maximum (dx, dy) combinations to search
+
+    Returns:
+        Tuple of (cell_centers, dx_shift, dy_shift).
+    """
+    import numpy as np
+    from shapely import contains_xy
+
+    tol = min_face_length_ratio * cell_size_m
+
+    if hasattr(watershed_polygon, "exterior"):
+        verts = np.array(watershed_polygon.exterior.coords)
+    else:
+        verts = np.array(list(watershed_polygon.coords))
+
+    vx = verts[:, 0]
+    vy = verts[:, 1]
+
+    xmin, ymin, xmax, ymax = watershed_polygon.bounds
+
+    n_side = max(2, int(np.sqrt(max_shift_tries)))
+    shift_step = cell_size_m / n_side
+
+    best_shift = (0.0, 0.0)
+    best_conflicts = int(len(vx)) * 2 + 1
+    found_clean = False
+
+    for i in range(n_side):
+        dx = i * shift_step
+        x_relv = (vx - xmin - dx - cell_size_m / 2) % cell_size_m
+        x_dist = np.minimum(x_relv, cell_size_m - x_relv)
+        n_x = int(np.sum(x_dist < tol))
+
+        for j in range(n_side):
+            dy = j * shift_step
+            y_relv = (vy - ymin - dy - cell_size_m / 2) % cell_size_m
+            y_dist = np.minimum(y_relv, cell_size_m - y_relv)
+            n_y = int(np.sum(y_dist < tol))
+
+            total = n_x + n_y
+            if total < best_conflicts:
+                best_conflicts = total
+                best_shift = (dx, dy)
+
+            if total == 0:
+                found_clean = True
+                break
+
+        if found_clean:
+            break
+
+    dx_shift, dy_shift = best_shift
+
+    if not found_clean:
+        logger.warning(
+            "[CART] No clean grid shift found in %d tries "
+            "(best: %d conflict(s) at dx=%.1f m, dy=%.1f m) — using best available",
+            n_side * n_side, best_conflicts, dx_shift, dy_shift,
+        )
+    else:
+        logger.info(
+            "[CART] Clean grid shift: dx=%.1f m, dy=%.1f m (0 VB-vertex conflicts)",
+            dx_shift, dy_shift,
+        )
+
+    xs = np.arange(xmin + dx_shift, xmax + cell_size_m, cell_size_m)
+    ys = np.arange(ymin + dy_shift, ymax + cell_size_m, cell_size_m)
+    xx, yy = np.meshgrid(xs, ys)
+    candidates = np.column_stack([xx.ravel(), yy.ravel()])
+
+    mask = contains_xy(watershed_polygon, candidates[:, 0], candidates[:, 1])
+    cell_centers = candidates[mask]
+
+    logger.info(
+        "[CART] %d Cartesian cell centers (cell_size=%.1f m, dx=%.1f m, dy=%.1f m)",
+        len(cell_centers), cell_size_m, dx_shift, dy_shift,
+    )
+    return cell_centers, dx_shift, dy_shift
+
+
+def _write_cell_centers_to_geometry_file(
+    geometry_file: Path,
+    area_name: str,
+    cell_centers,
+) -> bool:
+    """
+    Write Cartesian cell centers to the ``Storage Area 2D Points`` section of a
+    HEC-RAS plain text geometry file (.g##).
+
+    Creates a .bak backup of the original file before modifying.
+
+    Args:
+        geometry_file: Path to .g## ASCII geometry file
+        area_name:     Name of the 2D flow area (used for logging)
+        cell_centers:  (N, 2) array-like of (x, y) cell center coordinates
+
+    Returns:
+        True if written successfully; False if cell_centers is empty.
+    """
+    if len(cell_centers) == 0:
+        logger.warning(
+            "[CART] No cell centers provided for area '%s' — Storage Area 2D Points not written",
+            area_name,
+        )
+        return False
+
+    text = geometry_file.read_text(errors="replace")
+
+    bak_path = geometry_file.with_suffix(geometry_file.suffix + ".bak")
+    bak_path.write_text(text, encoding="utf-8")
+
+    n = len(cell_centers)
+    new_header = f"Storage Area 2D Points= {n}\n"
+    data_lines = "".join(
+        _fmt_coord(float(x)) + _fmt_coord(float(y)) + "\n"
+        for x, y in cell_centers
+    )
+    new_block = new_header + data_lines
+
+    points_pattern = re.compile(
+        r"Storage Area 2D Points=[ \t]*\d+[ \t]*\n"
+        r"(?:[-0-9][^\n]*\n)*",
+        re.MULTILINE,
+    )
+    updated_text, n_subs = points_pattern.subn(new_block, text, count=1)
+
+    if n_subs == 0:
+        cell_size_pat = re.compile(
+            r"(2D Flow Area Cell Size=[ \t]*[\d.]+[ \t]*\n)", re.MULTILINE
+        )
+        m = cell_size_pat.search(text)
+        if m:
+            pos = m.end()
+            updated_text = text[:pos] + new_block + text[pos:]
+        else:
+            updated_text = text.rstrip("\n") + "\n" + new_block
+
+    geometry_file.write_text(updated_text, encoding="utf-8")
+    logger.info(
+        "[CART] Wrote %d cell centers to %s (area: %s)",
+        n, geometry_file.name, area_name,
+    )
+    return True
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
