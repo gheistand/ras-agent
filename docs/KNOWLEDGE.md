@@ -11,7 +11,7 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM), 222/222 tests, 70+ commits (as of 2026-04-30)
+- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM + CLB integration), 334/334 tests (14 skipped, 6 pre-existing ras_commander failures), 75+ commits (as of 2026-05-02)
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
 - **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering), Nikhil Sangwan / nikhil-yahoo (ISWS)
 
@@ -143,7 +143,7 @@ Web (Cloudflare Pages):
 | HITL/QAQC C | Proactive review + hooks — hydro-reviewer, transparency/range hooks | ✅ Done | .claude/hooks/, .claude/agents/hydro-reviewer/ |
 | Windows Agent | Windows mesh interface + RasPreprocess integration | ✅ Done | pipeline/windows_agent.py, tests/test_windows_agent.py |
 
-**Test count: 256 passing** (222 pipeline/core + 34 precipitation+storm_qc, as of 2026-05-01)
+**Test count: 334 passing** (334 combined after PR #13 merge — CLB branch + main morning commits integrated, as of 2026-05-02)
 **Latest commit:** `d865c92` — fix: Spring Creek trial — bypass Stage 2 with NLDI basin (103 mi²) + NHD flowlines
 **Docker:** ✅ Confirmed working — `docker-compose up api --build` compiles cleanly
 **Mock mode:** ✅ Fixed — `--mock` now short-circuits all network calls in stages 1-3 (commit `16f2f2b`)
@@ -593,7 +593,8 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 12. **Send OTM email** (Glenn — otm@illinois.edu from heistand@illinois.edu) — still pending
 13. ~~Fix Spring Creek drainage area~~ ✅ Decided 2026-05-01: bypass Stage 2 with NLDI basin polygon (103.4 mi²) + NHD flowlines. TauDEM replaces pysheds for production. DEM is in feet (522-673 ft); boundary_handoff outlet WGS84: (-89.731679, 39.812374). Hydrographs now correct: Tc=16.8h, Q100 vol=25,677 ac-ft.
 14. ~~Wire rain-on-grid (AORC/MRMS)~~ ✅ Done 2026-05-01: `pipeline/precipitation.py` — `catalog_storms()`, `select_design_storm()`, `download_storm()`, `run_precipitation_stage(precip_mode="aorc")`; wraps `ras_commander.precip.PrecipAorc`; mock mode; orchestrator Stage 4.5 hook. TODO: Atlas 14 integration for real depth targets (placeholder uses `rp * 0.5`).
-14b. ~~GHCND storm QC~~ ✅ Done 2026-05-01: `pipeline/storm_qc.py` — NOAA CDO station discovery + NCEI daily-summaries cross-check; `qc_flag` (ok/low/high/no_obs). Needs `NOAA_CDO_TOKEN` env var for station discovery.
+14b. ~~GHCND storm QC~~ ✅ Done 2026-05-01: `pipeline/storm_qc.py` — NOAA CDO station discovery + NCEI daily-summaries cross-check; `qc_flag` (ok/low/high/no_obs).
+14c. ~~NOAA_CDO_TOKEN~~ ✅ Configured 2026-05-02: Added to OpenClaw env config. Live dry-run confirmed 5 GHCND stations found near Spring Creek bounds.
 15. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²) on Dell Precision 5860
 16. **Add Nikhil Sangwan** to heistand-ic cluster group at NCSA Illinois Computes
 17. **TauDEM integration** — Bill's next focus; will replace pysheds D8 watershed delineation. Confirmed needed: pysheds fails at DEM boundaries.
@@ -653,7 +654,49 @@ Cross-check AORC storm depths against NOAA GHCND observed station precipitation 
   - Adds `qc_flag`: "ok" (0.6≤1.6), "low" (<0.6), "high" (>1.6), "no_obs" (NaN)
 
 ### Config
-- `NOAA_CDO_TOKEN` env var — not yet configured in OpenClaw env
+- `NOAA_CDO_TOKEN` env var — ✅ configured in OpenClaw env (2026-05-02). Live verification: 5 GHCND stations discovered near Spring Creek bounds (-90.0, 39.6, -89.2, 40.2).
+
+---
+
+## CLB Engineering Integration — PR #13 (2026-05-02)
+
+### Context
+Post May-1 call decision: Bill/Ajith's `pr-6-review` branch (CLB Engineering) is higher priority than our morning commits. Spring Creek pilot driven by Bill and Ajith; Glenn facilitates.
+
+### What PR #13 Merged
+- **base:** `pr-6-review` (Bill/Ajith CLB branch, 17 commits since merge-base `462f02c`)
+- **on top:** main's 9 morning commits (AORC, storm QC, Cartesian mesh, SLURM, ras2cng, ss-delineate fix)
+
+### 5 Conflict Resolutions
+1. `pipeline/watershed.py` — **pr-6-review wins** (TauDEM replaces pysheds entirely)
+2. `pipeline/streamstats.py` — **hybrid** (pr-6-review structure + main's live 2026 ss-delineate URL; legacy streamstatsservices decommissioned Jan 30 2026)
+3. `pipeline/orchestrator.py` — pr-6-review's defensive try/except imports + both dataclass fields (`pre_run_readiness` + `precip_result`)
+4. `tests/test_model_builder.py` — both test suites merged
+5. `tests/test_streamstats.py` — both suites merged; absolute RDB path guarded by `skipif(not path.exists())`
+
+### New Pipeline Modules (from CLB branch)
+- `pipeline/bc_lines.py` — 2D BC Line generation for geometry_first models
+- `pipeline/hecras_readiness.py` — HEC-RAS pre-run readiness gate (758 lines)
+- `pipeline/taudem.py` — TauDEM watershed delineation integration
+- `pipeline/context_layers.py` — terrain conditioning, NLCD, soils context layers
+- `pipeline/workspace.py` — workspace manager for project artifacts
+- Expanded: `pipeline/model_builder.py`, `pipeline/report.py`, `pipeline/terrain.py`
+
+### IP / Reverse-Engineering Boundary
+- ras-agent (public Apache 2.0): calls CLB published APIs only — no decompiled code, no DLL artifacts
+- CLB private repo: owns reverse-engineered HEC-RAS automation layer; Bill absorbs TOS exposure
+- Model: `ras-commander` and any CLB packages imported as published libraries only
+- **Never vendor CLB reverse-engineered code into this repo**
+
+### CLB Infrastructure (Bill's pending action items)
+- Tailscale org invite to Glenn's email — pending
+- CLB NAS credentials (H drive) — pending
+- Windows VM 16-32GB (CLBO2 or CLBO7) — promised "possibly this weekend" (2026-05-03)
+- Symphony access for Glenn to dispatch jobs to CLBO8 — pending
+
+### Dry-Run Status (2026-05-02)
+- `trial_spring_creek.py` — all 6 stages pass ✅ (fixed WatershedResult constructor for new subbasins/centerlines/breaklines fields)
+- `trial_spring_creek_precip.py` — all 4 stages pass ✅ (live NOAA CDO confirmed)
 
 ---
 
