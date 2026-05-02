@@ -8,6 +8,25 @@ Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois
 
 ---
 
+## Current Integration Direction
+
+- `ras-agent` should remain the Illinois-first orchestration layer and consume
+  shared functionality from the latest published `ras-commander` and
+  `hms-commander` pip packages rather than local sibling-repo branches.
+- Mesh generation should be geometry-first and RASMapper-aligned through
+  `ras-commander`; Cartesian mesh generation is not a fallback path for new
+  work.
+- Spring Creek is the immediate headwater pilot for BLE-style data generation,
+  rain-on-grid AORC/MRMS setup, and gauge-based calibration/validation.
+- Rain-on-grid boundary setup should be implemented first; HMS modeling should
+  proceed in parallel, with HMS-linked boundary construction added once that
+  path is complete enough to trust.
+- Future calibration work should add precipitation-source QAQC for rain-on-grid
+  events and reviewer-in-the-loop batched sensitivity runs that reserve
+  high-resolution parameter exploration for the most influential parameters.
+
+---
+
 ## Quick Start
 
 ### Option 1: Docker (recommended)
@@ -73,7 +92,7 @@ RAS Agent automates the full HEC-RAS 2D modeling workflow:
 2. **Watershed** — Delineates watershed boundaries and stream networks from DEMs
 3. **Hydrology** — Queries the [USGS StreamStats API](https://streamstats.usgs.gov) for peak flow estimates; generates synthetic inflow hydrographs using the NRCS Unit Hydrograph method
 4. **Model Build** — Constructs HEC-RAS 6.6 input files (geometry, plan, unsteady flow, boundary conditions) using [RAS Commander](https://github.com/gpt-cmdr/ras-commander)
-5. **Mesh Generation** — Writes Cartesian cell centers in HEC-RAS fixed-width format directly to `.g##` text file; geometry preprocessor handles Voronoi tessellation automatically — no RASMapper GUI needed
+5. **Mesh Generation** — Uses geometry-first, RASMapper-aligned `ras-commander` workflows to write watershed-derived 2D flow area geometry, breaklines, and mesh instructions through authoritative `.g##` text geometry
 6. **Linux Preprocessing** — Runs `ras_preprocess.py` ([hecras-v66-linux](https://github.com/neeraip/hecras-v66-linux)) to build hydraulic tables on Linux; verified 0.000–0.001 ft accuracy vs. GUI
 7. **Execution** — Runs HEC-RAS 6.6 Linux compute engine (`RasUnsteady`) headlessly on NCSA Illinois Computes Campus Cluster (100K CPU-hours allocated); supports parallel multi-watershed execution
 8. **Results** — Exports flood inundation extents, depth grids, and velocity rasters as shapefiles, GeoPackages, Cloud-Optimized GeoTIFFs, and **cloud-native GeoParquet archives** via [ras2cng](https://github.com/gpt-cmdr/ras2cng) for DuckDB analytics and PMTiles delivery
@@ -190,7 +209,7 @@ Linux (Cloud VM — Rocky 8 / RHEL 8):
 
 **Pending (requires Windows + HEC-RAS GUI):**
 - Build first HEC-RAS template project (Windows) for real (non-mock) runs
-- Mesh regeneration automation after perimeter update (RASMapper — in development by CLB Engineering / Ajith Sundarraj)
+- Mesh regeneration automation after perimeter update through the geometry-first RASMapper path
 - Download hecras-v66-linux git LFS binaries (`cd vendor/hecras-v66-linux && git lfs pull`) for real runs
 
 ---

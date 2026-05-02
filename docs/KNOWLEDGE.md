@@ -184,71 +184,37 @@ Web (Cloudflare Pages):
 
 ---
 
-## Phase 2 Spec (model_builder.py) — REVISED after SimTheory feedback (2026-03-13)
+## Model Build Direction (2026-04-27)
 
-### Critical Finding: RAS Commander Cannot Create Greenfield 2D Projects
-RAS Commander (as of v0.52) assumes an EXISTING project/geometry. It cannot:
-- Define new 2D flow areas from scratch
-- Draw/generate a new computational mesh
-- Write initial geometry HDF5 from nothing
+The current integration direction supersedes the older template-clone and
+direct-HDF framing. `geometry_first` is the target model-build strategy:
 
-It CAN (on existing projects):
-- Clone projects and modify ASCII plan/geometry/flow files
-- Update Manning's n, infiltration, boundary conditions
-- Parse and extract 2D results (depths, velocities, WSE from HDF5)
-- Manage and execute simulations
+- `ras-agent` derives watershed geometry, hydrology, and parameter instructions.
+- `ras-commander` edits HEC-RAS projects and authoritative plain-text `.g##`
+  geometry artifacts.
+- HEC-RAS/RASMapper regenerates mesh/HDF/preprocessor artifacts from those
+  geometry instructions.
+- `template_clone` and `hdf5_direct` remain legacy compatibility surfaces only;
+  they should not guide new implementation.
+- Cartesian mesh generation should not be preserved as an alternate runtime
+  path. Useful upstream mesh QA concepts can be ported only when they support
+  the geometry-first/RASMapper-aligned workflow.
 
-Source: SimTheory assistant analysis of RAS Commander docs/PyPI, 2026-03-13
+Immediate boundary-condition direction:
 
-### Three Mesh Strategy Paths
-
-**Path A: Template + Clone (implement now)**
-- Build 3 archetype HEC-RAS 2D template projects on Windows (small ~50 mi², medium ~200 mi², large ~800 mi² IL watershed)
-- RAS Commander clones template → swaps terrain reference → updates BCs/hydrograph/Manning's n → writes plan
-- Limitation: mesh perimeter/cell structure inherited from template — won't perfectly fit every watershed
-- Status: implement in Phase 2 weekend build
-
-**Path B: Direct HDF5 Construction (future)**
-- Write HEC-RAS geometry HDF5 files directly with h5py
-- True greenfield: define 2D flow area perimeter from watershed polygon, generate mesh cells programmatically
-- Effort: 2-3 weeks focused work
-- Status: planned after Path A is proven
-
-**Path C: RAS2025 API (future)**
-- RAS2025's new public API handles mesh generation programmatically
-- Still alpha, no Linux build, API may change
-- Status: 6-12 months out
-
-### Interface Design (path-agnostic from day one)
-```python
-def build_model(watershed: WatershedResult,
-                hydro_set: HydrographSet,
-                mesh_strategy: str = "template_clone") -> HecRasProject:
-    if mesh_strategy == "template_clone":
-        return _build_from_template(watershed, hydro_set)
-    elif mesh_strategy == "hdf5_direct":
-        return _build_hdf5_direct(watershed, hydro_set)   # stub
-    elif mesh_strategy == "ras2025":
-        return _build_ras2025(watershed, hydro_set)        # stub
-```
-
-### Open Question (awaiting Bill Katzenmeyer's input)
-Can RAS Commander update the 2D flow area perimeter polygon on a cloned project, or is the mesh geometry fixed at clone time? This determines how closely the template mesh needs to match each watershed's shape.
-
-### Template Projects Needed (Glenn to build on Windows)
-- `templates/small_watershed/`  — ~50 mi², low-relief IL agricultural
-- `templates/medium_watershed/` — ~200 mi², mixed land cover
-- `templates/large_watershed/`  — ~800 mi², river corridor
-
-### What model_builder.py Does (Path A implementation)
-1. Select closest template by drainage area
-2. RAS Commander clones template to new project directory
-3. Update terrain reference to point to watershed DEM (clipped GeoTIFF from terrain.py)
-4. Update 2D flow area Manning's n from NLCD lookup table
-5. Write unsteady flow file with hydrographs from hydrograph.py
-6. Set downstream BC: normal depth (slope = main channel slope from watershed.py)
-7. Update simulation time window (warm-up 12hr + hydrograph duration)
-8. Return project path ready for runner.py
+- Use Spring Creek as the first runnable headwater pilot for BLE-style data
+  generation and gauge calibration/validation.
+- Implement rain-on-grid setup first through `ras-commander` AORC/MRMS support.
+- Continue HMS modeling in parallel through `hms-commander`, then build the
+  HMS-linked boundary-construction workflow once the HMS path is complete enough
+  to trust.
+- Add precipitation-source QAQC for rain-on-grid calibration events by comparing
+  AORC/MRMS gridded accumulations against nearby station observations before
+  parameter calibration decisions are made.
+- Future calibration work should be reviewer-in-the-loop and batch-oriented:
+  start with documented base parameters, run individual sensitivity batches,
+  update the base set after expert review, then define a limited multi-parameter
+  validation matrix with high-resolution sweeps only for influential parameters.
 
 ### Manning's n Table (NLCD classes → standard IL values)
 - Open water: 0.035

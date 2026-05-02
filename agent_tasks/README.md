@@ -29,6 +29,16 @@ At the start of a work session, copy templates to create live state files:
 
 These files are gitignored — they're ephemeral per-session state.
 
+## Active Roadmap
+
+The current `ras-agent` roadmap lives at
+[`plans/illinois-taudem-primary.md`](plans/illinois-taudem-primary.md).
+
+Use that plan to track Illinois-first TauDEM, geometry-first HEC-RAS
+integration, commander package dependencies, Spring Creek headwater pilot work,
+rain-on-grid/HMS boundary-condition sequencing, and future calibration roadmap
+scope.
+
 ### Tasks (`tasks/`)
 Individual task files for tracking multi-step work:
 - One markdown file per task

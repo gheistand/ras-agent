@@ -10,13 +10,15 @@ Apache License 2.0
 import os
 import shutil
 import sys
-import tempfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import geopandas as gpd
+from shapely.geometry import LineString, box
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 
@@ -41,11 +43,28 @@ def _make_basin_characteristics(area_mi2=150.0, slope=0.003):
 
 
 def _make_watershed(area_mi2=150.0, dem_path=None):
+    basin = box(300000.0, 4400000.0, 315000.0, 4415000.0)
+    basin_gdf = gpd.GeoDataFrame({"name": ["watershed"]}, geometry=[basin], crs="EPSG:5070")
+    stream = LineString([(307500.0, 4414000.0), (307500.0, 4401000.0)])
+    streams_gdf = gpd.GeoDataFrame({"stream_id": [1]}, geometry=[stream], crs="EPSG:5070")
+    subbasins_gdf = basin_gdf.copy()
+    subbasins_gdf["wsno"] = [1]
+    centerlines_gdf = streams_gdf.copy()
+    centerlines_gdf["centerline_id"] = [1]
+    breaklines_gdf = gpd.GeoDataFrame(
+        {"breakline_type": ["stream", "boundary"]},
+        geometry=[stream, basin.boundary],
+        crs="EPSG:5070",
+    )
     return SimpleNamespace(
         characteristics=_make_basin_characteristics(area_mi2),
-        basin=SimpleNamespace(geometry=SimpleNamespace(iloc=lambda i: None)),
-        streams=None,
+        basin=basin_gdf,
+        streams=streams_gdf,
+        subbasins=subbasins_gdf,
+        centerlines=centerlines_gdf,
+        breaklines=breaklines_gdf,
         dem_clipped=Path(dem_path or "/tmp/fake_dem.tif"),
+        artifacts={"fel": Path("/tmp/fel.tif"), "ad8": Path("/tmp/ad8.tif")},
     )
 
 
@@ -84,6 +103,35 @@ def _make_template_dir(tmp_path: Path, name="test_template") -> Path:
     (tpl / "template_project.prj").write_text("HEC-RAS Version=6.60\n")
     (tpl / "template_project.g01").write_text("Geom Title=Test Geometry\n")
     return tpl
+
+
+@pytest.fixture
+def stub_geommesh(monkeypatch):
+    """Keep geometry-first unit tests fast even when HEC-RAS/pythonnet are installed."""
+    try:
+        from ras_commander.geom import GeomMesh
+    except ImportError:
+        return
+
+    monkeypatch.setattr(
+        GeomMesh,
+        "set_breakline_spacing",
+        staticmethod(lambda *args, **kwargs: None),
+    )
+    monkeypatch.setattr(
+        GeomMesh,
+        "generate",
+        staticmethod(
+            lambda *args, **kwargs: SimpleNamespace(
+                ok=False,
+                status="deferred",
+                cell_count=0,
+                face_count=0,
+                error_message="stubbed in unit test",
+                fixes_applied=[],
+            )
+        ),
+    )
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -204,11 +252,27 @@ def test_build_from_template_no_templates(tmp_path):
         mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="template_clone")
 
 
-def test_build_hdf5_direct_raises(tmp_path):
+def test_build_hdf5_direct_creates_seed_project(tmp_path):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
-    with pytest.raises(NotImplementedError):
-        mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="hdf5_direct")
+    project = mb.build_model(watershed, hydro_set, tmp_path, mesh_strategy="hdf5_direct")
+
+    assert project.mesh_strategy == "hdf5_direct"
+    assert project.prj_file.exists()
+    assert project.geometry_file.exists()
+    assert project.flow_file.exists()
+    assert project.plan_file.exists()
+    assert project.plan_hdf.exists()
+    assert project.metadata["seed_project_only"] is True
+    assert project.metadata["windows_regeneration_required"] is True
+    assert project.metadata["centerline_count"] == 1
+    assert project.metadata["breakline_count"] >= 2
+    assert project.metadata["artifact_keys"] == ["ad8", "fel"]
+
+    geom_text = project.geometry_file.read_text()
+    assert "2D Flow Area=" in geom_text
+    assert "2D Flow Area Cell Size=" in geom_text
+    assert "Mann=" in geom_text
 
 
 def test_build_ras2025_raises(tmp_path):
@@ -357,32 +421,162 @@ def test_get_2d_area_name_parses_correctly(tmp_path):
     assert name == "Perimeter 1"
 
 
-# ── Tests: Cartesian mesh generation ─────────────────────────────────────────
+# ── Tests: geometry-first strategy ───────────────────────────────────────────
 
-def test_fmt_coord_precision():
-    """_fmt_coord must produce exactly 16 characters for a range of EPSG:5070 values."""
-    # Typical state-plane / Albers coordinates used in continental US
-    test_values = [
-        3201045.0,      # 7 integer digits → 8 decimal digits
-        13808000.0,     # 8 integer digits → 7 decimal digits
-        999999.0,       # 6 integer digits → 9 decimal digits
-        12345678.0,     # 8 integer digits → 7 decimal digits
-        100.0,          # 3 integer digits → 12 decimal digits
-        1234567.5,      # 7 integer digits → 8 decimal digits
+def test_scaffold_project_from_template(tmp_path):
+    project_dir, prj_file, rasmap_file = mb._scaffold_project_from_template(tmp_path, "test_project")
+    assert project_dir == tmp_path / "test_project"
+    assert prj_file.exists()
+    assert prj_file.name == "test_project.prj"
+    prj_text = prj_file.read_text()
+    assert "Proj Title=test_project" in prj_text
+    assert not (project_dir / "TEMPLATE.prj").exists()
+    assert not (project_dir / "TEMPLATE.rasmap.backup").exists()
+    assert not (project_dir / "README.md").exists()
+
+
+def test_register_files_in_prj(tmp_path):
+    prj = tmp_path / "test.prj"
+    prj.write_text("Proj Title=test\n")
+    mb._register_files_in_prj(prj, geom_ext="g01", flow_ext="u01", plan_ext="p01")
+    text = prj.read_text()
+    assert "Geom File=g01" in text
+    assert "Unsteady File=u01" in text
+    assert "Plan File=p01" in text
+    assert "Current Plan=p01" in text
+
+
+def test_register_terrain_in_rasmap(tmp_path):
+    rasmap_file = tmp_path / "test.rasmap"
+    rasmap_file.write_text(
+        "<RASMapper><Version>2.0.0</Version><Terrains /></RASMapper>",
+        encoding="utf-8",
+    )
+
+    terrain_path = tmp_path / "terrain.tif"
+    terrain_path.write_bytes(b"fake-tif")
+
+    mb._register_terrain_in_rasmap(rasmap_file, terrain_path)
+
+    root = ET.parse(rasmap_file).getroot()
+    terrains = root.find("Terrains")
+    assert terrains is not None
+    assert terrains.attrib == {"Checked": "True", "Expanded": "True"}
+
+    layer = terrains.find("Layer")
+    assert layer is not None
+    assert layer.attrib["Filename"] == r".\terrain.tif"
+    assert layer.attrib["Type"] == "TerrainLayer"
+
+
+def test_write_geometry_first_geom_file(tmp_path):
+    geom_file = tmp_path / "test.g01"
+    coords = [
+        (300000.0, 4400000.0), (315000.0, 4400000.0),
+        (315000.0, 4415000.0), (300000.0, 4415000.0),
     ]
-    for x in test_values:
-        result = mb._fmt_coord(x)
-        assert len(result) == 16, (
-            f"_fmt_coord({x}) returned {len(result)!r} chars, expected 16: {result!r}"
-        )
-        # Must be parseable as float and round-trip faithfully
-        assert abs(float(result) - x) < 1e-4, (
-            f"_fmt_coord({x}) → {result!r} does not round-trip: {float(result)}"
+    mb._write_geometry_first_geom_file(
+        geom_file, "TestArea", coords, cell_size_m=100.0, mannings_n=0.04,
+    )
+    text = geom_file.read_text()
+    assert "Geom Title=RAS Agent Geometry" in text
+    assert "Storage Area=TestArea" in text
+    assert "Storage Area Is2D=-1" in text
+    assert "Storage Area Mannings=0.04" in text
+
+
+def test_build_geometry_first_creates_complete_project(tmp_path, stub_geommesh):
+    dem_path = tmp_path / "source_dem.tif"
+    dem_path.write_bytes(b"fake-dem")
+    watershed = _make_watershed(dem_path=dem_path)
+    hydro_set = _make_hydro_set()
+    project = mb._build_geometry_first(
+        watershed, hydro_set, tmp_path, return_periods=[10, 100],
+    )
+    assert project.mesh_strategy == "geometry_first"
+    assert project.prj_file.exists()
+    assert project.geometry_file.exists()
+    assert project.flow_file.exists()
+    assert project.plan_file.exists()
+    assert (project.project_dir / "terrain.tif").exists()
+
+    prj_text = project.prj_file.read_text()
+    assert "Geom File=g01" in prj_text
+    assert "Plan File=p01" in prj_text
+
+    geom_text = project.geometry_file.read_text()
+    assert "Storage Area=MainArea" in geom_text
+    assert "Storage Area Is2D=-1" in geom_text
+
+    # BC Lines present in .g01
+    assert "BC Line Name=" in geom_text
+    assert "BC Line Storage Area=MainArea" in geom_text
+    assert "BC Line Arc=" in geom_text
+
+    # .u01 uses 2D Boundary Locations (not 1D refs)
+    flow_text = project.flow_file.read_text()
+    assert "Boundary Location=" in flow_text
+    assert "MainArea" in flow_text
+    assert "RAS_AGENT,MAIN" not in flow_text
+
+
+def test_build_geometry_first_registers_terrain(tmp_path, stub_geommesh):
+    dem_path = tmp_path / "source_dem.tif"
+    dem_path.write_bytes(b"fake-dem")
+    watershed = _make_watershed(dem_path=dem_path)
+    hydro_set = _make_hydro_set()
+
+    project = mb._build_geometry_first(
+        watershed, hydro_set, tmp_path, return_periods=[100],
+    )
+
+    terrain_file = project.project_dir / "terrain.tif"
+    assert terrain_file.exists()
+    assert terrain_file.read_bytes() == b"fake-dem"
+
+    rasmap_file = project.project_dir / f"{project.project_name}.rasmap"
+    root = ET.parse(rasmap_file).getroot()
+    terrains = root.find("Terrains")
+    assert terrains is not None
+    assert terrains.attrib["Checked"] == "True"
+
+    layer = terrains.find("Layer")
+    assert layer is not None
+    assert layer.attrib["Filename"] == r".\terrain.tif"
+
+
+def test_build_model_dispatches_geometry_first(tmp_path, stub_geommesh):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb.build_model(
+        watershed, hydro_set, tmp_path, mesh_strategy="geometry_first",
+    )
+    assert project.mesh_strategy == "geometry_first"
+    assert project.geometry_file.exists()
+
+
+def test_build_model_defaults_to_geometry_first(tmp_path, stub_geommesh):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb.build_model(watershed, hydro_set, tmp_path)
+
+    assert project.mesh_strategy == "geometry_first"
+    assert project.geometry_file.exists()
+    assert project.metadata["boundary_condition_mode"] == "headwater"
+
+
+def test_build_model_downstream_scaffold_raises(tmp_path):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+
+    with pytest.raises(NotImplementedError, match="scaffolded"):
+        mb.build_model(
+            watershed,
+            hydro_set,
+            tmp_path,
+            boundary_condition_mode="downstream",
         )
 
-    # Specific value from Bill Katzenmeyer's report
-    assert mb._fmt_coord(3201045.0) == "3201045.00000000"
-    assert mb._fmt_coord(13808000.0) == "13808000.0000000"
 
 
 def test_generate_cartesian_cell_centers_basic():
@@ -633,3 +827,17 @@ def test_grid_shift_avoids_voronoi_conflicts():
         f"Conflict persists at dx_shift={dx_shift:.1f}: "
         f"vertex distance to nearest x-VB = {x_dist:.2f} m (tol={tol} m)"
     )
+
+
+def test_geometry_first_perimeter_matches_watershed(tmp_path, stub_geommesh):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+    project = mb._build_geometry_first(
+        watershed, hydro_set, tmp_path, return_periods=[100],
+    )
+    geom_text = project.geometry_file.read_text()
+    assert "Storage Area Surface Line=" in geom_text
+    assert "30000" in geom_text
+    assert "44000" in geom_text
+    assert "31499" in geom_text or "31500" in geom_text
+    assert "44149" in geom_text or "44150" in geom_text
