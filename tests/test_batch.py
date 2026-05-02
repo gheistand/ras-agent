@@ -51,6 +51,12 @@ def _make_mock_orchestrator_result(name: str, lon: float, lat: float, ws_dir: Pa
     mock.peak_flows = None
     mock.results = {}
     mock.errors = []
+    mock.project = None
+    mock.water_source = {
+        "mode": "mock_screening",
+        "contract_status": "screening_only",
+        "production_ready": False,
+    }
     return mock
 
 
@@ -285,6 +291,7 @@ def test_run_batch_forwards_boundary_condition_mode(tmp_path):
     assert mock_rw.call_args.kwargs["boundary_condition_mode"] == "downstream"
     run_metadata = json.loads((output_dir / "Alpha" / "run_metadata.json").read_text())
     assert run_metadata["boundary_condition_mode"] == "downstream"
+    assert run_metadata["water_source"]["mode"] == "mock_screening"
 
 
 # ── Tests: write_summary_csv ───────────────────────────────────────────────────

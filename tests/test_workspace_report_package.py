@@ -185,6 +185,8 @@ def test_write_workspace_report_package_writes_json_outputs(tmp_path, monkeypatc
     assert report_json["precipitation_qaqc"]["status"] == "missing"
     assert any(gap["id"] == "streamstats-service-transition" for gap in gap_json["gaps"])
     assert any(gap["id"] == "station-precip-qaqc-pending" for gap in gap_json["gaps"])
+    assert report_json["water_source"]["contract_status"] == "not_recorded"
+    assert any(gap["id"] == "headwater-water-source-contract-not-production-ready" for gap in gap_json["gaps"])
     assert any(gap["issue_url"] for gap in gap_json["gaps"])
 
 
