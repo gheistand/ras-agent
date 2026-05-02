@@ -146,12 +146,17 @@ try:
 
     # pour_point geometry (EPSG:5070)
     pp_x, pp_y = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform(POUR_LON, POUR_LAT)
+    import pandas as pd
+    empty_gdf = gpd.GeoDataFrame(geometry=gpd.GeoSeries([], crs=basin_gdf.crs))
     ws = WatershedResult(
         basin          = basin_gdf,
         streams        = flowlines_gdf,
         pour_point     = Point(pp_x, pp_y),
         characteristics = chars,
         dem_clipped    = terrain.dem_path,   # staged DEM covers full basin
+        subbasins      = empty_gdf,
+        centerlines    = flowlines_gdf.copy(),
+        breaklines     = empty_gdf,
     )
 
     log.info(f"  Drainage area : {chars.drainage_area_km2:.1f} km²  ({chars.drainage_area_mi2:.1f} mi²)")
