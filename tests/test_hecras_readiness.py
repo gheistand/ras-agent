@@ -143,3 +143,31 @@ def test_successful_preprocessor_promotion_records_report(tmp_path, monkeypatch)
     assert report.preprocessor["success"] is True
     assert report_path.exists()
     assert "spring_creek.p01.hdf" in report_path.read_text(encoding="utf-8")
+
+
+def test_regeneration_context_resolves_relative_inputs(tmp_path, monkeypatch):
+    project_dir = tmp_path / "model"
+    paths = _write_project(project_dir)
+    paths["geom_hdf"].unlink()
+
+    monkeypatch.chdir(tmp_path)
+
+    def fake_preprocessor(report, context, max_wait):
+        assert context.project_dir.is_absolute()
+        assert context.plan_file.is_absolute()
+        assert context.project_file.is_absolute()
+        paths["geom_hdf"].write_bytes(b"fresh geometry hdf")
+        paths["geompre"].write_bytes(b"fresh c file")
+        paths["plan_hdf"].write_bytes(b"fresh plan hdf")
+        report.regeneration_performed = True
+
+    monkeypatch.setattr(gate, "_run_geometry_preprocessor", fake_preprocessor)
+
+    report = gate.check_hecras_readiness(
+        project_dir=Path("model"),
+        plan_hdf=Path("model") / paths["plan_hdf"].name,
+        regenerate=True,
+        write_report=False,
+    )
+
+    assert report.status == "regenerated"

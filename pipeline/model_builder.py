@@ -370,6 +370,19 @@ def _write_plan_file(
     )
 
 
+def _write_geometry_only_flow_file(flow_file_path: Path) -> None:
+    """Write a minimal unsteady flow file for geometry and mesh-only products."""
+    content = (
+        "Flow Title=Geometry Only\n"
+        "Program Version=6.60\n"
+        "BEGIN FILE DESCRIPTION:\n"
+        "END FILE DESCRIPTION:\n"
+        "Use Restart= 0 \n"
+    )
+    flow_file_path.write_text(content, encoding="utf-8")
+    logger.info("Wrote geometry-only flow file: %s", flow_file_path)
+
+
 def _update_terrain_reference(geom_hdf_path: Path, new_terrain_path: Path) -> None:
     """
     Update the terrain filename reference in a HEC-RAS geometry HDF5 file.
@@ -853,9 +866,89 @@ def _build_seed_breaklines(
     return gpd.GeoDataFrame({"breakline_type": types}, geometry=geoms, crs="EPSG:5070")
 
 
-def _cell_size_from_area_km2(area_km2: float) -> float:
+def _cell_size_from_area_km2(
+    area_km2: float,
+    target_cell_size_m: Optional[float] = None,
+) -> float:
     """Adaptive default cell size for a seed project."""
+    if target_cell_size_m is not None:
+        target = float(target_cell_size_m)
+        if target <= 0:
+            raise ValueError("target_cell_size_m must be greater than zero")
+        return target
     return min(max(area_km2 * 0.5, 30.0), 300.0)
+
+
+def _mesh_breaklines_5070(
+    watershed,
+    streams_gdf,
+) -> Optional["gpd.GeoDataFrame"]:
+    """Return non-boundary 2D mesh breaklines, falling back to stream lines."""
+    import geopandas as gpd
+
+    existing = _linework_5070(getattr(watershed, "breaklines", None))
+    if existing is not None and len(existing) > 0:
+        breaklines = existing.copy()
+        if "breakline_type" in breaklines.columns:
+            types = breaklines["breakline_type"].fillna("").astype(str).str.lower()
+            breaklines = breaklines[~types.isin({"boundary", "perimeter", "flow_area_boundary"})]
+        breaklines = breaklines[~breaklines.geometry.is_empty & breaklines.geometry.notna()]
+        if len(breaklines) > 0:
+            return gpd.GeoDataFrame(breaklines, geometry=breaklines.geometry, crs="EPSG:5070")
+
+    if streams_gdf is None or len(streams_gdf) == 0:
+        return None
+    streams = streams_gdf.copy()
+    streams["breakline_type"] = "stream"
+    return gpd.GeoDataFrame(streams, geometry=streams.geometry, crs="EPSG:5070")
+
+
+def _breakline_defs_from_gdf(
+    breaklines_gdf,
+    cell_size_m: float,
+    *,
+    breakline_simplify_ft: float = 10.0,
+) -> list[dict]:
+    """Convert EPSG:5070 linework rows to ras-commander breakline definitions."""
+    import pandas as pd
+
+    simplify_tol_m = breakline_simplify_ft * 0.3048 if breakline_simplify_ft else 0
+    definitions = []
+    for idx, row in breaklines_gdf.reset_index(drop=True).iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+        if simplify_tol_m > 0:
+            geom = geom.simplify(simplify_tol_m, preserve_topology=True)
+
+        parts = list(geom.geoms) if hasattr(geom, "geoms") else [geom]
+        for part_idx, part in enumerate(parts, start=1):
+            if part is None or part.is_empty or not hasattr(part, "coords"):
+                continue
+            coords = [(float(x), float(y)) for x, y, *_ in part.coords]
+            if len(coords) < 2:
+                continue
+
+            raw_name = row.get("name", None)
+            if raw_name is None or pd.isna(raw_name):
+                raw_name = row.get("nhdplus_comid", None)
+            prefix = "BL"
+            if "breakline_type" in row and str(row.get("breakline_type", "")).lower().startswith("gauge"):
+                prefix = "Gauge"
+            name = f"{prefix}{idx + 1}" if raw_name is None or pd.isna(raw_name) else str(raw_name)
+            if len(parts) > 1:
+                name = f"{name}_{part_idx}"
+            name = re.sub(r"[^A-Za-z0-9_ -]", "_", name).strip()[:32] or f"BL{idx + 1}"
+
+            near = row.get("cell_size_near", None)
+            far = row.get("cell_size_far", None)
+            definitions.append({
+                "name": name,
+                "coords": coords,
+                "cell_size_near": float(near) if near is not None and not pd.isna(near) else cell_size_m * 0.5,
+                "cell_size_far": float(far) if far is not None and not pd.isna(far) else cell_size_m,
+            })
+    return definitions
 
 
 def _seed_cell_centers(basin_poly, cell_size_m: float, max_cells: int = 4000):
@@ -1713,7 +1806,10 @@ def _build_geometry_first(
     geom_file = project_dir / f"{project_name}.{geom_ext}"
 
     basin_poly = _watershed_polygon_5070(watershed)
-    cell_size_m = _cell_size_from_area_km2(watershed.characteristics.drainage_area_km2)
+    cell_size_m = _cell_size_from_area_km2(
+        watershed.characteristics.drainage_area_km2,
+        kwargs.get("cell_size_m"),
+    )
 
     # Smooth perimeter to remove narrow concavities that cause Cell Area Error
     smooth_dist = cell_size_m * 0.5
@@ -1730,29 +1826,28 @@ def _build_geometry_first(
         geom_file, area_name, perimeter_coords, cell_size_m, mannings_n,
     )
 
-    # Insert stream centerlines as breaklines for mesh refinement
     streams_gdf_raw = _linework_5070(getattr(watershed, "streams", None))
     streams_5070 = list(streams_gdf_raw.geometry) if streams_gdf_raw is not None else []
+
+    # Insert channel/refinement breaklines for mesh control. These can be
+    # separate from watershed.streams so local refinement controls do not affect
+    # boundary-condition stream crossing detection.
+    mesh_breaklines_gdf = _mesh_breaklines_5070(watershed, streams_gdf_raw)
     breakline_simplify_ft = kwargs.get("breakline_simplify_ft", 10.0)
-    if streams_5070:
+    breakline_defs = []
+    if mesh_breaklines_gdf is not None and len(mesh_breaklines_gdf) > 0:
         from ras_commander.geom import GeomStorage as _GeomStorageBL
-        simplify_tol_m = breakline_simplify_ft * 0.3048 if breakline_simplify_ft else 0
-        breakline_defs = []
-        for idx, geom in enumerate(streams_5070, start=1):
-            if simplify_tol_m > 0:
-                geom = geom.simplify(simplify_tol_m, preserve_topology=True)
-            breakline_defs.append({
-                "name": f"Stream{idx}",
-                "coords": list(geom.coords),
-                "cell_size_near": cell_size_m * 0.33,
-                "cell_size_far": None,
-            })
+        breakline_defs = _breakline_defs_from_gdf(
+            mesh_breaklines_gdf,
+            cell_size_m,
+            breakline_simplify_ft=breakline_simplify_ft,
+        )
         _GeomStorageBL.set_breaklines(
             geom_file, area_name, breakline_defs, create_backup=False,
         )
         total_pts = sum(len(bl["coords"]) for bl in breakline_defs)
         logger.info(
-            "Inserted %d stream breaklines (%d vertices, simplified at %.0fft) into %s",
+            "Inserted %d mesh breaklines (%d vertices, simplified at %.0fft) into %s",
             len(breakline_defs), total_pts, breakline_simplify_ft or 0, geom_file.name,
         )
 
@@ -1767,40 +1862,53 @@ def _build_geometry_first(
 
     bc_slope = max(watershed.characteristics.main_channel_slope_m_per_m, 1e-6)
 
-    # Generate 2D BC Lines from watershed/stream/terrain data
-    from pipeline.bc_lines import (
-        append_bc_lines_to_geom,
-        generate_bc_lines,
-        write_unsteady_flow_file_2d,
-    )
-    from shapely.geometry import Point as ShapelyPoint
+    include_boundary_conditions = kwargs.get("include_boundary_conditions", True)
+    bc_set = None
 
-    pp = getattr(watershed, "pour_point", None)
-    pour_point_geom = ShapelyPoint(pp.x, pp.y) if pp is not None else basin_poly.centroid
+    if include_boundary_conditions:
+        # Generate 2D BC Lines from watershed/stream/terrain data
+        try:
+            from bc_lines import (
+                append_bc_lines_to_geom,
+                generate_bc_lines,
+                write_unsteady_flow_file_2d,
+            )
+        except ImportError:  # pragma: no cover - package import path
+            from pipeline.bc_lines import (
+                append_bc_lines_to_geom,
+                generate_bc_lines,
+                write_unsteady_flow_file_2d,
+            )
+        from shapely.geometry import Point as ShapelyPoint
 
-    dem_for_bc = terrain_file
+        pp = getattr(watershed, "pour_point", None)
+        pour_point_geom = ShapelyPoint(pp.x, pp.y) if pp is not None else basin_poly.centroid
 
-    # Contributing area grid for flow splitting (optional)
-    ad8_path = None
-    artifacts = getattr(watershed, "artifacts", {})
-    if "ad8" in artifacts and Path(artifacts["ad8"]).exists():
-        ad8_path = Path(artifacts["ad8"])
+        dem_for_bc = terrain_file
 
-    # Future non-headwater/chained-basin work belongs here once the upstream
-    # hydrograph handoff contract is defined and validated. The plumbing now
-    # reaches this builder via `boundary_condition_mode`, but we intentionally
-    # fail fast above until downstream-specific inputs and QA are designed.
-    bc_set = generate_bc_lines(
-        basin=basin_poly,
-        streams=streams_5070,
-        pour_point=pour_point_geom,
-        dem_path=dem_for_bc,
-        ad8_path=ad8_path,
-        area_name=area_name,
-        channel_slope=bc_slope,
-        headwater=True,
-    )
-    append_bc_lines_to_geom(geom_file, bc_set)
+        # Contributing area grid for flow splitting (optional)
+        ad8_path = None
+        artifacts = getattr(watershed, "artifacts", {})
+        if "ad8" in artifacts and Path(artifacts["ad8"]).exists():
+            ad8_path = Path(artifacts["ad8"])
+
+        # Future non-headwater/chained-basin work belongs here once the upstream
+        # hydrograph handoff contract is defined and validated. The plumbing now
+        # reaches this builder via `boundary_condition_mode`, but we intentionally
+        # fail fast above until downstream-specific inputs and QA are designed.
+        bc_set = generate_bc_lines(
+            basin=basin_poly,
+            streams=streams_5070,
+            pour_point=pour_point_geom,
+            dem_path=dem_for_bc,
+            ad8_path=ad8_path,
+            area_name=area_name,
+            channel_slope=bc_slope,
+            headwater=True,
+        )
+        append_bc_lines_to_geom(geom_file, bc_set)
+    else:
+        logger.info("Skipping BC line generation for geometry-only mesh product")
 
     for idx, rp in enumerate(return_periods, start=1):
         hydro = hydro_set.get(rp)
@@ -1813,7 +1921,10 @@ def _build_geometry_first(
         rp_flow_file = project_dir / f"{project_name}.{u_suffix}"
         rp_plan_file = project_dir / f"{project_name}.{p_suffix}"
 
-        write_unsteady_flow_file_2d(rp_flow_file, hydro_set, rp, bc_set, bc_slope)
+        if include_boundary_conditions:
+            write_unsteady_flow_file_2d(rp_flow_file, hydro_set, rp, bc_set, bc_slope)
+        else:
+            _write_geometry_only_flow_file(rp_flow_file)
         _write_plan_file(
             rp_plan_file,
             geom_file=geom_ext,
@@ -1826,13 +1937,15 @@ def _build_geometry_first(
     _register_files_in_prj(prj_file, geom_ext=geom_ext)
 
     # Set breakline spacing before mesh generation
-    if streams_5070:
+    breakline_near_repeats = kwargs.get("breakline_near_repeats", 1)
+    if breakline_defs and breakline_near_repeats is not None:
         try:
             from ras_commander.geom import GeomMesh as _GeomMesh
             _GeomMesh.set_breakline_spacing(
                 str(geom_file),
-                near=cell_size_m * 0.33,
-                far=cell_size_m,
+                near=None,
+                far=None,
+                near_repeats=int(breakline_near_repeats),
                 all_breaklines=True,
             )
         except ImportError:
@@ -1921,7 +2034,9 @@ def _build_geometry_first(
         "cell_size_m": cell_size_m,
         "dem_clipped": str(getattr(watershed, "dem_clipped", "")),
         "centerline_count": _centerline_count(watershed),
-        "breakline_count": len(bl) if (bl := _linework_5070(getattr(watershed, "breaklines", None))) is not None else 0,
+        "breakline_count": len(breakline_defs),
+        "boundary_condition_count": len(bc_set.bc_lines) if bc_set is not None else 0,
+        "include_boundary_conditions": bool(include_boundary_conditions),
         "mesh_cells": mesh_result.cell_count if mesh_result and mesh_result.ok else mesh_point_count,
         "mesh_status": mesh_result.status if mesh_result else "deferred",
         "mesh_qa_status": mesh_qa_package.get("status") if mesh_qa_package else "failed",
