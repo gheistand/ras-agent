@@ -313,6 +313,7 @@ Linux (Cloud VM — Rocky 8 / RHEL 8):
 - **Terrain:** [ILHMP LiDAR Clearinghouse](https://clearinghouse.isgs.illinois.edu/data/elevation/illinois-height-modernization-ilhmp) (Illinois Height Modernization Program)
 - **Hydrology:** [USGS StreamStats](https://streamstats.usgs.gov) — peak flow regression equations (USGS SIR 2008-5176 for Illinois)
 - **Land Cover:** [NLCD](https://www.mrlc.gov/) — Manning's n assignment
+- **Rain-on-grid precipitation:** [NOAA AORC v1.1](docs/AORC_PRECIPITATION.md) — hourly gridded precipitation retrieval via the public NOAA/NODD S3 Zarr archive
 
 ---
 
