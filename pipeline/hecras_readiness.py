@@ -524,8 +524,8 @@ def _resolve_context(
     geom_ext: str,
     ras_version: Optional[str | Path],
 ) -> _ProjectContext:
-    project_dir = Path(project_dir)
-    plan_hdf = Path(plan_hdf)
+    project_dir = Path(project_dir).resolve()
+    plan_hdf = Path(plan_hdf).resolve()
     project_base, plan_number = _parse_plan_hdf_name(plan_hdf)
 
     plan_file = project_dir / f"{project_base}.p{plan_number}"

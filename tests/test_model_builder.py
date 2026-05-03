@@ -586,6 +586,63 @@ def test_build_geometry_first_registers_terrain(tmp_path, stub_geommesh):
     assert layer.attrib["Filename"] == r".\terrain.tif"
 
 
+def test_geometry_first_accepts_explicit_cell_size_and_breakline_controls(tmp_path, stub_geommesh):
+    dem_path = tmp_path / "source_dem.tif"
+    dem_path.write_bytes(b"fake-dem")
+    watershed = _make_watershed(dem_path=dem_path)
+    stream = watershed.streams.geometry.iloc[0]
+    gauge_line = LineString([(306500.0, 4402500.0), (308500.0, 4402500.0)])
+    watershed.breaklines = gpd.GeoDataFrame(
+        {
+            "breakline_type": ["major_channel", "gauge_refinement", "boundary"],
+            "name": ["NHD14820511", "GaugeRefine1", "Boundary"],
+            "cell_size_near": [75.0, 50.0, 125.0],
+            "cell_size_far": [125.0, 100.0, 125.0],
+        },
+        geometry=[stream, gauge_line, watershed.basin.geometry.iloc[0].boundary],
+        crs="EPSG:5070",
+    )
+    hydro_set = _make_hydro_set()
+
+    project = mb._build_geometry_first(
+        watershed,
+        hydro_set,
+        tmp_path,
+        return_periods=[100],
+        cell_size_m=125.0,
+    )
+
+    text = project.geometry_file.read_text()
+    assert "Storage Area Point Generation Data=,,125,125" in text
+    assert "BreakLine Name=NHD14820511" in text
+    assert "BreakLine CellSize Min=75.0" in text
+    assert "BreakLine Name=GaugeRefine1" in text
+    assert "BreakLine CellSize Min=50.0" in text
+    assert "BreakLine Name=Boundary" not in text
+    assert project.metadata["cell_size_m"] == 125.0
+    assert project.metadata["breakline_count"] == 2
+
+
+def test_geometry_first_can_build_geometry_only_without_bc_lines(tmp_path, stub_geommesh):
+    watershed = _make_watershed()
+    hydro_set = _make_hydro_set()
+
+    project = mb._build_geometry_first(
+        watershed,
+        hydro_set,
+        tmp_path,
+        return_periods=[100],
+        include_boundary_conditions=False,
+    )
+
+    geom_text = project.geometry_file.read_text(encoding="utf-8")
+    flow_text = project.flow_file.read_text(encoding="utf-8")
+    assert "BC Line Name=" not in geom_text
+    assert "Boundary Location=" not in flow_text
+    assert project.metadata["boundary_condition_count"] == 0
+    assert project.metadata["include_boundary_conditions"] is False
+
+
 def test_build_model_dispatches_geometry_first(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()
