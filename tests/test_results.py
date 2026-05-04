@@ -31,9 +31,12 @@ from results import (
     extract_flood_extent,
     export_results,
     export_cloud_native,
+    export_filtered_rasters,
+    _parse_plan_from_hdf,
     detect_ras_version,
     FlowAreaGeometry,
     FlowAreaResults,
+    NODATA,
     TARGET_CRS,
 )
 
@@ -665,3 +668,225 @@ class TestExportCloudNative:
             include_results=True,
             include_terrain=True,
         )
+
+
+# ── Filtered Raster Export (RasProcess) ──────────────────────────────────────
+
+
+def _make_synthetic_rasters(tmp_dir: Path, rows: int = 50, cols: int = 50):
+    """Create aligned depth and WSE GeoTIFFs with known values for testing.
+
+    Depth: gradient from 0 m (top) to ~1.5 m (bottom).
+    WSE: depth + 100 m (fake ground elevation).
+    Both share the same grid, transform, and CRS — just like RASMapper output.
+    """
+    from rasterio.transform import from_bounds
+
+    transform = from_bounds(300_000, 200_000, 301_000, 201_000, cols, rows)
+    profile = {
+        "driver": "GTiff",
+        "height": rows,
+        "width": cols,
+        "count": 1,
+        "dtype": np.float32,
+        "crs": CRS.from_epsg(5070),
+        "transform": transform,
+        "nodata": NODATA,
+    }
+
+    depth_vals = np.linspace(0, 1.5, rows * cols, dtype=np.float32).reshape(rows, cols)
+    wse_vals = (depth_vals + 100.0).astype(np.float32)
+
+    depth_path = tmp_dir / "Depth (Max).Terrain.tif"
+    wse_path = tmp_dir / "WSE (Max).Terrain.tif"
+
+    for path, data in [(depth_path, depth_vals), (wse_path, wse_vals)]:
+        with rasterio.open(str(path), "w", **profile) as dst:
+            dst.write(data, 1)
+
+    return depth_path, wse_path, depth_vals, wse_vals
+
+
+class TestParsePlanFromHdf:
+    def test_standard_name(self, tmp_path):
+        hdf = tmp_path / "MyProject.p01.hdf"
+        hdf.touch()
+        project_dir, plan_num = _parse_plan_from_hdf(hdf)
+        assert project_dir == tmp_path
+        assert plan_num == "01"
+
+    def test_multi_dot_name(self, tmp_path):
+        hdf = tmp_path / "Spring.Creek.p03.hdf"
+        hdf.touch()
+        _, plan_num = _parse_plan_from_hdf(hdf)
+        assert plan_num == "03"
+
+    def test_invalid_name_raises(self, tmp_path):
+        hdf = tmp_path / "no_plan_number.hdf"
+        hdf.touch()
+        with pytest.raises(ValueError, match="Cannot parse plan number"):
+            _parse_plan_from_hdf(hdf)
+
+
+class TestExportFilteredRasters:
+    """Tests for export_filtered_rasters() — mocks ras_commander module."""
+
+    def _mock_store_maps(self, tmp_dir):
+        """Return a side_effect for store_maps that produces synthetic rasters."""
+        depth_path, wse_path, _, _ = _make_synthetic_rasters(tmp_dir)
+
+        def fake_store_maps(*, plan_number, output_path, **kwargs):
+            import shutil as _shutil
+            out = Path(output_path)
+            out.mkdir(parents=True, exist_ok=True)
+            d = out / depth_path.name
+            w = out / wse_path.name
+            _shutil.copy2(depth_path, d)
+            _shutil.copy2(wse_path, w)
+            return {"depth": [d], "wse": [w]}
+
+        return fake_store_maps
+
+    def _run_with_mocked_ras(self, staging, fake_store, call_fn):
+        """Inject a fake ras_commander module and run call_fn."""
+        fake_rc = mock.MagicMock()
+        fake_rc.RasProcess.store_maps.side_effect = fake_store
+        fake_rc.init_ras_project.return_value = mock.MagicMock()
+        with mock.patch.dict("sys.modules", {"ras_commander": fake_rc}):
+            return call_fn()
+
+    def test_basic_filtering(self, tmp_path):
+        """Cells below threshold are NODATA in both depth and WSE outputs."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=1.0,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        assert "filtered_depth" in outputs
+        assert "filtered_wse" in outputs
+        assert outputs["filtered_depth"].exists()
+        assert outputs["filtered_wse"].exists()
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+            assert src.nodata == NODATA
+            n_nodata = np.sum(np.isclose(depth, NODATA))
+            assert n_nodata > 0, "Expected some cells filtered out"
+            assert n_nodata < depth.size, "Expected some cells to survive filter"
+
+        with rasterio.open(str(outputs["filtered_wse"])) as src:
+            wse = src.read(1)
+            wse_nodata = np.sum(np.isclose(wse, NODATA))
+            assert wse_nodata == n_nodata
+
+    def test_mask_alignment(self, tmp_path):
+        """The same pixels are masked in both depth and WSE."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=0.5,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+        with rasterio.open(str(outputs["filtered_wse"])) as src:
+            wse = src.read(1)
+
+        depth_mask = np.isclose(depth, NODATA)
+        wse_mask = np.isclose(wse, NODATA)
+        assert np.array_equal(depth_mask, wse_mask), "Depth and WSE masks must be identical"
+
+    def test_zero_threshold_keeps_all(self, tmp_path):
+        """A threshold of 0 ft should keep all non-zero cells."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=0.0,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+        n_filtered = np.sum(np.isclose(depth, NODATA))
+        assert n_filtered <= depth.shape[1], "At most one row at zero depth"
+
+    def test_negative_threshold_raises(self, tmp_path):
+        """Negative min_depth_ft should be rejected."""
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        with pytest.raises(ValueError, match="non-negative"):
+            export_filtered_rasters(
+                hdf_path=hdf, output_dir=tmp_path / "out", min_depth_ft=-1.0,
+            )
+
+    def test_cog_metadata_tags(self, tmp_path):
+        """Filtered rasters should include threshold and source metadata."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=0.5,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        for key in ("filtered_depth", "filtered_wse"):
+            with rasterio.open(str(outputs[key])) as src:
+                tags = src.tags()
+                assert tags["min_depth_threshold_ft"] == "0.5"
+                assert tags["source_hdf"] == "TestProj.p01.hdf"
+                assert tags["source_plan"] == "p01"
+
+    def test_high_threshold_filters_all(self, tmp_path):
+        """A threshold higher than any depth should produce all-NODATA rasters."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=100.0,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+        assert np.all(np.isclose(depth, NODATA)), "All cells should be NODATA"
