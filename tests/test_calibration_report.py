@@ -4,6 +4,7 @@ Tests for pipeline/calibration_report.py.
 All tests use mocked or inline modeled data and do not require HEC-RAS.
 """
 
+import math
 import os
 import sys
 from html.parser import HTMLParser
@@ -42,13 +43,14 @@ def _series(values, start="2026-04-01 00:00", freq="h"):
 
 
 def test_calculate_stats_normalizes_stage_rmse_by_mean():
-    observed = _series(np.linspace(9.5, 10.5, 12))
+    observed = _series([4.0, 4.0, 4.0, 4.0, 10.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0, 4.0])
     modeled = observed + 1.0
 
     stats = calibration_report.calculate_stats(observed, modeled, variable="stage")
 
     assert stats["rmse"] == pytest.approx(1.0)
-    assert stats["rmse_pct"] == pytest.approx(10.0)
+    expected_mean = np.mean(observed.values)
+    assert stats["rmse_pct"] == pytest.approx(100.0 / expected_mean)
 
 
 def test_calculate_stats_normalizes_flow_rmse_by_peak():
@@ -59,6 +61,58 @@ def test_calculate_stats_normalizes_flow_rmse_by_peak():
 
     assert stats["rmse"] == pytest.approx(10.0)
     assert stats["rmse_pct"] == pytest.approx(10.0)
+
+
+def test_calculate_stats_perfect_fit():
+    observed = _series(np.linspace(9.5, 10.5, 24))
+    stats = calibration_report.calculate_stats(observed, observed.copy(), variable="stage")
+
+    assert stats["rmse"] == pytest.approx(0.0, abs=1e-12)
+    assert stats["rmse_pct"] == pytest.approx(0.0, abs=1e-9)
+    assert stats["pbias"] == pytest.approx(0.0, abs=1e-9)
+    assert stats["nse"] == pytest.approx(1.0)
+    assert stats["pearson_r"] == pytest.approx(1.0)
+    assert stats["kge"] == pytest.approx(1.0)
+
+
+def test_calculate_stats_known_pbias():
+    observed = _series([100.0] * 10)
+    modeled = _series([110.0] * 10)
+    stats = calibration_report.calculate_stats(observed, modeled, variable="flow")
+
+    assert stats["pbias"] == pytest.approx(10.0)
+
+
+def test_calculate_stats_constant_offset_has_r_1():
+    observed = _series(np.linspace(5.0, 15.0, 24))
+    modeled = observed + 2.0
+    stats = calibration_report.calculate_stats(observed, modeled, variable="stage")
+
+    assert stats["pearson_r"] == pytest.approx(1.0)
+
+
+def test_calculate_stats_raises_on_non_overlapping():
+    obs = _series([1.0, 2.0, 3.0], start="2026-01-01")
+    mod = _series([1.0, 2.0, 3.0], start="2026-06-01")
+    with pytest.raises(ValueError, match="no overlapping"):
+        calibration_report.calculate_stats(obs, mod)
+
+
+def test_calculate_stats_single_point_returns_nan_for_correlation():
+    obs = _series([5.0])
+    mod = _series([5.5])
+    stats = calibration_report.calculate_stats(obs, mod)
+
+    assert not math.isfinite(stats["pearson_r"])
+    assert not math.isfinite(stats["nse"])
+
+
+def test_calculate_stats_constant_observed_returns_nan_kge():
+    obs = _series([10.0] * 12)
+    mod = _series([11.0] * 12)
+    stats = calibration_report.calculate_stats(obs, mod, variable="stage")
+
+    assert not math.isfinite(stats["kge"])
 
 
 def test_generate_calibration_report_self_contained_with_bokeh(tmp_path):

@@ -369,7 +369,7 @@ def _align_series(observed: pd.Series, modeled: pd.Series) -> pd.DataFrame:
         join="inner",
     ).dropna()
 
-    if aligned.empty and len(observed) == len(modeled):
+    if aligned.empty and len(observed) == len(modeled) and isinstance(observed.index, pd.RangeIndex):
         aligned = pd.DataFrame(
             {
                 "observed": observed.to_numpy(dtype=float),
@@ -396,7 +396,7 @@ def _fallback_metrics(observed: np.ndarray, modeled: np.ndarray) -> dict[str, fl
     denominator = float(np.sum((observed - np.mean(observed)) ** 2))
     nse = float(1.0 - np.sum(residual ** 2) / denominator) if denominator != 0 else float("nan")
 
-    if np.std(observed) > 0 and np.mean(observed) != 0:
+    if np.std(observed) > 0 and np.mean(observed) != 0 and not np.isnan(correlation):
         alpha = float(np.std(modeled) / np.std(observed))
         beta = float(np.mean(modeled) / np.mean(observed))
         kge = float(1.0 - np.sqrt((correlation - 1.0) ** 2 + (alpha - 1.0) ** 2 + (beta - 1.0) ** 2))
