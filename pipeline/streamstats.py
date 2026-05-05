@@ -13,18 +13,23 @@ Apache License 2.0
 
 import logging
 import os
+import time
 from dataclasses import dataclass, field
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Union
 
 import httpx
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # ── USGS StreamStats API ──────────────────────────────────────────────────────
 
+# 2026: legacy streamstatsservices endpoint decommissioned Jan 30, 2026.
+# New watershed delineation endpoint:
 STREAMSTATS_BASE = os.getenv(
     "STREAMSTATS_BASE",
-    "https://streamstats.usgs.gov/streamstatsservices",
+    "https://streamstats.usgs.gov/ss-delineate",
 )
 
 # Return periods (years) and their AEP labels
@@ -54,7 +59,7 @@ class PeakFlowEstimates:
     pour_point_lon: float
     pour_point_lat: float
     drainage_area_mi2: float
-    source: str                  # "StreamStats_API" or "regression_fallback"
+    source: str                  # "StreamStats_API", "regression_fallback", or "gauge_lp3"
     workspace_id: Optional[str]  # StreamStats workspace for reuse
 
     # Peak flows in CFS
@@ -113,22 +118,26 @@ def delineate_streamstats_watershed(
     timeout: int = 120,
 ) -> Optional[str]:
     """
-    Delineate watershed in StreamStats and return workspace ID.
-    The workspace ID is reused for flow statistic queries.
-    """
-    logger.info(f"StreamStats: delineating watershed at {lat:.4f}N, {lon:.4f}W")
+    Delineate watershed via the SS-Delineate API (2026 endpoint).
 
-    url = f"{STREAMSTATS_BASE}/watershed.geojson"
-    params = {
-        "rcode": region,
-        "xlocation": lon,
-        "ylocation": lat,
-        "crs": 4326,
-        "includeparameters": "true",
-        "includeflowtypes": "false",
-        "includefeatures": "true",
-        "simplify": "true",
-    }
+    Uses GET /v1/delineate/sshydro/{region}?lat={lat}&lon={lon}.
+    Returns a workspace identifier string on success, or None on failure.
+    The workspace ID is no longer used for flow statistics (see get_flow_statistics).
+
+    Args:
+        lon: Pour point longitude (WGS84).
+        lat: Pour point latitude (WGS84).
+        region: StreamStats region code (default "IL").
+        timeout: HTTP request timeout in seconds.
+
+    Returns:
+        Workspace ID string (may be a sentinel "ss-delineate" if new API
+        returns N/A), or None if the request fails.
+    """
+    logger.info("StreamStats: delineating watershed at %.4fN, %.4fW", lat, lon)
+
+    url = f"{STREAMSTATS_BASE}/v1/delineate/sshydro/{region}"
+    params = {"lat": lat, "lon": lon}
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -136,12 +145,22 @@ def delineate_streamstats_watershed(
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as e:
-        logger.warning(f"StreamStats watershed delineation failed: {e}")
+        logger.warning("StreamStats watershed delineation failed: %s", e)
         return None
 
+    # Extract workspace ID from DelineationResponse
+    # New API may return "N/A" — treat as successful delineation with sentinel
     workspace_id = data.get("workspaceID")
-    if workspace_id:
-        logger.info(f"StreamStats workspace: {workspace_id}")
+    if not workspace_id:
+        try:
+            workspace_id = data["bcrequest"]["wsresp"].get("workspaceID")
+        except (KeyError, TypeError):
+            workspace_id = None
+
+    if not workspace_id or workspace_id == "N/A":
+        workspace_id = "ss-delineate"  # sentinel: delineation succeeded
+
+    logger.info("StreamStats ss-delineate: workspace=%s", workspace_id)
     return workspace_id
 
 
@@ -149,40 +168,29 @@ def get_flow_statistics(
     workspace_id: str,
     region: str = IL_REGION_CODE,
     timeout: int = 60,
-) -> dict[str, float]:
+) -> Optional[dict[str, float]]:
     """
-    Retrieve peak flow statistics from a StreamStats workspace.
-    Returns dict of {statistic_code: value_in_cfs}.
+    Retrieve peak flow statistics from StreamStats.
+
+    NOTE (2026): Flow statistics via ss-hydro are not yet implemented.
+    The legacy flowstatistics.json endpoint was decommissioned January 30, 2026.
+    Illinois regression equations (already in this module) are the correct
+    and approved path for peak flows. This function always returns None,
+    triggering the regression fallback in get_peak_flows().
+
+    Args:
+        workspace_id: StreamStats workspace identifier (unused).
+        region: StreamStats region code (unused).
+        timeout: HTTP timeout in seconds (unused).
+
+    Returns:
+        None — triggers regression fallback in get_peak_flows().
     """
-    logger.info(f"StreamStats: fetching flow statistics for workspace {workspace_id}")
-
-    url = f"{STREAMSTATS_BASE}/flowstatistics.json"
-    params = {
-        "rcode": region,
-        "workspaceID": workspace_id,
-        "includeflowtypes": PEAK_FLOW_STAT_GROUP,
-    }
-
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            resp = client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as e:
-        logger.warning(f"StreamStats flow statistics query failed: {e}")
-        return {}
-
-    # Parse response — structure: {"FlowStatisticsList": [{"StatisticGroupName": ..., "Statistics": [...]}]}
-    results = {}
-    for group in data.get("FlowStatisticsList", []):
-        for stat in group.get("Statistics", []):
-            code = stat.get("code", "")   # e.g., "IL_QK2" or "Peak2Yr"
-            value = stat.get("Value")
-            if value is not None:
-                results[code] = float(value)
-
-    logger.info(f"Retrieved {len(results)} flow statistics")
-    return results
+    logger.info(
+        "Flow statistics via ss-hydro are not yet implemented; "
+        "using Illinois regression equations"
+    )
+    return None
 
 
 def _parse_il_flow_stats(raw_stats: dict[str, float]) -> dict[str, float]:
@@ -290,6 +298,175 @@ def illinois_regression_equations(
     return results
 
 
+# ── Gauge-Based LP3 Peak Flows ────────────────────────────────────────────────
+
+def _lp3_frequency_factor(skew: float, exceedance_prob: float) -> float:
+    """
+    Compute the Log-Pearson III frequency factor K for a given skew coefficient
+    and exceedance probability, per Bulletin 17C methodology.
+
+    Uses scipy.stats.pearson3.ppf when available; falls back to the
+    Wilson-Hilferty approximation (Bulletin 17B standard).
+
+    Args:
+        skew: Skew coefficient of log10-transformed annual peaks.
+        exceedance_prob: Annual exceedance probability (e.g., 0.01 for 100-yr).
+
+    Returns:
+        Frequency factor K such that Q_T = 10^(mean_log + K * std_log).
+    """
+    try:
+        from scipy import stats as _stats
+        return float(_stats.pearson3.ppf(1.0 - exceedance_prob, skew))
+    except ImportError:
+        pass
+
+    # Wilson-Hilferty approximation (Bulletin 17B/C, per Chow 1964)
+    p = 1.0 - exceedance_prob
+    # Standard normal quantile via Abramowitz & Stegun 26.2.17 rational approximation
+    t = np.sqrt(-2.0 * np.log(min(p, 1.0 - p)))
+    c0, c1, c2 = 2.515517, 0.802853, 0.010328
+    d1, d2, d3 = 1.432788, 0.189269, 0.001308
+    z = t - (c0 + c1 * t + c2 * t**2) / (1.0 + d1 * t + d2 * t**2 + d3 * t**3)
+    if p < 0.5:
+        z = -z
+
+    if abs(skew) < 1e-6:
+        return float(z)
+
+    k = skew / 6.0
+    inner = (z - k) * k + 1.0
+    return float((2.0 / skew) * (max(inner, 0.0) ** 3 - 1.0))
+
+
+def get_peak_flows_from_rdb(rdb_path: Union[str, Path]) -> "PeakFlowEstimates":
+    """
+    Compute peak flow frequency estimates from a USGS annual peaks RDB file.
+
+    Implements Log-Pearson Type III fitting per Bulletin 17C (USGS WSP 2020).
+    Returns Q2, Q5, Q10, Q25, Q50, Q100, Q500 in CFS.
+
+    Args:
+        rdb_path: Path to a USGS annual peak flow RDB file (tab-separated,
+            comment lines start with '#', second non-comment line is format codes).
+
+    Returns:
+        PeakFlowEstimates with source="gauge_lp3". pour_point_lon,
+        pour_point_lat, and drainage_area_mi2 are set to 0.0 (not available
+        from the RDB file; caller should update if needed).
+
+    Raises:
+        ValueError: If fewer than 10 valid peak records are found.
+        FileNotFoundError: If the RDB file does not exist.
+    """
+    rdb_path = Path(rdb_path)
+
+    # Parse RDB: skip comment lines and blank lines, then header, format codes, data
+    non_comment_lines = []
+    with open(rdb_path) as fh:
+        for line in fh:
+            if not line.startswith("#") and line.strip():
+                non_comment_lines.append(line.rstrip("\n\r"))
+
+    if len(non_comment_lines) < 3:
+        raise ValueError(f"RDB file has too few data lines: {rdb_path}")
+
+    headers = non_comment_lines[0].split("\t")
+    # non_comment_lines[1] is the format row (e.g., "5s", "15s", "8s", ...)
+    data_rows = non_comment_lines[2:]
+
+    try:
+        va_col = headers.index("peak_va")
+        cd_col = headers.index("peak_cd")
+    except ValueError as exc:
+        raise ValueError(f"RDB file missing required column: {exc}") from exc
+
+    peaks = []
+    for row in data_rows:
+        parts = row.split("\t")
+        if len(parts) <= va_col:
+            continue
+        va_str = parts[va_col].strip()
+        cd_str = parts[cd_col].strip() if cd_col < len(parts) else ""
+
+        # Skip empty values or regulated peaks (code "6")
+        if not va_str or "6" in cd_str:
+            continue
+
+        try:
+            peaks.append(float(va_str))
+        except ValueError:
+            continue
+
+    if len(peaks) < 10:
+        raise ValueError(
+            f"Insufficient data for LP3 fit: {len(peaks)} valid records "
+            f"(minimum 10 required) in {rdb_path.name}"
+        )
+
+    # Log-Pearson III fitting (Bulletin 17C)
+    peaks_arr = np.array(peaks, dtype=float)
+    log_peaks = np.log10(peaks_arr)
+    n = len(log_peaks)
+    mean_log = float(np.mean(log_peaks))
+    std_log = float(np.std(log_peaks, ddof=1))
+
+    try:
+        from scipy import stats as _stats
+        skew = float(_stats.skew(log_peaks, bias=False))
+    except ImportError:
+        # Unbiased sample skewness
+        skew = float(
+            (n / ((n - 1) * (n - 2)))
+            * np.sum(((log_peaks - mean_log) / std_log) ** 3)
+        )
+
+    logger.info(
+        "[CALC] LP3 fit (%s): n=%d, mean_log=%.4f, std_log=%.4f, skew=%.4f",
+        rdb_path.name, n, mean_log, std_log, skew,
+    )
+
+    # Compute Q for each return period
+    return_period_exceedance = [
+        (2,   "Q2",   0.50),
+        (5,   "Q5",   0.20),
+        (10,  "Q10",  0.10),
+        (25,  "Q25",  0.04),
+        (50,  "Q50",  0.02),
+        (100, "Q100", 0.01),
+        (500, "Q500", 0.002),
+    ]
+
+    q_values: dict[str, float] = {}
+    for T, label, ep in return_period_exceedance:
+        K = _lp3_frequency_factor(skew, ep)
+        Q = 10.0 ** (mean_log + K * std_log)
+        q_values[label] = round(Q, 1)
+        logger.info("[CALC] LP3 Q%d (ep=%.3f): K=%.4f → Q=%.0f CFS", T, ep, K, Q)
+
+    result = PeakFlowEstimates(
+        pour_point_lon=0.0,
+        pour_point_lat=0.0,
+        drainage_area_mi2=0.0,
+        source="gauge_lp3",
+        workspace_id=None,
+    )
+    for label, value in q_values.items():
+        setattr(result, label, value)
+
+    monotonic = (
+        result.Q2 < result.Q5 < result.Q10 < result.Q25
+        < result.Q50 < result.Q100 < result.Q500
+    )
+    logger.info(
+        "[CALC] Gauge LP3 peaks: Q2=%.0f, Q10=%.0f, Q100=%.0f, Q500=%.0f CFS [%s]",
+        result.Q2, result.Q10, result.Q100, result.Q500,
+        "VALID" if monotonic else "NON-MONOTONIC — check data",
+    )
+
+    return result
+
+
 # ── High-level entry point ────────────────────────────────────────────────────
 
 def get_peak_flows(
@@ -299,10 +476,15 @@ def get_peak_flows(
     channel_slope_m_per_m: float = 0.002,
     region: str = IL_REGION_CODE,
     use_api: bool = True,
+    rdb_path: Optional[Path] = None,
 ) -> PeakFlowEstimates:
     """
-    Get peak flow estimates for a watershed. Uses StreamStats API first,
-    falls back to Illinois regression equations.
+    Get peak flow estimates for a watershed.
+
+    Priority order:
+    1. If rdb_path is provided: gauge-based Log-Pearson III (most accurate).
+    2. StreamStats ss-delineate API (currently falls through to regression).
+    3. Illinois regression equations (USGS SIR 2008-5176) — fallback.
 
     Args:
         pour_point_lon:       Outlet longitude (WGS84)
@@ -311,10 +493,20 @@ def get_peak_flows(
         channel_slope_m_per_m: Main channel slope m/m (from watershed delineation)
         region:               StreamStats region code (default "IL")
         use_api:              Try StreamStats API first (default True)
+        rdb_path:             Path to USGS annual peaks RDB file; when provided,
+                              gauge-based LP3 is used instead of the API path.
 
     Returns:
         PeakFlowEstimates with Q2-Q500 in CFS
     """
+    # Gauge-based LP3 — highest priority when an RDB file is available
+    if rdb_path is not None:
+        estimates = get_peak_flows_from_rdb(rdb_path)
+        estimates.pour_point_lon = pour_point_lon
+        estimates.pour_point_lat = pour_point_lat
+        estimates.drainage_area_mi2 = drainage_area_mi2
+        return estimates
+
     estimates = PeakFlowEstimates(
         pour_point_lon=pour_point_lon,
         pour_point_lat=pour_point_lat,
@@ -400,6 +592,7 @@ if __name__ == "__main__":
     parser.add_argument("--area",  type=float, required=True, help="Drainage area (mi²)")
     parser.add_argument("--slope", type=float, default=0.002,  help="Channel slope (m/m)")
     parser.add_argument("--no-api", action="store_true", help="Skip StreamStats API, use regression")
+    parser.add_argument("--rdb",   type=str, default=None, help="USGS annual peaks RDB file")
     args = parser.parse_args()
 
     result = get_peak_flows(
@@ -408,6 +601,7 @@ if __name__ == "__main__":
         drainage_area_mi2=args.area,
         channel_slope_m_per_m=args.slope,
         use_api=not args.no_api,
+        rdb_path=Path(args.rdb) if args.rdb else None,
     )
 
     print(f"\nPeak Flow Estimates  [source: {result.source}]")

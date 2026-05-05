@@ -667,6 +667,257 @@ def test_build_model_downstream_scaffold_raises(tmp_path):
         )
 
 
+
+def test_generate_cartesian_cell_centers_basic():
+    """_generate_cartesian_cell_centers clips a Cartesian grid to a polygon."""
+    shapely = pytest.importorskip("shapely")
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    # Simple 1000×1000 m square (EPSG:5070 coordinates)
+    xo, yo = 300000.0, 4400000.0
+    poly = ShapelyPolygon([
+        (xo, yo), (xo + 1000, yo), (xo + 1000, yo + 1000), (xo, yo + 1000), (xo, yo)
+    ])
+    cell_size = 100.0
+
+    cell_centers, dx_shift, dy_shift = mb._generate_cartesian_cell_centers(
+        poly, cell_size, max_shift_tries=200
+    )
+
+    # Should produce some cells
+    assert len(cell_centers) > 0
+
+    # All returned centers must be inside (or on boundary of) the polygon
+    from shapely import contains_xy
+    mask = contains_xy(poly, cell_centers[:, 0], cell_centers[:, 1])
+    assert mask.all(), f"{(~mask).sum()} centers are outside the polygon"
+
+    # Shifts must be in [0, cell_size)
+    assert 0.0 <= dx_shift < cell_size
+    assert 0.0 <= dy_shift < cell_size
+
+    # For a 1000×1000 square with 100 m cells, expect ≈ 81–100 cells
+    assert 50 <= len(cell_centers) <= 120, (
+        f"Unexpected cell count {len(cell_centers)} for 1000m square / 100m cells"
+    )
+
+
+def test_write_cell_centers_to_geometry_file(tmp_path):
+    """_write_cell_centers_to_geometry_file inserts Storage Area 2D Points section."""
+    import numpy as np
+
+    geom = _write_sample_geom(tmp_path)
+
+    # A handful of representative cell centers (EPSG:5070 values)
+    centers = np.array([
+        [300050.0, 4400050.0],
+        [300150.0, 4400050.0],
+        [300050.0, 4400150.0],
+        [300150.0, 4400150.0],
+    ])
+
+    result = mb._write_cell_centers_to_geometry_file(geom, "Perimeter 1", centers)
+    assert result is True
+
+    content = geom.read_text()
+
+    # Header with correct count
+    assert "Storage Area 2D Points= 4" in content
+
+    # Each center encoded as two 16-char fields on one line (32 chars)
+    lines = [l for l in content.splitlines() if l.startswith("3")]  # starts with digit '3'
+    assert len(lines) == 4, f"Expected 4 data lines, got {len(lines)}: {lines}"
+    for line in lines:
+        assert len(line) == 32, (
+            f"Data line has {len(line)} chars, expected 32: {line!r}"
+        )
+
+    # Backup created
+    bak = tmp_path / "project.g01.bak"
+    assert bak.exists()
+
+
+def test_remove_geometry_hdfs(tmp_path):
+    """_remove_geometry_hdfs deletes .g##.hdf files and leaves .p##.hdf alone."""
+    import h5py
+
+    # Create files that should be deleted
+    g01_hdf = tmp_path / "project.g01.hdf"
+    g02_hdf = tmp_path / "project.g02.hdf"
+    # Create files that must NOT be deleted
+    p01_hdf = tmp_path / "project.p01.hdf"
+    other_txt = tmp_path / "project.g01"
+
+    for f in (g01_hdf, g02_hdf, p01_hdf):
+        with h5py.File(f, "w"):
+            pass
+    other_txt.write_text("Geom Title=Test\n")
+
+    count = mb._remove_geometry_hdfs(tmp_path)
+
+    assert count == 2
+    assert not g01_hdf.exists(), ".g01.hdf should have been deleted"
+    assert not g02_hdf.exists(), ".g02.hdf should have been deleted"
+    assert p01_hdf.exists(), ".p01.hdf must not be deleted"
+    assert other_txt.exists(), "ASCII geometry file must not be deleted"
+
+
+def test_remove_geometry_hdfs_empty_dir(tmp_path):
+    """_remove_geometry_hdfs returns 0 when no geometry HDFs are present."""
+    count = mb._remove_geometry_hdfs(tmp_path)
+    assert count == 0
+
+
+# ── Tests: Storage Area 2D format support ────────────────────────────────────
+
+SAMPLE_STORAGE_AREA_GEOM = """\
+Geom Title=Test Geometry
+Program Version=6.60
+
+Storage Area=Mud Creek       ,,
+Storage Area Surface Line= 4
+579232.667593894635304.752861105
+579716.601763544635278.493759864
+579716.601763544635778.493759864
+579232.667593894635304.752861105
+Storage Area Type= 1
+Storage Area Area=
+Storage Area Min Elev=
+Storage Area Is2D=-1
+Storage Area Point Generation Data=,,250,250
+Storage Area 2D Points= 2
+579088.843868944635179.752861105579338.843868944635179.752861105
+Storage Area 2D PointsPerimeterTime=18Dec2025 15:57:11
+Storage Area Mannings=0.06
+"""
+
+
+def test_detect_geom_format_storage_area(tmp_path):
+    """_detect_geom_format returns 'storage_area' when Storage Area Is2D=-1 is present."""
+    f = tmp_path / "project.g01"
+    f.write_text(SAMPLE_STORAGE_AREA_GEOM)
+    assert mb._detect_geom_format(f) == "storage_area"
+
+
+def test_detect_geom_format_2d_flow_area(tmp_path):
+    """_detect_geom_format returns '2d_flow_area' for modern 2D Flow Area format."""
+    f = _write_sample_geom(tmp_path)
+    assert mb._detect_geom_format(f) == "2d_flow_area"
+
+
+def test_get_2d_area_name_storage_area(tmp_path):
+    """_get_2d_area_name_from_geometry_file parses Storage Area 2D format correctly."""
+    f = tmp_path / "project.g01"
+    f.write_text(SAMPLE_STORAGE_AREA_GEOM)
+    name = mb._get_2d_area_name_from_geometry_file(f)
+    assert name == "Mud Creek"
+
+
+def test_write_perimeter_storage_area_format(tmp_path):
+    """_write_perimeter_to_geometry_file handles Storage Area 2D format."""
+    f = tmp_path / "project.g01"
+    f.write_text(SAMPLE_STORAGE_AREA_GEOM)
+
+    new_coords = [
+        (579000.0, 635100.0),
+        (579500.0, 635100.0),
+        (579500.0, 635600.0),
+        (579250.0, 635800.0),
+        (579000.0, 635600.0),
+    ]
+    result = mb._write_perimeter_to_geometry_file(f, "Mud Creek", new_coords)
+    assert result is True
+
+    content = f.read_text()
+
+    # Closed polygon: 5 coords + 1 closing = 6
+    assert "Storage Area Surface Line= 6" in content
+
+    # Coordinates must be in 16-char fixed-width format (no commas)
+    lines = content.splitlines()
+    coord_lines = [
+        l for l in lines
+        if len(l) == 32 and l[0].isdigit()
+    ]
+    assert len(coord_lines) == 6, (
+        f"Expected 6 coord lines (32 chars each), got {len(coord_lines)}"
+    )
+    for cl in coord_lines:
+        assert "," not in cl, f"Storage Area coord line must not contain comma: {cl!r}"
+
+    # Original area header still present
+    assert "Storage Area=Mud Creek" in content
+
+    # Must NOT contain 2D Flow Area perimeter header
+    assert "2D Flow Area Perimeter=" not in content
+
+    # Backup created
+    assert (tmp_path / "project.g01.bak").exists()
+
+
+def test_write_perimeter_2d_flow_area_format(tmp_path):
+    """_write_perimeter_to_geometry_file uses comma-space format for 2D Flow Area files."""
+    geom = _write_sample_geom(tmp_path)
+    coords = [(300000.0, 4400000.0), (301000.0, 4400000.0), (301000.0, 4401000.0)]
+    result = mb._write_perimeter_to_geometry_file(geom, "Perimeter 1", coords)
+    assert result is True
+
+    content = geom.read_text()
+
+    # Must use comma-space format
+    assert "2D Flow Area Perimeter= 4" in content
+    coord_lines = [
+        l for l in content.splitlines()
+        if "," in l and "Flow" not in l and "Mann" not in l
+        and "Title" not in l and "Version" not in l
+    ]
+    assert len(coord_lines) == 4
+    for cl in coord_lines:
+        assert "," in cl, f"2D Flow Area coord line must contain comma: {cl!r}"
+
+    # Storage Area Surface Line must NOT appear
+    assert "Storage Area Surface Line=" not in content
+
+
+def test_grid_shift_avoids_voronoi_conflicts():
+    """Grid shift search finds a configuration without VB-vertex conflicts."""
+    pytest.importorskip("shapely")
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    cell_size = 100.0
+    tol = 0.05 * cell_size   # 5 m (default min_face_length_ratio)
+
+    # Place a vertex exactly at the first x-VB for dx=0.
+    # With dx=0: first x-VB at xmin + 0 + cell_size/2 = xmin + 50
+    # Vertex at xmin + 50 → distance = 0 → conflict.
+    xo, yo = 300000.0, 4400000.0
+    conflicting_vx = xo + cell_size / 2   # exactly on VB for dx=0
+
+    poly = ShapelyPolygon([
+        (xo, yo),
+        (xo + 500, yo),
+        (xo + 500, yo + 500),
+        (conflicting_vx, yo + 250),   # vertex on VB
+        (xo, yo + 500),
+        (xo, yo),
+    ])
+
+    cell_centers, dx_shift, dy_shift = mb._generate_cartesian_cell_centers(
+        poly, cell_size, max_shift_tries=200
+    )
+
+    # Must still generate cells
+    assert len(cell_centers) > 0
+
+    # With the returned dx_shift, the problematic vertex should be >= tol from any x-VB
+    x_relv = (conflicting_vx - xo - dx_shift - cell_size / 2) % cell_size
+    x_dist = min(float(x_relv), cell_size - float(x_relv))
+    assert x_dist >= tol, (
+        f"Conflict persists at dx_shift={dx_shift:.1f}: "
+        f"vertex distance to nearest x-VB = {x_dist:.2f} m (tol={tol} m)"
+    )
+
+
 def test_geometry_first_perimeter_matches_watershed(tmp_path, stub_geommesh):
     watershed = _make_watershed()
     hydro_set = _make_hydro_set()

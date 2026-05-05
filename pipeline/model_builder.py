@@ -420,6 +420,46 @@ def _update_terrain_reference(geom_hdf_path: Path, new_terrain_path: Path) -> No
         logger.warning(f"Could not open geometry HDF {geom_hdf_path}: {exc}")
 
 
+def _remove_geometry_hdfs(project_dir: Path) -> int:
+    """Delete stale geometry HDF files (.g##.hdf) from a cloned project directory.
+
+    Removing these files forces ``ras_preprocess.py`` into Workflow C on the
+    next run: it reads Cartesian cell centers from the ASCII ``.g##`` file and
+    regenerates the mesh via Voronoi tessellation — our new watershed mesh, not
+    the template's.
+
+    ``.p##.hdf`` plan HDF files are intentionally left untouched.
+
+    Args:
+        project_dir: Root directory of the cloned HEC-RAS project.
+
+    Returns:
+        Number of geometry HDF files successfully deleted.
+    """
+    import re
+
+    deleted = 0
+    for hdf_path in list(project_dir.glob("*.g*.hdf")):
+        # Match only .g##.hdf (one or two digits), not .p##.hdf
+        if not re.search(r"\.g\d{2}\.hdf$", hdf_path.name):
+            continue
+        try:
+            hdf_path.unlink()
+            logger.info(
+                "[template-clone] Deleted stale geometry HDF %s — "
+                "ras_preprocess.py will regenerate via Workflow C",
+                hdf_path.name,
+            )
+            deleted += 1
+        except OSError as exc:
+            logger.warning(
+                "[template-clone] Could not delete geometry HDF %s: %s",
+                hdf_path.name,
+                exc,
+            )
+    return deleted
+
+
 # ── RAS Commander Utilities ───────────────────────────────────────────────────
 
 # RAS Commander — optional dependency, imported lazily
@@ -534,15 +574,63 @@ def _update_mannings_n(project_dir: Path, mannings_n: float) -> bool:
 
 # ── Geometry File (ASCII .g##) Utilities ──────────────────────────────────────
 
+def _detect_geom_format(geometry_file: Path) -> str:
+    """
+    Detect whether a HEC-RAS geometry file uses modern "2D Flow Area" format
+    or older "Storage Area 2D" format.
+
+    The Storage Area 2D format is identified by the presence of
+    ``Storage Area Is2D=-1`` anywhere in the file (e.g. Mud Creek project).
+    In this format the perimeter section is headed by ``Storage Area Surface
+    Line=`` and coordinates are encoded in 16-char fixed-width pairs (the
+    same encoding as ``Storage Area 2D Points``).
+
+    Args:
+        geometry_file: Path to .g## ASCII geometry file.
+
+    Returns:
+        ``"storage_area"`` if Storage Area 2D format is detected,
+        ``"2d_flow_area"`` otherwise (default).
+    """
+    text = geometry_file.read_text(errors="replace")
+    if "Storage Area Is2D=-1" in text:
+        return "storage_area"
+    if "2D Flow Area=" in text:
+        return "2d_flow_area"
+    return "2d_flow_area"
+
+
 def _get_2d_area_name_from_geometry_file(geometry_file: Path) -> Optional[str]:
     """
     Parse a HEC-RAS .g## file and return the first 2D flow area name found.
-    Returns None if no 2D flow area is defined.
+
+    Supports both ``2D Flow Area`` format (modern) and ``Storage Area 2D``
+    format (older; identified by ``Storage Area Is2D=-1`` within 100 lines of
+    the ``Storage Area=`` header).
+
+    Returns:
+        Area name string, or None if no 2D flow area is defined.
     """
-    pattern = re.compile(r"^2D Flow Area=\s*(.+?)\s*,", re.MULTILINE | re.IGNORECASE)
     text = geometry_file.read_text(errors="replace")
-    match = pattern.search(text)
-    return match.group(1).strip() if match else None
+
+    # Format A: modern "2D Flow Area" format
+    pattern_a = re.compile(r"^2D Flow Area=\s*(.+?)\s*,", re.MULTILINE | re.IGNORECASE)
+    match = pattern_a.search(text)
+    if match:
+        return match.group(1).strip()
+
+    # Format B: older "Storage Area 2D" format
+    # Find a Storage Area block that has Storage Area Is2D=-1 within 100 lines
+    lines = text.splitlines()
+    sa_pattern = re.compile(r"^Storage Area=\s*(.+?)\s*,", re.IGNORECASE)
+    for i, line in enumerate(lines):
+        m = sa_pattern.match(line)
+        if m:
+            window = lines[i : i + 100]
+            if any("Storage Area Is2D=-1" in wl for wl in window):
+                return m.group(1).strip()
+
+    return None
 
 
 def _write_perimeter_to_geometry_file(
@@ -558,12 +646,20 @@ def _write_perimeter_to_geometry_file(
     to the ASCII file is the correct approach (confirmed by Bill Katzenmeyer,
     CLB Engineering / RAS Commander, 2026-03-13).
 
+    Supports both ``2D Flow Area`` format (modern) and ``Storage Area 2D``
+    format (older; detected via :func:`_detect_geom_format`).  In Storage
+    Area format the perimeter section header is ``Storage Area Surface Line=``
+    and coordinates are written as 16-char fixed-width pairs (same encoding as
+    ``Storage Area 2D Points``).  The ``2D Flow Area Cell Size=`` field is
+    **not** written in Storage Area format.
+
     Args:
         geometry_file:     Path to .g01 / .g02 / etc. ASCII geometry file
         area_name:         Name of the 2D flow area to update (e.g. "Perimeter 1")
         perimeter_coords:  List of (x, y) tuples in project CRS (EPSG:5070, meters)
                            Will be automatically closed (first point appended if not already)
-        cell_size_m:       Target mesh cell size in meters (written to Cell Size field)
+        cell_size_m:       Target mesh cell size in meters (written to Cell Size field;
+                           ignored for Storage Area format)
 
     Returns:
         True if perimeter was found and updated, False if area_name not found in file.
@@ -573,8 +669,64 @@ def _write_perimeter_to_geometry_file(
         - Closes the polygon automatically if first != last point
         - Preserves all other content in the geometry file unchanged
     """
+    geom_format = _detect_geom_format(geometry_file)
     text = geometry_file.read_text(errors="replace")
 
+    # ── Storage Area 2D format ─────────────────────────────────────────────────
+    if geom_format == "storage_area":
+        # Check that the named storage area exists in the file
+        sa_check = re.compile(
+            r"^Storage Area=\s*" + re.escape(area_name) + r"\s*,",
+            re.MULTILINE | re.IGNORECASE,
+        )
+        if not sa_check.search(text):
+            logger.warning(
+                f"Storage area '{area_name}' not found in {geometry_file.name} — perimeter not updated"
+            )
+            return False
+
+        # Backup before any modification
+        bak_path = geometry_file.with_suffix(geometry_file.suffix + ".bak")
+        bak_path.write_text(text, encoding="utf-8")
+
+        # Ensure polygon is closed
+        coords = list(perimeter_coords)
+        if coords[0] != coords[-1]:
+            coords.append(coords[0])
+
+        # 16-char fixed-width pairs (same encoding as Storage Area 2D Points)
+        coord_lines = "".join(
+            _fmt_coord(float(x)) + _fmt_coord(float(y)) + "\n" for x, y in coords
+        )
+        new_surface_block = f"Storage Area Surface Line= {len(coords)}\n{coord_lines}"
+
+        # Replace existing Surface Line block (header + coordinate lines)
+        surface_pattern = re.compile(
+            r"Storage Area Surface Line=[ \t]*\d+[ \t]*\n"
+            r"(?:[-0-9][^\n]*\n)*",
+            re.MULTILINE,
+        )
+        updated_text, n_subs = surface_pattern.subn(new_surface_block, text, count=1)
+
+        if n_subs == 0:
+            # No existing Surface Line block — insert after the Storage Area= header line
+            sa_header_pattern = re.compile(
+                r"(Storage Area=\s*" + re.escape(area_name) + r"[^\n]*\n)",
+                re.MULTILINE | re.IGNORECASE,
+            )
+            updated_text = sa_header_pattern.sub(
+                r"\g<1>" + new_surface_block,
+                text,
+                count=1,
+            )
+
+        geometry_file.write_text(updated_text, encoding="utf-8")
+        logger.info(
+            f"Updated Storage Area surface line in {geometry_file.name}: {len(coords)} points"
+        )
+        return True
+
+    # ── 2D Flow Area format (default) ─────────────────────────────────────────
     # Check that the named 2D flow area exists in the file
     area_pattern = re.compile(
         r"(2D Flow Area=\s*" + re.escape(area_name) + r"\s*,\s*\d+\s*\n)",
@@ -817,6 +969,192 @@ def _text_mesh_point_count(geom_file: Path, area_name: str) -> int:
         return 0
 
 
+# ── Cartesian Mesh Generation ────────────────────────────────────────────────
+
+
+def _fmt_coord(x: float) -> str:
+    """
+    16-character fixed-width HEC-RAS coordinate encoder.
+
+    CRITICAL: Do not change this function. HEC-RAS 6.6 parses the Storage
+    Area 2D Points section using 16-character fixed-width fields. A naive
+    ``f"{x:.6f}"`` produces 14 characters — the parser reads the next
+    coordinate starting at the wrong column and the cell centers are garbage.
+
+    Args:
+        x: Coordinate value (non-negative; EPSG:5070 meters)
+
+    Returns:
+        Exactly 16 characters: integer digits + decimal point + decimal digits.
+    """
+    n_int = len(str(int(abs(x))))
+    n_dec = 16 - n_int - 1
+    return f"{x:.{n_dec}f}"
+
+
+def _generate_cartesian_cell_centers(
+    watershed_polygon,
+    cell_size_m: float,
+    min_face_length_ratio: float = 0.05,
+    max_shift_tries: int = 200,
+) -> tuple:
+    """
+    Generate Cartesian cell centers for a HEC-RAS 2D mesh.
+
+    Scans grid origin offsets (dx_shift, dy_shift) ∈ [0, cell_size_m) × [0,
+    cell_size_m) to find a position where no Voronoi boundary (VB) falls
+    within ``tol = min_face_length_ratio × cell_size_m`` of any polygon
+    vertex coordinate.
+
+    Args:
+        watershed_polygon:    Shapely Polygon in project CRS (EPSG:5070, meters)
+        cell_size_m:          Mesh cell size in meters
+        min_face_length_ratio: HEC-RAS MinFaceLength / CellSize ratio (default 0.05)
+        max_shift_tries:      Maximum (dx, dy) combinations to search
+
+    Returns:
+        Tuple of (cell_centers, dx_shift, dy_shift).
+    """
+    import numpy as np
+    from shapely import contains_xy
+
+    tol = min_face_length_ratio * cell_size_m
+
+    if hasattr(watershed_polygon, "exterior"):
+        verts = np.array(watershed_polygon.exterior.coords)
+    else:
+        verts = np.array(list(watershed_polygon.coords))
+
+    vx = verts[:, 0]
+    vy = verts[:, 1]
+
+    xmin, ymin, xmax, ymax = watershed_polygon.bounds
+
+    n_side = max(2, int(np.sqrt(max_shift_tries)))
+    shift_step = cell_size_m / n_side
+
+    best_shift = (0.0, 0.0)
+    best_conflicts = int(len(vx)) * 2 + 1
+    found_clean = False
+
+    for i in range(n_side):
+        dx = i * shift_step
+        x_relv = (vx - xmin - dx - cell_size_m / 2) % cell_size_m
+        x_dist = np.minimum(x_relv, cell_size_m - x_relv)
+        n_x = int(np.sum(x_dist < tol))
+
+        for j in range(n_side):
+            dy = j * shift_step
+            y_relv = (vy - ymin - dy - cell_size_m / 2) % cell_size_m
+            y_dist = np.minimum(y_relv, cell_size_m - y_relv)
+            n_y = int(np.sum(y_dist < tol))
+
+            total = n_x + n_y
+            if total < best_conflicts:
+                best_conflicts = total
+                best_shift = (dx, dy)
+
+            if total == 0:
+                found_clean = True
+                break
+
+        if found_clean:
+            break
+
+    dx_shift, dy_shift = best_shift
+
+    if not found_clean:
+        logger.warning(
+            "[CART] No clean grid shift found in %d tries "
+            "(best: %d conflict(s) at dx=%.1f m, dy=%.1f m) — using best available",
+            n_side * n_side, best_conflicts, dx_shift, dy_shift,
+        )
+    else:
+        logger.info(
+            "[CART] Clean grid shift: dx=%.1f m, dy=%.1f m (0 VB-vertex conflicts)",
+            dx_shift, dy_shift,
+        )
+
+    xs = np.arange(xmin + dx_shift, xmax + cell_size_m, cell_size_m)
+    ys = np.arange(ymin + dy_shift, ymax + cell_size_m, cell_size_m)
+    xx, yy = np.meshgrid(xs, ys)
+    candidates = np.column_stack([xx.ravel(), yy.ravel()])
+
+    mask = contains_xy(watershed_polygon, candidates[:, 0], candidates[:, 1])
+    cell_centers = candidates[mask]
+
+    logger.info(
+        "[CART] %d Cartesian cell centers (cell_size=%.1f m, dx=%.1f m, dy=%.1f m)",
+        len(cell_centers), cell_size_m, dx_shift, dy_shift,
+    )
+    return cell_centers, dx_shift, dy_shift
+
+
+def _write_cell_centers_to_geometry_file(
+    geometry_file: Path,
+    area_name: str,
+    cell_centers,
+) -> bool:
+    """
+    Write Cartesian cell centers to the ``Storage Area 2D Points`` section of a
+    HEC-RAS plain text geometry file (.g##).
+
+    Creates a .bak backup of the original file before modifying.
+
+    Args:
+        geometry_file: Path to .g## ASCII geometry file
+        area_name:     Name of the 2D flow area (used for logging)
+        cell_centers:  (N, 2) array-like of (x, y) cell center coordinates
+
+    Returns:
+        True if written successfully; False if cell_centers is empty.
+    """
+    if len(cell_centers) == 0:
+        logger.warning(
+            "[CART] No cell centers provided for area '%s' — Storage Area 2D Points not written",
+            area_name,
+        )
+        return False
+
+    text = geometry_file.read_text(errors="replace")
+
+    bak_path = geometry_file.with_suffix(geometry_file.suffix + ".bak")
+    bak_path.write_text(text, encoding="utf-8")
+
+    n = len(cell_centers)
+    new_header = f"Storage Area 2D Points= {n}\n"
+    data_lines = "".join(
+        _fmt_coord(float(x)) + _fmt_coord(float(y)) + "\n"
+        for x, y in cell_centers
+    )
+    new_block = new_header + data_lines
+
+    points_pattern = re.compile(
+        r"Storage Area 2D Points=[ \t]*\d+[ \t]*\n"
+        r"(?:[-0-9][^\n]*\n)*",
+        re.MULTILINE,
+    )
+    updated_text, n_subs = points_pattern.subn(new_block, text, count=1)
+
+    if n_subs == 0:
+        cell_size_pat = re.compile(
+            r"(2D Flow Area Cell Size=[ \t]*[\d.]+[ \t]*\n)", re.MULTILINE
+        )
+        m = cell_size_pat.search(text)
+        if m:
+            pos = m.end()
+            updated_text = text[:pos] + new_block + text[pos:]
+        else:
+            updated_text = text.rstrip("\n") + "\n" + new_block
+
+    geometry_file.write_text(updated_text, encoding="utf-8")
+    logger.info(
+        "[CART] Wrote %d cell centers to %s (area: %s)",
+        n, geometry_file.name, area_name,
+    )
+    return True
+
+
 # ── Template Clone Implementation ─────────────────────────────────────────────
 
 def _build_from_template(
@@ -905,6 +1243,10 @@ def _build_from_template(
             area_km2 = watershed.characteristics.drainage_area_km2
             cell_size_m = min(max(area_km2 * 0.5, 30.0), 300.0)
             area_name = _get_2d_area_name_from_geometry_file(geom_file)
+            geom_format = _detect_geom_format(geom_file)
+            logger.info(
+                f"Geometry format detected: {geom_format!r} (area: {area_name!r}, file: {geom_file.name})"
+            )
             if area_name:
                 updated = _write_perimeter_to_geometry_file(
                     geom_file, area_name, perimeter_coords, cell_size_m
@@ -938,6 +1280,11 @@ def _build_from_template(
             "No .g01.hdf geometry HDF found in cloned project; "
             "terrain reference not updated. May need first GUI run on Windows."
         )
+
+    # ── 5b. Remove geometry HDF(s) so ras_preprocess.py uses Workflow C
+    # (Workflow C reads Cartesian cell centers from ASCII .g## and regenerates
+    # the HDF via Voronoi tessellation — our new watershed mesh, not the template)
+    _remove_geometry_hdfs(project_dir)
 
     # ── 6. Write unsteady flow files + plan files
     bc_slope = watershed.characteristics.main_channel_slope_m_per_m

@@ -37,6 +37,8 @@ Apache License 2.0
 """
 
 import logging
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
@@ -762,6 +764,8 @@ def export_results(
     crs: CRS = None,
     resolution_m: float = 3.0,
     r2_config=None,
+    min_depth_ft: Optional[float] = None,
+    ras_object=None,
 ) -> dict[str, Path]:
     """
     Run the full results export pipeline for all 2D areas in an HDF file.
@@ -772,21 +776,30 @@ def export_results(
       3. Extract maximum velocity → velocity_grid.tif (if velocity data present)
       4. Extract flood extent   → flood_extent.gpkg + flood_extent.shp
 
+    When ``min_depth_ft`` is set, also generates terrain-aligned filtered
+    depth and WSE rasters via RASMapper (see ``export_filtered_rasters``).
+
     Single area: all files are written directly to output_dir.
     Multiple areas: each area gets its own subdirectory (output_dir/{area_name}/).
 
     Args:
-        hdf_path:     Path to the HEC-RAS output HDF file.
-        output_dir:   Directory to write all output files.
-        crs:          Output CRS (defaults to EPSG:5070).
-        resolution_m: Raster grid resolution in CRS units (default 3.0 m).
-        r2_config:    Optional R2Config for Cloudflare R2 upload.
+        hdf_path:      Path to the HEC-RAS output HDF file.
+        output_dir:    Directory to write all output files.
+        crs:           Output CRS (defaults to EPSG:5070).
+        resolution_m:  Raster grid resolution in CRS units (default 3.0 m).
+        r2_config:     Optional R2Config for Cloudflare R2 upload.
+        min_depth_ft:  When set, produce filtered_depth.tif and filtered_wse.tif
+                       using RASMapper-aligned rasters with this threshold (ft).
+        ras_object:    Optional initialized ``RasPrj`` instance for filtered
+                       raster export (only used when ``min_depth_ft`` is set).
 
     Returns:
         Dict mapping output name to output Path.  Single-area keys:
           'depth_grid', 'wse_grid', 'velocity_grid' (if present),
           'flood_extent_gpkg', 'flood_extent_shp'.
         Multi-area keys are prefixed: '{area_name}/depth_grid', etc.
+        When ``min_depth_ft`` is set, also includes 'filtered_depth' and
+        'filtered_wse'.
 
     Raises:
         RuntimeError: If the HDF file contains no 2D flow areas.
@@ -815,6 +828,21 @@ def export_results(
         )
         outputs.update(area_outputs)
 
+    # Optional filtered rasters via RASMapper
+    if min_depth_ft is not None:
+        try:
+            filtered_dir = output_dir / "filtered"
+            filtered = export_filtered_rasters(
+                hdf_path=hdf_path,
+                output_dir=filtered_dir,
+                min_depth_ft=min_depth_ft,
+                target_crs=crs,
+                ras_object=ras_object,
+            )
+            outputs.update(filtered)
+        except Exception as exc:
+            logger.warning(f"Filtered raster export failed (non-fatal): {exc}")
+
     logger.info(f"Results export complete → {output_dir}")
     for name, path in outputs.items():
         logger.info(f"  {name}: {path}")
@@ -829,6 +857,211 @@ def export_results(
         except Exception as e:
             logger.warning(f"R2 upload failed (results still saved locally): {e}")
 
+    return outputs
+
+
+# ── Filtered Raster Export (RasProcess / RASMapper) ──────────────────────
+
+
+def _parse_plan_from_hdf(hdf_path: Path) -> tuple[Path, str]:
+    """Extract project directory and plan number from an HDF path.
+
+    HDF files are named ``<ProjectName>.p<NN>.hdf``.
+    """
+    project_dir = hdf_path.parent
+    stem = hdf_path.stem  # e.g. "SpringCreek.p01"
+    parts = stem.rsplit(".p", 1)
+    if len(parts) != 2 or not parts[1].isdigit():
+        raise ValueError(
+            f"Cannot parse plan number from HDF filename: {hdf_path.name}"
+        )
+    return project_dir, parts[1]
+
+
+def _write_filtered_cog(
+    data: np.ndarray,
+    profile: dict,
+    output_path: Path,
+    metadata: dict[str, str],
+) -> Path:
+    """Write a masked float32 array as a Cloud-Optimized GeoTIFF with overviews."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_profile = {
+        "crs": profile["crs"],
+        "transform": profile["transform"],
+        "width": profile["width"],
+        "height": profile["height"],
+        "dtype": np.float32,
+        "nodata": NODATA,
+        "count": 1,
+        **_COG_OPTIONS,
+    }
+    with rasterio.open(str(output_path), "w", **write_profile) as dst:
+        dst.write(data.astype(np.float32), 1)
+        safe_levels = [
+            lv for lv in _OVERVIEW_LEVELS
+            if dst.height // lv >= 1 and dst.width // lv >= 1
+        ]
+        if safe_levels:
+            dst.build_overviews(safe_levels, rasterio.enums.Resampling.average)
+            dst.update_tags(ns="rio_overview", resampling="average")
+        dst.update_tags(**metadata)
+    return output_path
+
+
+def export_filtered_rasters(
+    hdf_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    min_depth_ft: float = 0.5,
+    target_crs: Optional[CRS] = None,
+    ras_object=None,
+) -> dict[str, Path]:
+    """Export depth and WSE rasters filtered by a minimum depth threshold.
+
+    Uses ``RasProcess.store_maps()`` to generate terrain-aligned rasters via
+    RASMapper, then applies a single depth-based mask to both outputs.  Because
+    RASMapper renders both depth and WSE from the same terrain grid, the
+    rasters are pixel-aligned by construction — no independent interpolation.
+
+    Args:
+        hdf_path:     Path to the HEC-RAS output HDF file (``Project.p01.hdf``).
+                      The project directory and plan number are derived from
+                      this path.
+        output_dir:   Directory for filtered output rasters.
+        min_depth_ft: Minimum depth threshold in feet (default 0.5).  Cells
+                      with depth below this become NODATA in both outputs.
+        target_crs:   Optional CRS to reproject outputs to.  If None, outputs
+                      retain the native CRS from RASMapper (terrain CRS).
+        ras_object:   Optional initialized ``RasPrj`` instance.  If None, one
+                      is created via ``init_ras_project()``.
+
+    Returns:
+        Dict with keys ``'filtered_depth'`` and ``'filtered_wse'`` mapping to
+        output COG GeoTIFF paths.
+
+    Raises:
+        ValueError: If ``min_depth_ft`` is negative.
+        RuntimeError: If RasProcess fails to produce the required rasters.
+    """
+    from ras_commander import RasProcess
+
+    hdf_path = Path(hdf_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if min_depth_ft < 0:
+        raise ValueError(f"min_depth_ft must be non-negative, got {min_depth_ft}")
+    min_depth_m = min_depth_ft * 0.3048
+
+    project_dir, plan_number = _parse_plan_from_hdf(hdf_path)
+
+    if ras_object is None:
+        from ras_commander import init_ras_project
+        ras_object = init_ras_project(project_dir)
+
+    # Generate terrain-aligned rasters via RASMapper
+    staging_dir = tempfile.mkdtemp(prefix="ras_filtered_")
+    try:
+        map_results = RasProcess.store_maps(
+            plan_number=plan_number,
+            output_path=staging_dir,
+            profile="Max",
+            wse=True,
+            depth=True,
+            velocity=False,
+            fix_georef=True,
+            ras_object=ras_object,
+        )
+
+        depth_tifs = map_results.get("depth", [])
+        wse_tifs = map_results.get("wse", [])
+        if not depth_tifs or not wse_tifs:
+            raise RuntimeError(
+                "RasProcess.store_maps did not produce depth and/or WSE rasters"
+            )
+
+        # Read both rasters into memory while staging dir exists
+        with rasterio.open(str(depth_tifs[0])) as depth_src:
+            depth_data = depth_src.read(1)
+            src_profile = depth_src.profile.copy()
+            depth_nodata = depth_src.nodata
+
+        with rasterio.open(str(wse_tifs[0])) as wse_src:
+            wse_data = wse_src.read(1)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+    # Build mask from depth: below threshold, existing nodata, or NaN
+    mask = (depth_data < min_depth_m) | np.isnan(depth_data)
+    if depth_nodata is not None:
+        mask |= np.isclose(depth_data, depth_nodata)
+
+    depth_data[mask] = NODATA
+    wse_data[mask] = NODATA
+
+    metadata = {
+        "min_depth_threshold_ft": str(min_depth_ft),
+        "source_hdf": hdf_path.name,
+        "source_plan": f"p{plan_number}",
+    }
+
+    # Optional reprojection
+    write_profile = src_profile
+    if target_crs is not None and target_crs != src_profile.get("crs"):
+        from rasterio.warp import (
+            calculate_default_transform,
+            reproject as rio_reproject,
+            Resampling,
+        )
+
+        src_crs = src_profile["crs"]
+        transform, width, height = calculate_default_transform(
+            src_crs,
+            target_crs,
+            src_profile["width"],
+            src_profile["height"],
+            *rasterio.transform.array_bounds(
+                src_profile["height"],
+                src_profile["width"],
+                src_profile["transform"],
+            ),
+        )
+        write_profile = src_profile.copy()
+        write_profile.update(
+            crs=target_crs, transform=transform, width=width, height=height,
+        )
+
+        for arr_name in ("depth_data", "wse_data"):
+            src_arr = depth_data if arr_name == "depth_data" else wse_data
+            dst_arr = np.full((height, width), NODATA, dtype=np.float32)
+            rio_reproject(
+                source=src_arr,
+                destination=dst_arr,
+                src_transform=src_profile["transform"],
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=target_crs,
+                resampling=Resampling.bilinear,
+                src_nodata=NODATA,
+                dst_nodata=NODATA,
+            )
+            if arr_name == "depth_data":
+                depth_data = dst_arr
+            else:
+                wse_data = dst_arr
+
+    outputs: dict[str, Path] = {}
+    for name, data in [("filtered_depth", depth_data), ("filtered_wse", wse_data)]:
+        out_path = output_dir / f"{name}.tif"
+        _write_filtered_cog(data, write_profile, out_path, metadata)
+        outputs[name] = out_path
+
+    cells_filtered = int(mask.sum())
+    cells_total = int(mask.size)
+    logger.info(
+        f"Filtered rasters: {cells_filtered}/{cells_total} cells below "
+        f"{min_depth_ft} ft ({min_depth_m:.3f} m) → {output_dir}"
+    )
     return outputs
 
 
