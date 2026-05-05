@@ -11,9 +11,9 @@
 - **Cloudflare Pages project:** `ras-agent` → https://ras-agent.pages.dev/
 - **License:** Apache 2.0
 - **Attribution:** Glenn Heistand / CHAMP — Illinois State Water Survey
-- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM), 216/216 tests, 65+ commits (as of 2026-04-20)
+- **Status:** All phases complete (0–12 + HITL/QAQC A-C + Windows agent + SLURM + CLB integration), 334/334 tests (14 skipped, 6 pre-existing ras_commander failures), 75+ commits (as of 2026-05-02)
 - **Cloudflare Git connection:** ✅ Connected — ras-agent.pages.dev auto-deploys from main branch
-- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering, RASAlphaCLI/RASDecomp), Nikhil Sangwan / nikhil-yahoo (ISWS)
+- **Collaborators:** Glenn Heistand (project lead), Bill Katzenmeyer / gpt-cmdr (CLB Engineering, RAS Commander + ras2cng), Ajith Sundarraj (CLB Engineering), Nikhil Sangwan / nikhil-yahoo (ISWS)
 
 ---
 
@@ -109,7 +109,7 @@ Web (Cloudflare Pages):
 - **Terrain:** ILHMP LiDAR clearinghouse (Illinois) → https://clearinghouse.isgs.illinois.edu/data/elevation/illinois-height-modernization-ilhmp
   - REST tile index: `https://clearinghouse.isgs.illinois.edu/arcgis/rest/services/Elevation/IL_Height_Modernization_DEM/MapServer/0/query`
   - Fallback: USGS 3DEP 1/3 arc-second via National Map API
-- **Hydrology:** USGS StreamStats REST API → https://streamstats.usgs.gov/streamstatsservices
+- **Hydrology:** USGS StreamStats REST API (legacy, decommissioned Jan 2026) → migrated to ss-delineate: https://streamstats.usgs.gov/ss-delineate
   - Region code: `IL`
   - Fallback: Illinois regression equations (USGS SIR 2008-5176, Soong et al. 2008)
   - Returns Q2, Q5, Q10, Q25, Q50, Q100, Q500 in CFS
@@ -143,8 +143,8 @@ Web (Cloudflare Pages):
 | HITL/QAQC C | Proactive review + hooks — hydro-reviewer, transparency/range hooks | ✅ Done | .claude/hooks/, .claude/agents/hydro-reviewer/ |
 | Windows Agent | Windows mesh interface + RasPreprocess integration | ✅ Done | pipeline/windows_agent.py, tests/test_windows_agent.py |
 
-**Test count: 125/125 passing** (117 pipeline + 8 windows_agent, as of 2026-03-17)
-**Latest commit:** `b7e6646` — feat: implement _generate_local() via RasPreprocess API
+**Test count: 334 passing** (334 combined after PR #13 merge — CLB branch + main morning commits integrated, as of 2026-05-02)
+**Latest commit:** `d865c92` — fix: Spring Creek trial — bypass Stage 2 with NLDI basin (103 mi²) + NHD flowlines
 **Docker:** ✅ Confirmed working — `docker-compose up api --build` compiles cleanly
 **Mock mode:** ✅ Fixed — `--mock` now short-circuits all network calls in stages 1-3 (commit `16f2f2b`)
 
@@ -168,7 +168,9 @@ Web (Cloudflare Pages):
 
 ### streamstats.py
 - `get_peak_flows(pour_point_lon, pour_point_lat, drainage_area_mi2, channel_slope_m_per_m, region='IL')` → `PeakFlowEstimates`
-- Tries StreamStats API first (delineate workspace → get flow statistics → parse IL codes)
+- Delineation: `ss-delineate` API (`GET /v1/delineate/sshydro/{region}?lat=&lon=`) — legacy `streamstatsservices` decommissioned Jan 2026
+- Flow statistics: falls through to Illinois regression equations immediately (no direct peak flow endpoint in new API)
+- Gauged site path: `get_peak_flows_from_rdb(rdb_path)` — LP3 fitting per Bulletin 17C from USGS annual peaks RDB
 - Falls back to Illinois regression equations by latitude region (northern/central/southern)
 - `PeakFlowEstimates`: Q2, Q5, Q10, Q25, Q50, Q100, Q500 in CFS; source field indicates API vs regression
 
@@ -570,7 +572,7 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 | ras-commander | `>=0.89` | 0.89+ has Windows→Linux preprocessing, RasProcess |
 | ras2cng | `>=0.1` | Optional; cloud-native GIS post-processing |
 | rasterio | `>=1.3` | |
-| pysheds | `>=0.4` | |
+| pysheds | `>=0.4,<0.6` | pysheds 0.5 breaks with numpy>=2.0; numpy pinned <2.0 until pysheds fixes upstream |
 | geopandas | `>=0.14` | |
 | h5py | `>=3.9` | HDF5 fallback when RC unavailable |
 | fastapi | `>=0.110` | |
@@ -585,14 +587,137 @@ Glenn's instance uses Telegram (existing OpenClaw integration); zero-config defa
 3. ~~Bump ras-commander version pin~~ ✅ Done (PR #5, >=0.89)
 4. ~~Windows agent scaffold~~ ✅ Done (pipeline/windows_agent.py, 8 tests)
 5. ~~RasPreprocess integration~~ ✅ Done (commit 8c0c1c8, _generate_local() implemented)
-6. Send OTM email (Glenn — otm@illinois.edu from heistand@illinois.edu)
-7. **Send reply to Bill re: RasPreprocess integration** (draft ready)
-8. **Call with Bill + Ajith** — scheduled, not yet happened as of 2026-03-17 (mesh regen + gui-subpackage)
-9. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²)
-10. **Docker smoke test with real run** once Windows template exists
-11. **Cloud VM:** AWS/Azure x86 Linux for production-scale runs
-12. **Phase 12:** ras2cng integration into results.py (post-call)
-13. **Future:** FIRM validation, NHD batch input generator, user auth for API
+6. ~~SLURM batch submission~~ ✅ Done (commit 132f148, 216/216 tests)
+7. ~~Cartesian mesh generation~~ ✅ Done (commit 02b79b4)
+8. ~~Resolve plan HDF gap~~ ✅ Fixed (commit 1b71f9f — `_remove_geometry_hdfs()` deletes stale .g##.hdf after template clone; forces ras_preprocess Workflow C; 218 tests)
+9. ~~StreamStats 404~~ ✅ Fixed (commit f148eaa — migrated to ss-delineate API + LP3 gauge peaks path; 222 tests)
+10. ~~pysheds NumPy 2.0 compat~~ ✅ Fixed (commit 355c92e — np.in1d patch + extract_river_network API update; numpy pinned <2.0)
+11. ~~Spring Creek mock end-to-end~~ ✅ All 6 stages pass (commit 355c92e — `trial_spring_creek.py`; real artifacts in `workspace/spring_creek/08_model_validation/ras_agent_95mi2/`)
+12. **Send OTM email** (Glenn — otm@illinois.edu from heistand@illinois.edu) — still pending
+13. ~~Fix Spring Creek drainage area~~ ✅ Decided 2026-05-01: bypass Stage 2 with NLDI basin polygon (103.4 mi²) + NHD flowlines. TauDEM replaces pysheds for production. DEM is in feet (522-673 ft); boundary_handoff outlet WGS84: (-89.731679, 39.812374). Hydrographs now correct: Tc=16.8h, Q100 vol=25,677 ac-ft.
+14. ~~Wire rain-on-grid (AORC/MRMS)~~ ✅ Done 2026-05-01: `pipeline/precipitation.py` — `catalog_storms()`, `select_design_storm()`, `download_storm()`, `run_precipitation_stage(precip_mode="aorc")`; wraps `ras_commander.precip.PrecipAorc`; mock mode; orchestrator Stage 4.5 hook. TODO: Atlas 14 integration for real depth targets (placeholder uses `rp * 0.5`).
+14b. ~~GHCND storm QC~~ ✅ Done 2026-05-01: `pipeline/storm_qc.py` — NOAA CDO station discovery + NCEI daily-summaries cross-check; `qc_flag` (ok/low/high/no_obs).
+14c. ~~NOAA_CDO_TOKEN~~ ✅ Configured 2026-05-02: Added to OpenClaw env config. Live dry-run confirmed 5 GHCND stations found near Spring Creek bounds.
+15. **Glenn to build:** first Windows HEC-RAS template project (small IL watershed ~50 mi²) on Dell Precision 5860
+16. **Add Nikhil Sangwan** to heistand-ic cluster group at NCSA Illinois Computes
+17. **TauDEM integration** — Bill's next focus; will replace pysheds D8 watershed delineation. Confirmed needed: pysheds fails at DEM boundaries.
+18. **Batched-parameter calibration** — after Spring Creek runs cleanly; based on Bill's LWI manual calibration methodology
+19. **Atlas 14 integration** — `precipitation.py` `select_design_storm()` uses placeholder `target_depth = rp * 0.5`; needs real Atlas 14 depths from `ras_commander.precip.StormGenerator.download_from_coordinates(lat, lon)` to match return periods properly
+20. **Phase 12:** ras2cng integration into results.py
+21. **Future:** FIRM validation, NHD batch input generator, user auth for API
+
+## Precipitation Module (`pipeline/precipitation.py`) — Added 2026-05-01
+
+### Purpose
+Download AORC rain-on-grid precipitation data for a watershed and identify design storms.
+
+### Key Functions
+- `check_aorc_dependencies()` → dict — checks xarray, zarr, s3fs, rioxarray
+- `catalog_storms(bounds, years, percentile_threshold=80.0, mock=False)` → pd.DataFrame
+  - Wraps `ras_commander.precip.PrecipAorc.get_storm_catalog()` across multiple years
+  - Columns: storm_id, start_time, end_time, sim_start, sim_end, total_depth_in, peak_intensity_in_hr, duration_hours, wet_hours, rank, year
+  - Mock returns 3 synthetic IL storms (1.2, 2.4, 3.8 in)
+- `select_design_storm(catalog_df, target_depth_in, tolerance_pct=0.3)` → pd.Series | None
+  - Finds storm closest to target depth within tolerance; returns None if no match
+- `download_storm(storm_row, bounds, output_dir, mock=False)` → Path
+  - Downloads AORC NetCDF via S3 (anonymous access); output: `output_dir/precipitation/aorc_{id}_{date}.nc`
+  - Mock: writes stub file
+- `run_precipitation_stage(bounds, output_dir, target_return_periods=[2,10,100], years=None, mock=False)` → dict
+  - Full stage: catalog → select → download for each return period
+  - Returns `{rp_yr: PrecipitationResult or None}`
+  - **TODO:** depth targets use placeholder `rp * 0.5` — replace with Atlas 14 via `StormGenerator.download_from_coordinates(lat, lon)`
+
+### Orchestrator Integration
+- `run_watershed(..., precip_mode="aorc")` triggers Stage 4.5
+- Default `precip_mode="skip"` — no behavioral change for existing code/tests
+- `OrchestratorResult.precip_result` field (defaults None)
+
+### AORC Data Source
+- AWS S3 bucket: `noaa-nws-aorc-v1-1-1km` (anonymous, no auth)
+- Format: Zarr, hourly, ~800m resolution, 1979-present CONUS
+- CRS: WGS84 → reprojected to EPSG:5070 (SHG 2000m) for HEC-RAS import
+- Dependencies: `xarray`, `zarr`, `s3fs`, `rioxarray` (not in base requirements)
+
+---
+
+## Storm QC Module (`pipeline/storm_qc.py`) — Added 2026-05-01
+
+### Purpose
+Cross-check AORC storm depths against NOAA GHCND observed station precipitation to validate spatial representativeness.
+
+### Key Functions
+- `find_stations(bounds, max_stations=5, noaa_token=None)` → List[GhcndStation]
+  - NOAA CDO v2 API; requires `NOAA_CDO_TOKEN` env var (free); returns [] gracefully if missing
+- `get_observed_precip(station_ids, start_date, end_date)` → pd.DataFrame
+  - NCEI daily-summaries API (no token needed); columns: station_id, date, prcp_inches
+- `compare_storm_depths(storm_catalog_df, bounds, mock=False)` → pd.DataFrame
+  - Adds: `ghcnd_depth_in`, `ghcnd_stations_used`, `depth_ratio` (aorc/ghcnd)
+  - Mock: ghcnd_depth_in = total_depth_in * 0.9
+- `qc_storm_catalog(storm_catalog_df, bounds, mock=False)` → pd.DataFrame
+  - Adds `qc_flag`: "ok" (0.6≤1.6), "low" (<0.6), "high" (>1.6), "no_obs" (NaN)
+
+### Config
+- `NOAA_CDO_TOKEN` env var — ✅ configured in OpenClaw env (2026-05-02). Live verification: 5 GHCND stations discovered near Spring Creek bounds (-90.0, 39.6, -89.2, 40.2).
+
+---
+
+## CLB Engineering Integration — PR #13 (2026-05-02)
+
+### Context
+Post May-1 call decision: Bill/Ajith's `pr-6-review` branch (CLB Engineering) is higher priority than our morning commits. Spring Creek pilot driven by Bill and Ajith; Glenn facilitates.
+
+### What PR #13 Merged
+- **base:** `pr-6-review` (Bill/Ajith CLB branch, 17 commits since merge-base `462f02c`)
+- **on top:** main's 9 morning commits (AORC, storm QC, Cartesian mesh, SLURM, ras2cng, ss-delineate fix)
+
+### 5 Conflict Resolutions
+1. `pipeline/watershed.py` — **pr-6-review wins** (TauDEM replaces pysheds entirely)
+2. `pipeline/streamstats.py` — **hybrid** (pr-6-review structure + main's live 2026 ss-delineate URL; legacy streamstatsservices decommissioned Jan 30 2026)
+3. `pipeline/orchestrator.py` — pr-6-review's defensive try/except imports + both dataclass fields (`pre_run_readiness` + `precip_result`)
+4. `tests/test_model_builder.py` — both test suites merged
+5. `tests/test_streamstats.py` — both suites merged; absolute RDB path guarded by `skipif(not path.exists())`
+
+### New Pipeline Modules (from CLB branch)
+- `pipeline/bc_lines.py` — 2D BC Line generation for geometry_first models
+- `pipeline/hecras_readiness.py` — HEC-RAS pre-run readiness gate (758 lines)
+- `pipeline/taudem.py` — TauDEM watershed delineation integration
+- `pipeline/context_layers.py` — terrain conditioning, NLCD, soils context layers
+- `pipeline/workspace.py` — workspace manager for project artifacts
+- Expanded: `pipeline/model_builder.py`, `pipeline/report.py`, `pipeline/terrain.py`
+
+### IP / Reverse-Engineering Boundary
+- ras-agent (public Apache 2.0): calls CLB published APIs only — no decompiled code, no DLL artifacts
+- CLB private repo: owns reverse-engineered HEC-RAS automation layer; Bill absorbs TOS exposure
+- Model: `ras-commander` and any CLB packages imported as published libraries only
+- **Never vendor CLB reverse-engineered code into this repo**
+
+### CLB Infrastructure (Bill's pending action items)
+- Tailscale org invite to Glenn's email — pending
+- CLB NAS credentials (H drive) — pending
+- Windows VM 16-32GB (CLBO2 or CLBO7) — promised "possibly this weekend" (2026-05-03)
+- Symphony access for Glenn to dispatch jobs to CLBO8 — pending
+
+### Dry-Run Status (2026-05-02)
+- `trial_spring_creek.py` — all 6 stages pass ✅ (fixed WatershedResult constructor for new subbasins/centerlines/breaklines fields)
+- `trial_spring_creek_precip.py` — all 4 stages pass ✅ (live NOAA CDO confirmed)
+
+---
+
+## Spring Creek Pilot — Key Facts (2026-05-01)
+
+- **Gauge:** USGS 05577500 (Springfield IL), 78 years of annual peaks
+- **LP3 peaks:** Q2=1,688 / Q10=5,108 / Q100=12,566 / Q500=20,199 cfs
+- **NLDI basin:** 267.9 km² (103.4 mi²) from `02_basin_outline/USGS_05577500_nldi_basin_5070.geojson`
+- **DEM:** `04_terrain/spring_creek_basin_dem_5070.tif` — elevation in FEET (522-673 ft = 46m relief)
+- **Staged DEM bounds (EPSG:5070):** left=506394, right=539112, bottom=1866085, top=1885672
+- **Boundary_handoff outlet:** (531443, 1883487) EPSG:5070 → (-89.731679, 39.812374) WGS84 — inside DEM ✅
+- **Main channel:** 43.17 km (top-5 NHD segments), slope=0.00107 m/m
+- **Tc (Kirpich):** 16.81 hr; hydrograph duration: 92.4 hr
+- **TauDEM verification:** in `09_taudem_verification/` — Bill's team delineated full 95+ mi²; confirms TauDEM is correct path
+- **Pysheds limitation:** delineates 1.3 mi² at boundary_handoff because point is near DEM north edge; pysheds can't see full upstream. TauDEM required for production.
+- **Current bypass:** `trial_spring_creek.py` Stage 2 uses NLDI polygon + NHD instead of pysheds
+
+---
 
 ## CI Status
 - ubuntu-24.04 runner requires: `apt-get install libgdal-dev gdal-bin libgeos-dev libproj-dev`

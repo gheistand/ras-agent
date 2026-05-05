@@ -77,6 +77,13 @@ try:
 except ImportError:
     _results = None
 
+# Optional: precipitation stage
+try:
+    import precipitation as _precipitation
+    _has_precip = True
+except ImportError:
+    _has_precip = False
+
 
 # ── Data Structures ───────────────────────────────────────────────────────────
 
@@ -105,6 +112,7 @@ class OrchestratorResult:
     archive_dir: Optional[Path] = None  # ras2cng GeoParquet archive (Stage 7b)
     pre_run_readiness: Optional[list[dict]] = None
     water_source: dict = field(default_factory=dict)
+    precip_result: Optional[dict] = None  # {rp: PrecipitationResult} from Stage 4.5
 
 
 class OrchestratorError(RuntimeError):
@@ -317,6 +325,7 @@ def run_watershed(
     ras_exe_dir: Optional[Path] = None,
     max_parallel: int = 2,
     name: Optional[str] = None,
+    precip_mode: str = "skip",
     write_report: bool = True,
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
     cloud_native: bool = True,  # If True, export GeoParquet archive via ras2cng (Stage 7b)
@@ -516,6 +525,29 @@ def run_watershed(
         result.errors.append(err)
         result.duration_sec = time.monotonic() - t0
         return result
+
+    # ── Stage 4.5: Precipitation (optional AORC rain-on-grid) ─────────────────
+    precip_result = None
+    if precip_mode == "aorc" and _has_precip:
+        try:
+            logger.info("[Stage 4.5] Downloading AORC precipitation catalog …")
+            bounds_wgs84 = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
+            precip_result = _precipitation.run_precipitation_stage(
+                bounds=bounds_wgs84,
+                output_dir=output_dir,
+                target_return_periods=return_periods,
+                mock=mock,
+            )
+            logger.info(
+                f"[Stage 4.5] Precipitation stage complete — "
+                f"{sum(v is not None for v in precip_result.values())}/{len(precip_result)} return periods matched"
+            )
+        except Exception as exc:
+            err = f"Stage 4.5 (precipitation) failed: {exc}"
+            logger.warning(err)
+            result.errors.append(err)
+
+    result.precip_result = precip_result
 
     # ── Stage 5: Model build ──────────────────────────────────────────────────
     logger.info(
