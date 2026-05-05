@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
+import io
 import logging
 import math
 from pathlib import Path
@@ -44,6 +45,8 @@ tr:nth-child(even) { background: #f6f8fa; }
 .plot-block { margin: 18px 0 28px; }
 .plot-title { font-weight: bold; color: #2d506f; margin-bottom: 6px; }
 .footer { margin-top: 42px; padding-top: 15px; border-top: 1px solid #d9e2ea; color: #7b8794; font-size: 0.85em; text-align: center; }
+.map-container { margin: 18px 0 28px; }
+.map-container iframe { display: block; }
 """
 
 
@@ -80,6 +83,19 @@ class GaugeComparison:
     aligned: pd.DataFrame
     stats: dict[str, float]
     n_points: int
+
+
+@dataclass
+class ProjectContext:
+    """Optional project metadata for the report introduction and map sections."""
+
+    title: str = ""
+    description: str = ""
+    data_sources: list[dict[str, str]] = field(default_factory=list)
+    boundary_conditions: list[dict[str, str]] = field(default_factory=list)
+    geometry: Any = None
+    gauge_locations: list[dict[str, Any]] = field(default_factory=list)
+    crs: str = "EPSG:4326"
 
 
 def _utc_timestamp() -> str:
@@ -604,6 +620,207 @@ def _average_stats(comparisons: Sequence[GaugeComparison]) -> dict[str, float]:
     return averaged
 
 
+def _html_project_intro(ctx: ProjectContext) -> str:
+    parts = []
+    if ctx.title:
+        parts.append(f"<h2>{escape(ctx.title)}</h2>")
+    if ctx.description:
+        paragraphs = ctx.description.strip().split("\n\n")
+        for para in paragraphs:
+            parts.append(f"<p>{escape(para.strip())}</p>")
+    return "\n".join(parts)
+
+
+def _html_data_sources(ctx: ProjectContext) -> str:
+    if not ctx.data_sources:
+        return ""
+    parts = ["<h2>Data Sources</h2>", "<table><thead><tr>"]
+    headers = set()
+    for src in ctx.data_sources:
+        headers.update(src.keys())
+    col_order = []
+    for preferred in ("name", "type", "source", "file", "description", "period", "interval"):
+        if preferred in headers:
+            col_order.append(preferred)
+            headers.discard(preferred)
+    col_order.extend(sorted(headers))
+    parts.append("".join(f"<th>{escape(col.replace('_', ' ').title())}</th>" for col in col_order))
+    parts.append("</tr></thead><tbody>")
+    for src in ctx.data_sources:
+        parts.append("<tr>" + "".join(
+            f"<td>{escape(str(src.get(col, '')))}</td>" for col in col_order
+        ) + "</tr>")
+    parts.append("</tbody></table>")
+    return "\n".join(parts)
+
+
+def _html_boundary_conditions(ctx: ProjectContext) -> str:
+    if not ctx.boundary_conditions:
+        return ""
+    parts = ["<h2>Boundary Conditions</h2>", "<table><thead><tr>"]
+    headers = set()
+    for bc in ctx.boundary_conditions:
+        headers.update(bc.keys())
+    col_order = []
+    for preferred in ("name", "location", "type", "source", "description"):
+        if preferred in headers:
+            col_order.append(preferred)
+            headers.discard(preferred)
+    col_order.extend(sorted(headers))
+    parts.append("".join(f"<th>{escape(col.replace('_', ' ').title())}</th>" for col in col_order))
+    parts.append("</tr></thead><tbody>")
+    for bc in ctx.boundary_conditions:
+        parts.append("<tr>" + "".join(
+            f"<td>{escape(str(bc.get(col, '')))}</td>" for col in col_order
+        ) + "</tr>")
+    parts.append("</tbody></table>")
+    return "\n".join(parts)
+
+
+def _build_map_html(ctx: ProjectContext, gauges: Sequence[GaugeRecord]) -> str:
+    try:
+        import folium
+        from folium import GeoJson, Marker, CircleMarker
+    except ImportError:
+        logger.debug("folium not available — skipping map section")
+        return ""
+
+    locations = list(ctx.gauge_locations)
+    if not locations:
+        for gauge in gauges:
+            if gauge.y is not None and gauge.x is not None:
+                locations.append({"name": gauge.name, "lat": gauge.y, "lon": gauge.x})
+
+    if not locations and ctx.geometry is None:
+        return ""
+
+    center_lat, center_lon = 0.0, 0.0
+    if locations:
+        center_lat = np.mean([loc["lat"] for loc in locations])
+        center_lon = np.mean([loc["lon"] for loc in locations])
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=9, tiles="CartoDB positron")
+
+    if ctx.geometry is not None:
+        try:
+            import geopandas as gpd
+            if isinstance(ctx.geometry, gpd.GeoDataFrame):
+                geojson_data = ctx.geometry.to_crs("EPSG:4326").__geo_interface__
+            elif isinstance(ctx.geometry, dict):
+                geojson_data = ctx.geometry
+            elif isinstance(ctx.geometry, (list, tuple)):
+                for layer in ctx.geometry:
+                    _add_geometry_layer(m, layer)
+                geojson_data = None
+            else:
+                geojson_data = None
+
+            if geojson_data is not None:
+                _add_geojson_to_map(m, geojson_data)
+        except Exception as exc:
+            logger.warning("Failed to add geometry to map: %s", exc)
+
+    for loc in locations:
+        folium.Marker(
+            location=[loc["lat"], loc["lon"]],
+            popup=escape(loc.get("name", "")),
+            tooltip=escape(loc.get("name", "")),
+            icon=folium.Icon(color="red", icon="tint", prefix="fa"),
+        ).add_to(m)
+
+    if not locations and ctx.geometry is not None:
+        m.fit_bounds(m.get_bounds())
+
+    map_html = m.get_root().render()
+    iframe_html = (
+        '<h2>Model Geometry &amp; Observation Locations</h2>'
+        '<div class="map-container">'
+        f'<iframe srcdoc="{escape(map_html, quote=True)}" '
+        'width="100%" height="550" style="border:1px solid #d9e2ea; border-radius:4px;" '
+        'sandbox="allow-scripts allow-same-origin"></iframe>'
+        '</div>'
+    )
+    return iframe_html
+
+
+def _add_geometry_layer(m, layer_config: dict) -> None:
+    import folium
+
+    geojson = layer_config.get("geojson")
+    if geojson is None:
+        return
+
+    try:
+        import geopandas as gpd
+        if isinstance(geojson, gpd.GeoDataFrame):
+            geojson = geojson.to_crs("EPSG:4326").__geo_interface__
+    except ImportError:
+        pass
+
+    style = layer_config.get("style", {})
+    name = layer_config.get("name", "Layer")
+    folium.GeoJson(
+        geojson,
+        name=name,
+        style_function=lambda feature, s=style: {
+            "color": s.get("color", "#1a5276"),
+            "weight": s.get("weight", 2),
+            "fillOpacity": s.get("fill_opacity", 0.1),
+            "fillColor": s.get("fill_color", s.get("color", "#1a5276")),
+        },
+    ).add_to(m)
+
+
+def _add_geojson_to_map(m, geojson_data: dict) -> None:
+    import folium
+
+    features = geojson_data.get("features", [])
+    mesh_features = []
+    line_features = []
+    other_features = []
+
+    for feat in features:
+        geom_type = feat.get("geometry", {}).get("type", "")
+        if "Polygon" in geom_type:
+            mesh_features.append(feat)
+        elif "Line" in geom_type:
+            line_features.append(feat)
+        else:
+            other_features.append(feat)
+
+    if mesh_features:
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": mesh_features},
+            name="2D Mesh Areas",
+            style_function=lambda f: {
+                "color": "#1a5276",
+                "weight": 1.5,
+                "fillOpacity": 0.08,
+                "fillColor": "#5dade2",
+            },
+        ).add_to(m)
+
+    if line_features:
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": line_features},
+            name="Breaklines / Cross Sections",
+            style_function=lambda f: {
+                "color": "#d35400",
+                "weight": 2,
+                "dashArray": "5,5",
+            },
+        ).add_to(m)
+
+    if other_features:
+        folium.GeoJson(
+            {"type": "FeatureCollection", "features": other_features},
+            name="Other Features",
+        ).add_to(m)
+
+    if mesh_features or line_features or other_features:
+        folium.LayerControl().add_to(m)
+
+
 def _html_summary_table(comparisons: Sequence[GaugeComparison]) -> str:
     rows = []
     for label, n_comparisons, stats in _summary_rows(comparisons):
@@ -729,6 +946,7 @@ def generate_calibration_report(
     plan_hdfs: Any,
     observed_data: Any,
     output_path: Path,
+    project_context: Optional[ProjectContext | Mapping[str, Any]] = None,
 ) -> Path:
     """
     Generate a self-contained HTML calibration report.
@@ -740,6 +958,11 @@ def generate_calibration_report(
             gauge names to config dictionaries, a list of config dictionaries, or
             a DataFrame with gauge/time/observed columns and optional modeled data.
         output_path: Path to write the HTML report.
+        project_context: Optional ProjectContext or dict with project metadata
+            (title, description, data_sources, boundary_conditions, geometry,
+            gauge_locations). When provided, the report starts with an introduction,
+            an interactive map of model geometry and gauge locations, and tables
+            describing data sources and boundary conditions.
 
     Returns:
         Path to the written HTML file.
@@ -753,19 +976,39 @@ def generate_calibration_report(
     if not comparisons:
         raise ValueError("No gauge comparisons were available for calibration report generation")
 
+    ctx = _coerce_project_context(project_context)
+
     bokeh_resources, plots_html = _bokeh_resources_and_components(comparisons)
     run_ts = _utc_timestamp()
     plan_count = len(plan_map) if plan_map else len({comparison.plan_label for comparison in comparisons})
 
+    context_sections = []
+    if ctx is not None:
+        intro = _html_project_intro(ctx)
+        if intro:
+            context_sections.append(intro)
+        map_html = _build_map_html(ctx, gauges)
+        if map_html:
+            context_sections.append(map_html)
+        ds_html = _html_data_sources(ctx)
+        if ds_html:
+            context_sections.append(ds_html)
+        bc_html = _html_boundary_conditions(ctx)
+        if bc_html:
+            context_sections.append(bc_html)
+
+    report_title = escape(ctx.title) if ctx and ctx.title else "RAS Agent Calibration Report"
+
     body = "\n".join(
         [
-            "<h1>RAS Agent Calibration Report</h1>",
+            f"<h1>{report_title}</h1>",
             '<p class="meta">'
             f"<strong>Generated:</strong> {escape(run_ts)}<br>"
             f"<strong>Gauge comparisons:</strong> {len(comparisons)}<br>"
             f"<strong>Plans:</strong> {plan_count}<br>"
             f"<strong>RAS Agent calibration report version:</strong> {_VERSION}"
             "</p>",
+            *context_sections,
             _html_summary_table(comparisons),
             _html_stats_table(comparisons),
             plots_html,
@@ -779,7 +1022,7 @@ def generate_calibration_report(
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>RAS Agent Calibration Report</title>
+  <title>{report_title}</title>
   <style>
 {_CSS}  </style>
 {bokeh_resources}
@@ -794,9 +1037,28 @@ def generate_calibration_report(
     return output_path
 
 
+def _coerce_project_context(raw: Any) -> Optional[ProjectContext]:
+    if raw is None:
+        return None
+    if isinstance(raw, ProjectContext):
+        return raw
+    if isinstance(raw, Mapping):
+        return ProjectContext(
+            title=str(raw.get("title", "")),
+            description=str(raw.get("description", "")),
+            data_sources=list(raw.get("data_sources", [])),
+            boundary_conditions=list(raw.get("boundary_conditions", [])),
+            geometry=raw.get("geometry"),
+            gauge_locations=list(raw.get("gauge_locations", [])),
+            crs=str(raw.get("crs", "EPSG:4326")),
+        )
+    return None
+
+
 __all__ = [
     "GaugeComparison",
     "GaugeRecord",
+    "ProjectContext",
     "calculate_stats",
     "generate_calibration_report",
 ]

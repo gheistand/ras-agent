@@ -186,3 +186,48 @@ def test_generate_calibration_report_uses_mocked_hdf_extraction(tmp_path, monkey
     assert calls == [(plan_hdf, "Mock Gauge", 500000.0, 4400000.0, "stage")]
     assert "Mock Gauge" in html
     assert "Mock Plan" in html
+
+
+def test_generate_report_with_project_context(tmp_path):
+    folium = pytest.importorskip("folium")
+    observed = _series(10.0 + np.sin(np.linspace(0, np.pi, 24)) * 3.0)
+    modeled = observed * 1.02
+
+    ctx = calibration_report.ProjectContext(
+        title="Test Calibration Project",
+        description="A test project for verifying ProjectContext rendering.",
+        data_sources=[
+            {"name": "Test Observed", "type": "Observed", "source": "Unit Test"},
+            {"name": "Test Modeled", "type": "Modeled", "source": "Synthetic"},
+        ],
+        boundary_conditions=[
+            {"name": "Upstream", "location": "RM 100", "type": "Flow Hydrograph"},
+        ],
+        gauge_locations=[
+            {"name": "Test Gauge", "lat": 37.0, "lon": -89.0},
+        ],
+    )
+
+    path = calibration_report.generate_calibration_report(
+        plan_hdfs=[],
+        observed_data={
+            "Test Gauge": {
+                "observed": observed,
+                "modeled": modeled,
+                "variable": "stage",
+                "units": "ft",
+            },
+        },
+        output_path=tmp_path / "context_report.html",
+        project_context=ctx,
+    )
+
+    html = path.read_text(encoding="utf-8")
+    assert "Test Calibration Project" in html
+    assert "Data Sources" in html
+    assert "Boundary Conditions" in html
+    assert "srcdoc" in html
+    assert "leaflet" in html.lower() or "L.map" in html
+    assert "Test Gauge" in html
+    assert "Unit Test" in html
+    assert "Upstream" in html
