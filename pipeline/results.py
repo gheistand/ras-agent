@@ -1011,6 +1011,7 @@ def export_filtered_rasters(
         from rasterio.warp import (
             calculate_default_transform,
             reproject as rio_reproject,
+            Resampling,
         )
 
         src_crs = src_profile["crs"]
@@ -1040,6 +1041,7 @@ def export_filtered_rasters(
                 src_crs=src_crs,
                 dst_transform=transform,
                 dst_crs=target_crs,
+                resampling=Resampling.bilinear,
                 src_nodata=NODATA,
                 dst_nodata=NODATA,
             )
