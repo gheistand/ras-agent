@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from loguru import logger
@@ -197,6 +197,9 @@ def _write_run_metadata(
         "contract_status": "not_recorded",
         "production_ready": False,
     }
+    workflow_config = getattr(result, "workflow_config", None)
+    if hasattr(workflow_config, "to_audit_dict"):
+        workflow_config = workflow_config.to_audit_dict()
 
     metadata = {
         "name": spec.name,
@@ -214,6 +217,8 @@ def _write_run_metadata(
         "ras_agent_commit": GIT_COMMIT,
         "run_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    if isinstance(workflow_config, dict):
+        metadata["workflow_config"] = workflow_config
 
     meta_path = ws_dir / "run_metadata.json"
     with meta_path.open("w") as fh:
@@ -237,6 +242,7 @@ def run_batch(
     resume: bool = True,
     dry_run: bool = False,
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
+    workflow_config: Optional[Any] = None,
 ) -> BatchResult:
     """
     Run full pipeline for each watershed in input_file.
@@ -270,6 +276,9 @@ def run_batch(
         resume:         Skip watersheds with existing completed output
         dry_run:        Load + validate specs, print plan, exit without running
         notify_config:  Optional NotifyConfig for per-watershed + batch notifications
+        workflow_config:
+                        Optional RoG workflow config mapping, dataclass, or
+                        JSON/YAML path forwarded into run_watershed.
 
     Returns:
         BatchResult with per-watershed results and summary CSV path
@@ -357,6 +366,7 @@ def run_batch(
             allow_low_detail_screening=allow_low_detail_screening,
             ras_exe_dir=ras_exe_dir,
             name=spec.name,
+            workflow_config=workflow_config,
         )
         dur = time.monotonic() - t_start
         _write_run_metadata(spec, result, dur, boundary_condition_mode)
@@ -548,6 +558,12 @@ if __name__ == "__main__":
                         help="Webhook URL for completion notification")
     parser.add_argument("--notify-email", default=None,
                         help="Email address for completion notification")
+    parser.add_argument(
+        "--workflow-config",
+        type=Path,
+        default=None,
+        help="JSON/YAML RoG workflow config for audit metadata and default AEPs",
+    )
     args = parser.parse_args()
 
     notify_config = None
@@ -576,6 +592,7 @@ if __name__ == "__main__":
         resume=not args.no_resume,
         dry_run=args.dry_run,
         notify_config=notify_config,
+        workflow_config=args.workflow_config,
     )
     print(
         f"Batch complete: {result.completed} done, "

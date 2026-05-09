@@ -184,6 +184,7 @@ def test_orchestrator_result_dataclass():
         duration_sec=42.7,
         status="complete",
         errors=[],
+        workflow_config={"schema_version": "ras-agent-rog-workflow-config/v1"},
     )
     assert r.name == "test_run"
     assert r.pour_point == (-89.5, 40.5)
@@ -193,6 +194,7 @@ def test_orchestrator_result_dataclass():
     assert r.duration_sec == pytest.approx(42.7)
     assert r.status == "complete"
     assert r.errors == []
+    assert r.workflow_config["schema_version"] == "ras-agent-rog-workflow-config/v1"
 
 
 def test_run_watershed_mock_mode(tmp_path):
@@ -246,9 +248,13 @@ def test_run_watershed_mock_mode(tmp_path):
             pour_point_lon=-89.5,
             pour_point_lat=40.5,
             output_dir=tmp_path,
-            return_periods=[10, 50, 100],
             ras_exe_dir=None,   # mock mode
             name="test_mock_run",
+            workflow_config={
+                "aep_years": [10, 50, 100],
+                "durations_hours": [24],
+                "mock": True,
+            },
         )
 
     assert result.status == "complete", f"errors: {result.errors}"
@@ -262,6 +268,9 @@ def test_run_watershed_mock_mode(tmp_path):
     assert len(result.job_ids) == 3
     assert result.duration_sec > 0
     assert result.errors == []
+    assert result.workflow_config["schema_version"] == "ras-agent-rog-workflow-config/v1"
+    assert result.workflow_config["plan_count"] == 3
+    assert result.workflow_config["mock"] is True
     assert mock_build.call_args.kwargs["boundary_condition_mode"] == "headwater"
 
 
