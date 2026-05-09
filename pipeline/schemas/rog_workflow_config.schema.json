@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clbengineering.local/ras-agent/schemas/rog_workflow_config.schema.json",
+  "title": "RAS Agent Rain-on-Grid Workflow Configuration",
+  "description": "Configuration schema for generalized rain-on-grid workflow orchestration.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "aep_years": {
+      "type": "array",
+      "description": "Annual exceedance probability return periods, expressed as years.",
+      "default": [10, 50, 100, 500],
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "durations_hours": {
+      "type": "array",
+      "description": "Design storm durations in hours.",
+      "default": [6, 12, 24],
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "number",
+        "exclusiveMinimum": 0
+      }
+    },
+    "precip_timestep_minutes": {
+      "type": "integer",
+      "description": "Precipitation hyetograph temporal resolution in minutes. This is not the HEC-RAS computational timestep, output interval, or mapping interval. MRMS event workflows typically use 60 minutes to match GaugeCorr_QPE_01H; synthetic Atlas 14 workflows commonly use 5-15 minutes.",
+      "default": 15,
+      "minimum": 1
+    },
+    "peak_position_percent": {
+      "type": "number",
+      "description": "Percent of storm duration at which the design storm peaks.",
+      "default": 50.0,
+      "minimum": 0,
+      "maximum": 100
+    },
+    "infiltration_method": {
+      "type": "string",
+      "description": "Rain-on-grid infiltration method identifier.",
+      "default": "deficit_constant",
+      "minLength": 1
+    },
+    "min_depth_threshold_ft": {
+      "type": "number",
+      "description": "Minimum mapped flood depth threshold in feet.",
+      "default": 0.5,
+      "minimum": 0
+    },
+    "target_crs": {
+      "description": "Optional runtime CRS override. Null keeps the standard EPSG:5070 workflow CRS.",
+      "default": null,
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "calibration_gauges": {
+      "description": "Optional calibration gauge records in target CRS coordinates.",
+      "default": null,
+      "type": ["array", "null"],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["site_id", "x", "y", "variable"],
+        "properties": {
+          "site_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "variable": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "mock": {
+      "type": "boolean",
+      "description": "Run the workflow in mock/screening mode.",
+      "default": false
+    }
+  }
+}
