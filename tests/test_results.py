@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'pipeline'))
 
 import h5py
 import numpy as np
+import pandas as pd
 import pytest
 import rasterio
 import geopandas as gpd
@@ -27,6 +28,7 @@ from results import (
     extract_max_wse,
     extract_max_velocity,
     extract_flow_area_results,
+    extract_point_timeseries,
     cells_to_raster,
     extract_flood_extent,
     export_results,
@@ -131,6 +133,44 @@ def make_fake_ras_2025_hdf(path: Path) -> Path:
         wse = (depths + 250.0).astype(np.float32)
         ts_grp.create_dataset("Water Surface", data=wse)
     return path
+
+
+def make_fake_point_timeseries_hdf(path: Path) -> tuple[Path, tuple[float, float]]:
+    """Create a small HDF with timestamps and a direct cell flow dataset."""
+    from pyproj import Transformer
+
+    lon_lat = (-89.6994167, 39.81541667)
+    x, y = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform(*lon_lat)
+    with h5py.File(str(path), "w") as hf:
+        area_grp = hf.create_group(f"Geometry/2D Flow Areas/{AREA_NAME}")
+        area_grp.create_dataset(
+            "Cells Center Coordinate",
+            data=np.array([[x + 500.0, y], [x + 2.0, y + 1.0]], dtype=np.float64),
+        )
+        area_grp.create_dataset("Cells Minimum Elevation", data=np.array([98.0, 100.0]))
+
+        ts_base = "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series"
+        ts_grp = hf.create_group(ts_base)
+        ts_grp.create_dataset(
+            "Time Date Stamp (ms)",
+            data=np.array(
+                [
+                    b"17JUN2011 17:30:00:000",
+                    b"17JUN2011 18:30:00:000",
+                    b"17JUN2011 19:30:00:000",
+                ]
+            ),
+        )
+        area_ts = hf.create_group(f"{ts_base}/2D Flow Areas/{AREA_NAME}")
+        area_ts.create_dataset(
+            "Water Surface",
+            data=np.array([[110.0, 120.0], [111.0, 122.0], [112.0, 124.0]], dtype=np.float32),
+        )
+        area_ts.create_dataset(
+            "Flow",
+            data=np.array([[10.0, 20.0], [11.0, 22.0], [12.0, 24.0]], dtype=np.float32),
+        )
+    return path, lon_lat
 
 
 @pytest.fixture(scope="module")
@@ -307,6 +347,29 @@ class TestExtractMaxVelocity:
             ts.create_dataset("Depth", data=np.ones((2, 3), dtype=np.float32))
         with pytest.raises(KeyError):
             extract_max_velocity(hdf, AREA_NAME)
+
+
+# ── Point Time-Series Extraction ──────────────────────────────────────────────
+
+class TestExtractPointTimeseries:
+    def test_extracts_nearest_cell_stage_and_flow(self, tmp_path):
+        hdf_path, (lon, lat) = make_fake_point_timeseries_hdf(tmp_path / "point.hdf")
+
+        frame = extract_point_timeseries(hdf_path, AREA_NAME, lon, lat)
+
+        assert list(frame.columns) == [
+            "flow_cfs",
+            "stage_ft",
+            "water_surface_ft",
+            "depth_ft",
+        ]
+        assert frame.index.name == "datetime_utc"
+        assert frame.index[0] == pd.Timestamp("2011-06-17T17:30:00Z")
+        assert frame["flow_cfs"].tolist() == pytest.approx([20.0, 22.0, 24.0])
+        assert frame["stage_ft"].tolist() == pytest.approx([120.0, 122.0, 124.0])
+        assert frame["depth_ft"].tolist() == pytest.approx([20.0, 22.0, 24.0])
+        assert frame.attrs["cell_index"] == 1
+        assert frame.attrs["flow_source"] == "cell_dataset"
 
 
 # ── FlowAreaResults Dataclass ─────────────────────────────────────────────────

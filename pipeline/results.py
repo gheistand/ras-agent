@@ -45,6 +45,7 @@ from typing import Optional, Union
 
 import h5py
 import numpy as np
+import pandas as pd
 import rasterio
 from rasterio.crs import CRS
 from rasterio.transform import from_bounds
@@ -85,6 +86,11 @@ _DEPTH_PATH_2025 = _RESULTS_BASE_2025 + "/Depth"
 _WSE_PATH_2025 = _RESULTS_BASE_2025 + "/Water Surface"
 _VEL_PATH_2025 = _RESULTS_BASE_2025 + "/Velocity"
 _FACE_VEL_PATH_2025 = _RESULTS_BASE_2025 + "/Face Velocity"
+
+_TIME_SERIES_BASE = (
+    "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series"
+)
+_TIME_SERIES_BASE_2025 = "Results/Output Blocks/Base Output"
 
 # COG creation options
 _COG_OPTIONS = {
@@ -166,6 +172,24 @@ def _results_base(ras_version: str, area_name: str) -> str:
     if ras_version == "2025":
         return _RESULTS_BASE_2025.format(area=area_name)
     return _RESULTS_BASE.format(area=area_name)
+
+
+def _time_series_base(hf: h5py.File, ras_version: str) -> str:
+    """Return the HDF group that contains result timestamps."""
+    candidates = []
+    if ras_version == "2025":
+        candidates.extend(
+            [
+                _TIME_SERIES_BASE_2025,
+                _TIME_SERIES_BASE_2025 + "/Unsteady Time Series",
+            ]
+        )
+    candidates.append(_TIME_SERIES_BASE)
+
+    for path in candidates:
+        if hf.get(path) is not None:
+            return path
+    raise KeyError("Unsteady time-series timestamp group not found in HDF")
 
 
 def _cell_centers_path(hf: h5py.File, area_name: str) -> str:
@@ -270,6 +294,270 @@ def _load_face_geometry(
         cell_face_info = np.array(cfi_ds)
 
     return face_points, face_point_indexes, cell_face_info
+
+
+def _decode_hdf_strings(values: np.ndarray) -> list[str]:
+    """Decode HDF byte/string arrays into stripped Python strings."""
+    decoded: list[str] = []
+    for value in np.asarray(values):
+        if isinstance(value, bytes):
+            decoded.append(value.decode("utf-8", errors="ignore").strip())
+        else:
+            decoded.append(str(value).strip())
+    return decoded
+
+
+def _parse_time_stamps(values: np.ndarray) -> pd.DatetimeIndex:
+    """Parse common HEC-RAS timestamp strings as UTC datetimes."""
+    strings = _decode_hdf_strings(values)
+    for fmt in ("%d%b%Y %H:%M:%S:%f", "%d%b%Y %H:%M:%S"):
+        parsed = pd.to_datetime(strings, format=fmt, utc=True, errors="coerce")
+        if not parsed.isna().any():
+            return pd.DatetimeIndex(parsed, name="datetime_utc")
+
+    parsed = pd.to_datetime(strings, utc=True, errors="coerce")
+    if parsed.isna().any():
+        raise ValueError("Could not parse HEC-RAS time stamps")
+    return pd.DatetimeIndex(parsed, name="datetime_utc")
+
+
+def _load_time_index(hf: h5py.File, ras_version: str) -> pd.DatetimeIndex:
+    """Load the model output time index from the HDF result block."""
+    base = _time_series_base(hf, ras_version)
+    for name in ("Time Date Stamp (ms)", "Time Date Stamp"):
+        ds = hf.get(f"{base}/{name}")
+        if ds is not None:
+            return _parse_time_stamps(ds[:])
+    raise KeyError(f"No time-date stamp dataset found under {base}")
+
+
+def _project_lonlat_to_xy(lon: float, lat: float) -> tuple[float, float]:
+    """Project WGS84 longitude/latitude to the pipeline CRS used by Spring Creek."""
+    try:
+        from pyproj import Transformer
+    except ImportError as exc:
+        raise ImportError("extract_point_timeseries requires pyproj") from exc
+
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True)
+    x, y = transformer.transform(lon, lat)
+    return float(x), float(y)
+
+
+def _extract_cell_dataset(
+    hf: h5py.File,
+    base_path: str,
+    names: tuple[str, ...],
+    cell_index: int,
+    n_times: int,
+) -> Optional[np.ndarray]:
+    """Extract one cell column from the first available cell time-series dataset."""
+    for name in names:
+        ds = hf.get(f"{base_path}/{name}")
+        if ds is None:
+            continue
+        values = np.asarray(ds)
+        if values.ndim == 2:
+            if cell_index >= values.shape[1]:
+                raise IndexError(f"Cell index {cell_index} is outside dataset {name}")
+            return values[:, cell_index].astype(float)
+        if values.ndim == 1 and values.shape[0] == n_times:
+            return values.astype(float)
+        if values.ndim == 1 and cell_index < values.shape[0]:
+            return np.full(n_times, float(values[cell_index]))
+    return None
+
+
+def _cell_face_ids(hf: h5py.File, area_name: str, cell_index: int) -> Optional[np.ndarray]:
+    """Return face IDs associated with one 2D cell."""
+    info_ds = hf.get(f"{_GEOM_BASE.format(area=area_name)}/Cells Face and Orientation Info")
+    values_ds = hf.get(f"{_GEOM_BASE.format(area=area_name)}/Cells Face and Orientation Values")
+    if info_ds is None or values_ds is None:
+        return None
+
+    info = np.asarray(info_ds)
+    if cell_index >= info.shape[0]:
+        return None
+    start, count = [int(v) for v in info[cell_index]]
+    if count <= 0:
+        return None
+    values = np.asarray(values_ds[start:start + count])
+    if values.ndim != 2 or values.shape[1] == 0:
+        return None
+    return values[:, 0].astype(int)
+
+
+def _interp_face_areas(
+    hf: h5py.File,
+    area_name: str,
+    face_ids: np.ndarray,
+    water_surface: np.ndarray,
+) -> Optional[np.ndarray]:
+    """Interpolate face hydraulic areas at each supplied water surface stage."""
+    info_ds = hf.get(f"{_GEOM_BASE.format(area=area_name)}/Faces Area Elevation Info")
+    values_ds = hf.get(f"{_GEOM_BASE.format(area=area_name)}/Faces Area Elevation Values")
+    if info_ds is None or values_ds is None:
+        return None
+
+    info = np.asarray(info_ds)
+    values = np.asarray(values_ds)
+    areas = np.zeros((len(water_surface), len(face_ids)), dtype=float)
+
+    for j, face_id in enumerate(face_ids):
+        if face_id < 0 or face_id >= info.shape[0]:
+            areas[:, j] = np.nan
+            continue
+        start, count = [int(v) for v in info[face_id]]
+        table = values[start:start + count]
+        if table.size == 0:
+            areas[:, j] = np.nan
+            continue
+        elevations = table[:, 0].astype(float)
+        face_area = table[:, 1].astype(float)
+        areas[:, j] = np.interp(
+            water_surface,
+            elevations,
+            face_area,
+            left=0.0,
+            right=float(face_area[-1]),
+        )
+    return areas
+
+
+def _estimate_cell_flow_from_faces(
+    hf: h5py.File,
+    area_name: str,
+    base_path: str,
+    cell_index: int,
+    water_surface: np.ndarray,
+) -> Optional[np.ndarray]:
+    """
+    Estimate point flow from the dominant adjacent face flux.
+
+    HEC-RAS 2D cells do not store a canonical cell discharge. When a direct
+    cell-flow dataset is absent, use the largest absolute flux through any face
+    touching the nearest cell as a local point-flow proxy.
+    """
+    face_ids = _cell_face_ids(hf, area_name, cell_index)
+    if face_ids is None or len(face_ids) == 0:
+        return None
+
+    face_vel_ds = hf.get(f"{base_path}/Face Velocity")
+    if face_vel_ds is None:
+        return None
+    face_vel = np.asarray(face_vel_ds[:, face_ids], dtype=float)
+    face_area = _interp_face_areas(hf, area_name, face_ids, water_surface)
+    if face_area is None:
+        return None
+
+    face_flow = face_vel * face_area
+    if face_flow.size == 0 or np.isnan(face_flow).all():
+        return None
+    return np.nanmax(np.abs(face_flow), axis=1)
+
+
+def extract_point_timeseries(
+    hdf_path: Union[str, Path],
+    area_name: str,
+    lon: float,
+    lat: float,
+) -> pd.DataFrame:
+    """
+    Extract modeled stage and flow at the mesh cell nearest a gauge location.
+
+    Args:
+        hdf_path: HEC-RAS plan/results HDF path.
+        area_name: 2D flow area name.
+        lon: Gauge longitude in WGS84.
+        lat: Gauge latitude in WGS84.
+
+    Returns:
+        Datetime-indexed DataFrame with observed-data-compatible columns:
+        ``flow_cfs`` and ``stage_ft``. The frame also includes
+        ``water_surface_ft`` and ``depth_ft`` when those can be derived. HEC-RAS
+        2D output does not define a canonical per-cell discharge; ``flow_cfs``
+        is read from a direct cell-flow dataset when present, otherwise it is
+        estimated from the dominant adjacent face flux.
+    """
+    hdf_path = Path(hdf_path)
+    ras_ver = detect_ras_version(hdf_path)
+    base_path = _results_base(ras_ver, area_name)
+    x, y = _project_lonlat_to_xy(lon, lat)
+
+    with h5py.File(str(hdf_path), "r") as hf:
+        time_index = _load_time_index(hf, ras_ver)
+        centers = _load_cell_centers(hf, area_name)
+        distance_m, cell_index = cKDTree(centers).query([x, y])
+        cell_index = int(cell_index)
+
+        n_times = len(time_index)
+        water_surface = _extract_cell_dataset(
+            hf,
+            base_path,
+            ("Water Surface", "Water Surface Elevation"),
+            cell_index,
+            n_times,
+        )
+        if water_surface is None:
+            raise KeyError(f"Water Surface dataset not found at HDF path: {base_path}")
+
+        depth = _extract_cell_dataset(
+            hf,
+            base_path,
+            ("Depth", "Cell Depth"),
+            cell_index,
+            n_times,
+        )
+        if depth is None:
+            min_elev_ds = hf.get(f"{_GEOM_BASE.format(area=area_name)}/Cells Minimum Elevation")
+            if min_elev_ds is not None and cell_index < min_elev_ds.shape[0]:
+                depth = water_surface - float(min_elev_ds[cell_index])
+            else:
+                depth = np.full(n_times, np.nan)
+
+        flow = _extract_cell_dataset(
+            hf,
+            base_path,
+            ("Flow", "Cell Flow", "Cells Flow", "Flow CFS"),
+            cell_index,
+            n_times,
+        )
+        flow_source = "cell_dataset"
+        if flow is None:
+            flow = _estimate_cell_flow_from_faces(
+                hf,
+                area_name,
+                base_path,
+                cell_index,
+                water_surface,
+            )
+            flow_source = "dominant_adjacent_face_flux"
+        if flow is None:
+            flow = np.full(n_times, np.nan)
+            flow_source = "unavailable"
+
+    frame = pd.DataFrame(
+        {
+            "flow_cfs": flow,
+            "stage_ft": water_surface,
+            "water_surface_ft": water_surface,
+            "depth_ft": depth,
+        },
+        index=time_index,
+    )
+    frame.index.name = "datetime_utc"
+    frame.attrs.update(
+        {
+            "area_name": area_name,
+            "cell_index": cell_index,
+            "nearest_cell_distance_m": float(distance_m),
+            "gauge_lon": float(lon),
+            "gauge_lat": float(lat),
+            "gauge_x_5070": x,
+            "gauge_y_5070": y,
+            "flow_source": flow_source,
+        }
+    )
+    return frame
 
 
 def extract_max_depth(
