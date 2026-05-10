@@ -93,6 +93,16 @@ try:
 except ImportError:
     _has_precip = False
 
+# Optional: HAND computation
+try:
+    import hand as _hand
+    from hand import HandResult
+    _has_hand = True
+except ImportError:
+    _hand = None
+    HandResult = Any
+    _has_hand = False
+
 
 # ── Data Structures ───────────────────────────────────────────────────────────
 
@@ -118,6 +128,7 @@ class OrchestratorResult:
     duration_sec: float
     status: str                  # "complete" | "partial" | "failed"
     errors: list                 # non-fatal errors encountered
+    hand: Optional[HandResult] = None     # HAND raster (Stage 2.5)
     archive_dir: Optional[Path] = None  # ras2cng GeoParquet archive (Stage 7b)
     pre_run_readiness: Optional[list[dict]] = None
     water_source: dict = field(default_factory=dict)
@@ -501,6 +512,46 @@ def run_watershed(
             f"Stage 2 (watershed delineation) failed: {exc}. "
             "Check DEM coverage and pour point location."
         ) from exc
+
+    # ── Stage 2.5: HAND computation (non-fatal) ────────────────────────────────
+    if _has_hand:
+        try:
+            if mock:
+                result.hand = _hand.mock_hand(output_dir / "hand")
+                logger.info(
+                    "[Stage 2.5] HAND complete — "
+                    "mean=%.2f m (mock mode)", result.hand.mean_hand_m
+                )
+            else:
+                ws_artifacts = result.watershed.artifacts
+                fel = ws_artifacts.get("fel")
+                src = ws_artifacts.get("src")
+                if fel and src:
+                    basin_shape = result.watershed.basin.geometry.iloc[0]
+                    result.hand = _hand.compute_hand(
+                        fel_path=fel,
+                        src_path=src,
+                        output_dir=output_dir / "hand",
+                        watershed_shape=basin_shape,
+                    )
+                    logger.info(
+                        "[Stage 2.5] HAND complete — "
+                        "min=%.2f m, max=%.2f m, mean=%.2f m, "
+                        "stream_cells=%d",
+                        result.hand.min_hand_m,
+                        result.hand.max_hand_m,
+                        result.hand.mean_hand_m,
+                        result.hand.stream_cell_count,
+                    )
+                else:
+                    logger.warning(
+                        "[Stage 2.5] HAND skipped — watershed artifacts "
+                        "'fel' and/or 'src' not available"
+                    )
+        except Exception as exc:
+            err = f"Stage 2.5 (HAND) failed: {exc}"
+            logger.warning(err)
+            result.errors.append(err)
 
     # ── Stage 3: Peak flow estimation ─────────────────────────────────────────
     logger.info(

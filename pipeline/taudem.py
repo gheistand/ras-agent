@@ -43,6 +43,7 @@ class TauDem:
         "pit_remove": "PitRemove",
         "d8_flow_dir": "D8FlowDir",
         "dinf_flow_dir": "DinfFlowDir",
+        "dinf_dist_down": "DinfDistDown",
         "area_d8": "AreaD8",
         "area_dinf": "AreaDinf",
         "grid_net": "Gridnet",
@@ -206,6 +207,53 @@ class TauDem:
             "AreaDinf",
             args,
             {"sca": Path(scafile)},
+            executable_dir=executable_dir,
+            processes=processes,
+        )
+
+    @staticmethod
+    def dinf_dist_down(
+        angfile: Path,
+        felfile: Path,
+        srcfile: Path,
+        ddfile: Path,
+        stat_method: str = "min",
+        dist_method: str = "v",
+        wgfile: Optional[Path] = None,
+        edge_contamination: bool = True,
+        executable_dir: Optional[Path] = None,
+        processes: int = 1,
+    ) -> TauDemCommandResult:
+        """Compute D-infinity distance down to streams.
+
+        Args:
+            angfile:    D-infinity flow direction grid (from DinfFlowDir).
+            felfile:    Pit-filled DEM.
+            srcfile:    Stream source grid (from Threshold).
+            ddfile:     Output distance-down grid.
+            stat_method: "min" | "max" | "ave" — how to combine multiple
+                        downstream paths (default: "min" for HAND).
+            dist_method: "v" (vertical) | "h" (horizontal) | "p" (along path)
+                        | "s" (surface) — distance measure
+                        (default: "v" for HAND = vertical drop to stream).
+            wgfile:     Optional weight grid.
+            edge_contamination: If False, pass -nc flag.
+        """
+        args = [
+            "-ang", str(angfile),
+            "-fel", str(felfile),
+            "-src", str(srcfile),
+            "-dd", str(ddfile),
+            "-m", stat_method, dist_method,
+        ]
+        if wgfile is not None:
+            args.extend(["-wg", str(wgfile)])
+        if not edge_contamination:
+            args.append("-nc")
+        return TauDem._run(
+            "DinfDistDown",
+            args,
+            {"dd": Path(ddfile)},
             executable_dir=executable_dir,
             processes=processes,
         )

@@ -262,6 +262,9 @@ def test_run_watershed_mock_mode(tmp_path):
     assert result.pour_point == (-89.5, 40.5)
     assert result.terrain is not None
     assert result.watershed is not None
+    assert result.hand is not None
+    assert result.hand.hand_path.exists()
+    assert result.hand.mean_hand_m > 0
     assert result.peak_flows is not None
     assert result.hydro_set is not None
     assert result.project is not None
