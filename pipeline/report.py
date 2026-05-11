@@ -966,6 +966,27 @@ def build_workspace_gap_analysis(
             ),
         })
 
+    if not water_source.get("production_ready", False):
+        gaps.append({
+            "id": "headwater-water-source-contract-not-production-ready",
+            "category": "model-readiness",
+            "severity": "high",
+            "status": "open",
+            "description": (
+                "The workspace does not record a production-ready headwater water "
+                "source. A generated model must identify AORC/MRMS rain-on-grid, "
+                "a valid hydrograph source, or explicit mock/low-detail screening mode."
+            ),
+            "affected_artifact": water_source.get("source_artifact") or "00_metadata/model_handoff.json",
+            "owner_repo": "ras-agent",
+            "issue_url": issue_urls.get("ras_agent_report_contract"),
+            "blocking_for": "model-readiness",
+            "recommended_action": (
+                "Record and validate the water-source contract before treating the "
+                "workspace as ready for HEC-RAS execution."
+            ),
+        })
+
     precip_qaqc = ctx.get("precip_station_qaqc")
     precip_qaqc_path = ctx.get("precip_station_qaqc_path")
     if precip_qaqc is None:
@@ -979,14 +1000,6 @@ def build_workspace_gap_analysis(
                 "the rain-on-grid review package."
             ),
             "affected_artifact": "08_report/station_precip_qaqc.json",
-    if not water_source.get("production_ready", False):
-            "id": "headwater-water-source-contract-not-production-ready",
-            "category": "model-readiness",
-            "severity": "high",
-                "The workspace does not record a production-ready headwater water "
-                "source. A generated model must identify AORC/MRMS rain-on-grid, "
-                "a valid hydrograph source, or explicit mock/low-detail screening mode."
-            "affected_artifact": water_source.get("source_artifact") or "00_metadata/model_handoff.json",
             "owner_repo": "ras-agent",
             "issue_url": issue_urls.get("ras_agent_report_contract"),
             "blocking_for": "model-readiness",
@@ -1029,8 +1042,6 @@ def build_workspace_gap_analysis(
                     "treat recalibration or regridding as a follow-up decision."
                 ),
             })
-                "Record and validate the water-source contract before treating the "
-                "workspace as ready for HEC-RAS execution."
 
     return {
         "schema_version": _WORKSPACE_GAP_SCHEMA_VERSION,
