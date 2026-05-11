@@ -232,7 +232,7 @@ def run_batch(
     input_file: Path,
     output_dir: Path,
     max_workers: int = 3,
-    resolution_m: float = 3.0,
+    resolution_m: float = 1.0,
     mesh_strategy: str = "geometry_first",
     boundary_condition_mode: str = "headwater",
     water_source_mode: Optional[str] = "auto",
