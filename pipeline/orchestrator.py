@@ -355,7 +355,7 @@ def run_watershed(
     pour_point_lat: float,
     output_dir: Path,
     return_periods: Optional[list] = None,
-    resolution_m: float = 3.0,
+    resolution_m: float = 1.0,
     mesh_strategy: str = "geometry_first",
     boundary_condition_mode: str = "headwater",
     nlcd_raster_path: Optional[Path] = None,
@@ -382,7 +382,7 @@ def run_watershed(
         output_dir:        Root directory for all pipeline outputs
         return_periods:    Return periods to model. If omitted, uses the
                            validated RoG workflow config aep_years.
-        resolution_m:      DEM resolution in meters (default: 3.0)
+        resolution_m:      DEM resolution in meters (default: 1.0)
         mesh_strategy:     HEC-RAS mesh build strategy (default: "geometry_first")
                            uses ras-commander GeomStorage to write .g## and
                            lets HEC-RAS regenerate HDF artifacts
@@ -883,8 +883,8 @@ if __name__ == "__main__":
     parser.add_argument("--return-periods", type=int, nargs="+",
                         default=None,
                         help="Return periods in years (default: workflow config AEPs)")
-    parser.add_argument("--resolution", type=float, default=3.0,
-                        help="DEM resolution in meters (default: 3.0)")
+    parser.add_argument("--resolution", type=float, default=1.0,
+                        help="DEM resolution in meters (default: 1.0)")
     parser.add_argument(
         "--strategy",
         default="geometry_first",
