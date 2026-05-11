@@ -37,11 +37,12 @@ Apache License 2.0
 """
 
 import logging
+import platform
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import h5py
 import numpy as np
@@ -1148,6 +1149,225 @@ def export_results(
     return outputs
 
 
+# ── RASMapper Headless Export (RasMap) ────────────────────────────────────────
+
+PlanNumber = Union[str, int, float]
+
+
+def _normalize_plan_number(plan_number: PlanNumber) -> str:
+    """Return a RAS plan number string suitable for ``p##`` result files."""
+    if isinstance(plan_number, float):
+        if not plan_number.is_integer():
+            raise ValueError(f"Plan number must be an integer-like value: {plan_number}")
+        plan_text = str(int(plan_number))
+    else:
+        plan_text = str(plan_number).strip()
+
+    if not plan_text:
+        raise ValueError("Plan number cannot be blank")
+
+    if plan_text.lower().startswith("p") and plan_text[1:].isdigit():
+        plan_text = plan_text[1:]
+
+    if plan_text.isdigit() and len(plan_text) == 1:
+        return plan_text.zfill(2)
+    return plan_text
+
+
+def _coerce_plan_numbers(
+    plan_numbers: Union[PlanNumber, Sequence[PlanNumber]]
+) -> list[str]:
+    if isinstance(plan_numbers, (str, int, float)):
+        raw_plans = [plan_numbers]
+    else:
+        raw_plans = list(plan_numbers)
+
+    if not raw_plans:
+        raise ValueError("At least one plan number is required")
+    return [_normalize_plan_number(plan) for plan in raw_plans]
+
+
+def _find_plan_hdf(project_dir: Path, plan_number: str) -> Path:
+    """Find the result HDF for a plan using common HEC-RAS p##/p### names."""
+    candidates: list[Path] = []
+    search_numbers = [plan_number]
+    if plan_number.isdigit():
+        for padded in (plan_number.zfill(2), plan_number.zfill(3)):
+            if padded not in search_numbers:
+                search_numbers.append(padded)
+
+    for plan_text in search_numbers:
+        candidates.extend(sorted(project_dir.glob(f"*.p{plan_text}.hdf")))
+
+    unique = sorted({path.resolve() for path in candidates})
+    if not unique:
+        raise FileNotFoundError(
+            f"No HEC-RAS result HDF found for plan p{plan_number} in {project_dir}"
+        )
+    return unique[0]
+
+
+def _unique_existing_paths(paths: Sequence[Union[str, Path]]) -> list[Path]:
+    existing: list[Path] = []
+    seen: set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            existing.append(path)
+    return sorted(existing, key=lambda p: str(p).lower())
+
+
+def _collect_rasmapper_rasters(ras_map, plan_number: str, ras_object) -> list[Path]:
+    """Collect VRT and GeoTIFF outputs from a RASMapper plan results folder."""
+    collected: list[Union[str, Path]] = []
+
+    for variable_name in ("Depth", "WSE", "Velocity"):
+        try:
+            collected.append(
+                ras_map.get_results_raster(
+                    plan_number,
+                    variable_name,
+                    ras_object=ras_object,
+                )
+            )
+        except Exception as exc:
+            logger.debug(
+                "RASMapper raster lookup skipped for plan %s variable %s: %s",
+                plan_number,
+                variable_name,
+                exc,
+            )
+
+    results_folder = Path(
+        ras_map.get_results_folder(plan_number, ras_object=ras_object)
+    )
+    for pattern in ("*.vrt", "*.tif", "*.tiff"):
+        collected.extend(results_folder.rglob(pattern))
+
+    return _unique_existing_paths(collected)
+
+
+def _export_plan_via_python(project_dir: Path, plan_number: str) -> list[Path]:
+    """Fallback to the local h5py/rasterio exporter for one plan."""
+    hdf_path = _find_plan_hdf(project_dir, plan_number)
+    output_dir = project_dir / "results" / f"p{plan_number}"
+    outputs = export_results(hdf_path=hdf_path, output_dir=output_dir)
+    return list(outputs.values())
+
+
+def _export_plans_via_python(
+    project_dir: Path,
+    plan_numbers: Sequence[str],
+) -> dict[str, list[Path]]:
+    return {
+        plan_number: _export_plan_via_python(project_dir, plan_number)
+        for plan_number in plan_numbers
+    }
+
+
+def export_via_rasmapper(
+    project_dir: Union[str, Path],
+    plan_numbers: Union[PlanNumber, Sequence[PlanNumber]],
+    timeout: int = 600,
+) -> dict[str, list[Path]]:
+    """Export result rasters with RASMapper on Windows, otherwise fall back to Python.
+
+    On Windows this initializes the HEC-RAS project through ``ras-commander``,
+    calls ``RasMap.store_all_maps()`` once per requested plan, and returns the
+    generated ``.vrt``/GeoTIFF outputs from each plan's RASMapper results
+    folder.  On Linux or when RASMapper/ras-commander is unavailable, it uses
+    the existing ``export_results()`` HDF5/rasterio path.
+
+    Args:
+        project_dir: HEC-RAS project directory containing the ``.prj`` and
+            plan result HDF files.
+        plan_numbers: One plan number or a sequence of plan numbers.
+        timeout: Per-plan timeout passed through to ``RasMap.store_all_maps``.
+
+    Returns:
+        Dict mapping normalized plan numbers (for example ``"01"``) to the
+        generated VRT/GeoTIFF paths.
+    """
+    if timeout <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout}")
+
+    project_dir = Path(project_dir)
+    plan_list = _coerce_plan_numbers(plan_numbers)
+
+    if platform.system().lower() != "windows":
+        logger.info("RASMapper export is unavailable on this platform; using Python exporter")
+        return _export_plans_via_python(project_dir, plan_list)
+
+    try:
+        from ras_commander import RasMap, init_ras_project  # type: ignore[import]
+    except Exception as exc:
+        logger.warning(
+            "ras-commander/RASMapper is unavailable; using Python exporter: %s",
+            exc,
+        )
+        return _export_plans_via_python(project_dir, plan_list)
+
+    try:
+        try:
+            ras_object = init_ras_project(project_dir, load_results_summary=False)
+        except TypeError:
+            ras_object = init_ras_project(project_dir)
+    except Exception as exc:
+        logger.warning(
+            "Could not initialize RAS project for RASMapper export; "
+            "using Python exporter: %s",
+            exc,
+        )
+        return _export_plans_via_python(project_dir, plan_list)
+
+    outputs: dict[str, list[Path]] = {}
+    for plan_number in plan_list:
+        try:
+            result = RasMap.store_all_maps(
+                plan_number=plan_number,
+                ras_object=ras_object,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "RASMapper export failed for plan p%s; using Python exporter: %s",
+                plan_number,
+                exc,
+            )
+            outputs[plan_number] = _export_plan_via_python(project_dir, plan_number)
+            continue
+
+        plan_result = {}
+        if isinstance(result, dict):
+            plan_result = result.get("plans", {}).get(plan_number, {})
+        plan_failed = isinstance(plan_result, dict) and plan_result.get("success") is False
+        if plan_failed:
+            logger.warning(
+                "RASMapper export did not complete for plan p%s; "
+                "using Python exporter: %s",
+                plan_number,
+                plan_result.get("error", "unknown error"),
+            )
+            outputs[plan_number] = _export_plan_via_python(project_dir, plan_number)
+            continue
+
+        rasters = _collect_rasmapper_rasters(RasMap, plan_number, ras_object)
+        if not rasters:
+            logger.warning(
+                "RASMapper export completed for plan p%s but produced no "
+                "VRT/GeoTIFF outputs; using Python exporter",
+                plan_number,
+            )
+            rasters = _export_plan_via_python(project_dir, plan_number)
+        outputs[plan_number] = rasters
+
+    return outputs
+
+
 # ── Filtered Raster Export (RasProcess / RASMapper) ──────────────────────
 
 
@@ -1231,8 +1451,6 @@ def export_filtered_rasters(
         ValueError: If ``min_depth_ft`` is negative.
         RuntimeError: If RasProcess fails to produce the required rasters.
     """
-    from ras_commander import RasProcess
-
     hdf_path = Path(hdf_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1240,6 +1458,8 @@ def export_filtered_rasters(
     if min_depth_ft < 0:
         raise ValueError(f"min_depth_ft must be non-negative, got {min_depth_ft}")
     min_depth_m = min_depth_ft * 0.3048
+
+    from ras_commander import RasProcess
 
     project_dir, plan_number = _parse_plan_from_hdf(hdf_path)
 

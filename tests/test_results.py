@@ -32,6 +32,7 @@ from results import (
     cells_to_raster,
     extract_flood_extent,
     export_results,
+    export_via_rasmapper,
     export_cloud_native,
     export_filtered_rasters,
     _parse_plan_from_hdf,
@@ -682,6 +683,110 @@ class TestExportResultsMultiArea:
         for k, v in outputs.items():
             assert isinstance(k, str)
             assert isinstance(v, Path)
+
+
+# ── RASMapper Headless Export ────────────────────────────────────────────────
+
+class TestExportViaRasmapper:
+    def test_windows_uses_rasmap_store_all_maps(self, tmp_path):
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        results_folder = project_dir / "Plan_01"
+        results_folder.mkdir()
+        depth_vrt = results_folder / "Depth (Max).vrt"
+        wse_tif = results_folder / "WSE (Max).tif"
+        depth_vrt.write_text("<VRTDataset />", encoding="utf-8")
+        wse_tif.write_text("fake tif", encoding="utf-8")
+
+        fake_ras_object = mock.MagicMock()
+        fake_rc = mock.MagicMock()
+        fake_rc.init_ras_project.return_value = fake_ras_object
+        fake_rc.RasMap.store_all_maps.return_value = {
+            "success": True,
+            "plans": {"01": {"success": True}},
+        }
+        fake_rc.RasMap.get_results_folder.return_value = results_folder
+        fake_rc.RasMap.get_results_raster.side_effect = [
+            depth_vrt,
+            ValueError("no unique WSE VRT"),
+            ValueError("no velocity VRT"),
+        ]
+
+        with mock.patch.dict("sys.modules", {"ras_commander": fake_rc}):
+            with mock.patch("results.platform.system", return_value="Windows"):
+                outputs = export_via_rasmapper(project_dir, ["1"], timeout=7)
+
+        assert set(outputs) == {"01"}
+        assert {path.resolve() for path in outputs["01"]} == {
+            depth_vrt.resolve(),
+            wse_tif.resolve(),
+        }
+        fake_rc.init_ras_project.assert_called_once_with(
+            project_dir,
+            load_results_summary=False,
+        )
+        fake_rc.RasMap.store_all_maps.assert_called_once_with(
+            plan_number="01",
+            ras_object=fake_ras_object,
+            timeout=7,
+        )
+        fake_rc.RasMap.get_results_folder.assert_called_once_with(
+            "01",
+            ras_object=fake_ras_object,
+        )
+
+    def test_linux_falls_back_to_python_export(self, tmp_path):
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        hdf_path = project_dir / "Project.p01.hdf"
+        hdf_path.touch()
+        depth_path = project_dir / "results" / "p01" / "depth_grid.tif"
+
+        with mock.patch("results.platform.system", return_value="Linux"):
+            with mock.patch(
+                "results.export_results",
+                return_value={"depth_grid": depth_path},
+            ) as fake_export:
+                outputs = export_via_rasmapper(project_dir, "01")
+
+        assert outputs == {"01": [depth_path]}
+        fake_export.assert_called_once_with(
+            hdf_path=hdf_path.resolve(),
+            output_dir=project_dir / "results" / "p01",
+        )
+
+    def test_windows_rasmap_timeout_result_falls_back(self, tmp_path):
+        project_dir = tmp_path / "Project"
+        project_dir.mkdir()
+        hdf_path = project_dir / "Project.p01.hdf"
+        hdf_path.touch()
+        fallback_path = project_dir / "results" / "p01" / "depth_grid.tif"
+
+        fake_rc = mock.MagicMock()
+        fake_rc.init_ras_project.return_value = mock.MagicMock()
+        fake_rc.RasMap.store_all_maps.return_value = {
+            "success": False,
+            "plans": {"01": {"success": False, "error": "Timeout"}},
+        }
+
+        with mock.patch.dict("sys.modules", {"ras_commander": fake_rc}):
+            with mock.patch("results.platform.system", return_value="Windows"):
+                with mock.patch(
+                    "results.export_results",
+                    return_value={"depth_grid": fallback_path},
+                ) as fake_export:
+                    outputs = export_via_rasmapper(project_dir, [1], timeout=3)
+
+        assert outputs == {"01": [fallback_path]}
+        fake_rc.RasMap.store_all_maps.assert_called_once_with(
+            plan_number="01",
+            ras_object=fake_rc.init_ras_project.return_value,
+            timeout=3,
+        )
+        fake_export.assert_called_once_with(
+            hdf_path=hdf_path.resolve(),
+            output_dir=project_dir / "results" / "p01",
+        )
 
 
 # ── Cloud-native export (ras2cng) ─────────────────────────────────────────────
