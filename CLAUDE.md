@@ -10,7 +10,7 @@ RAS Agent automates end-to-end 2D HEC-RAS hydraulic modeling: terrain ingestion,
 
 ### Python pipeline (from repo root)
 ```bash
-python -m pytest tests/ -v                    # all 112 tests
+python -m pytest tests/ -v                    # all 414 tests
 python -m pytest tests/test_runner.py -v      # single module
 python -m pytest tests/test_api.py::test_health -v  # single test
 
@@ -37,16 +37,19 @@ docker-compose run --rm api python3 pipeline/orchestrator.py --lon -88.578 --lat
 
 Two-part system: **Python pipeline** (`pipeline/`) + **React dashboard** (`web/`).
 
-### Pipeline data flow (7 stages, all in `pipeline/`)
+### Pipeline data flow (10 stages, all in `pipeline/`)
 ```
 orchestrator.py  ← entry point, chains all stages
-  ├─ terrain.py      → DEM download/mosaic (ILHMP LiDAR, fallback USGS 3DEP)
-  ├─ watershed.py    → D8 delineation via pysheds → WatershedResult
-  ├─ streamstats.py  → USGS StreamStats API / IL regression fallback → PeakFlowEstimates
-  ├─ hydrograph.py   → NRCS DUH synthetic hydrographs → HydrographSet
-  ├─ model_builder.py→ template clone + Manning's n + BCs → HecRasProject
-  ├─ runner.py       → SQLite job queue + RasUnsteady execution
-  ├─ results.py      → HDF5 → COG GeoTIFF + GeoPackage + Shapefile
+  ├─ terrain.py       → DEM download/mosaic (ILHMP 1m LiDAR)
+  ├─ watershed.py     → D8 delineation via pysheds → WatershedResult
+  ├─ streamstats.py   → USGS StreamStats API / IL regression fallback → PeakFlowEstimates
+  ├─ hydrograph.py    → NRCS DUH synthetic hydrographs → HydrographSet
+  ├─ model_builder.py → template clone + Manning's n + BCs → HecRasProject
+  ├─ runner.py        → SQLite job queue + RasUnsteady execution
+  ├─ results.py       → HDF5 → COG GeoTIFF + GeoPackage + Shapefile
+  ├─ precipitation.py → AORC/MRMS rain-on-grid retrieval + design storm selection
+  ├─ storm_qc.py      → GHCND station cross-validation of gridded precipitation
+  ├─ report.py        → HTML run reports + workspace report packaging
   └─ mesh_inspector.py → pre-flight geometric validation of geometry HDF files
                           (vendored from rivia, Apache 2.0)
 ```
