@@ -405,10 +405,14 @@ def test_run_watershed_preserves_water_source_validation_on_block(tmp_path):
 def test_cli_help():
     """CLI --help exits with code 0."""
     orchestrator_path = Path(__file__).parent.parent / "pipeline" / "orchestrator.py"
+    env = os.environ.copy()
+    for key in ("GDAL_DATA", "PROJ_LIB", "PROJ_DATA"):
+        env.pop(key, None)
     proc = subprocess.run(
         [sys.executable, str(orchestrator_path), "--help"],
         capture_output=True,
         text=True,
+        env=env,
     )
     assert proc.returncode == 0, f"--help exited {proc.returncode}:\n{proc.stderr}"
     assert "pour point" in proc.stdout.lower() or "lon" in proc.stdout.lower()
