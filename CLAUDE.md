@@ -10,7 +10,7 @@ RAS Agent automates end-to-end 2D HEC-RAS hydraulic modeling: terrain ingestion,
 
 ### Python pipeline (from repo root)
 ```bash
-python -m pytest tests/ -v                    # all 414 tests
+python -m pytest tests/ -v                    # all 415 tests
 python -m pytest tests/test_runner.py -v      # single module
 python -m pytest tests/test_api.py::test_health -v  # single test
 
@@ -54,7 +54,7 @@ orchestrator.py  ← entry point, chains all stages
                           (vendored from rivia, Apache 2.0)
 ```
 
-Supporting modules: `batch.py` (parallel multi-watershed), `report.py` (HTML reports), `notify.py` (webhook/email), `storage.py` (Cloudflare R2 upload).
+Supporting modules: `batch.py` (parallel multi-watershed), `notify.py` (webhook/email), `storage.py` (Cloudflare R2 upload).
 
 ### Web dashboard
 React + Vite + Tailwind. `api.js` calls the FastAPI backend. `MapViewer.jsx` renders flood extents via MapLibre GL JS with per-return-period toggle layers. Deployed to Cloudflare Pages (auto-deploys from `main`).

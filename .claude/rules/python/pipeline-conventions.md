@@ -26,8 +26,8 @@ globs: pipeline/**
 
 ## Error Handling
 - Stages 1-2 (terrain, watershed): fatal → raise `OrchestratorError`
-- Stages 3-7: non-fatal → return `status="partial"` with `errors` list
-- **Logging:** `orchestrator.py`, `batch.py`, and `notify.py` use `loguru`; all other pipeline modules use stdlib `logging`. Don't mix within a module — match the existing pattern
+- Stages 3-10: non-fatal → return `status="partial"` with `errors` list
+- **Logging:** `orchestrator.py`, `batch.py`, `notify.py`, `precipitation.py`, and `storm_qc.py` use `loguru`; all other pipeline modules use stdlib `logging`. Don't mix within a module — match the existing pattern
 
 ## Output Directory Structure
 ```

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "pipeline"))
 This enables bare imports matching the pipeline convention.
 
 ## Test Baseline
-- **414 tests** — this count must never decrease
+- **415 tests** — this count must never decrease
 - Adding new pipeline functionality requires corresponding tests
 - Run `python -m pytest tests/ -v` to verify
 
