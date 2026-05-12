@@ -416,3 +416,339 @@ def test_cli_help():
     )
     assert proc.returncode == 0, f"--help exited {proc.returncode}:\n{proc.stderr}"
     assert "pour point" in proc.stdout.lower() or "lon" in proc.stdout.lower()
+
+
+def test_orchestrator_result_new_fields():
+    """New Stage 8-10 fields default to None."""
+    r = OrchestratorResult(
+        name="test", pour_point=(-89.5, 40.5), output_dir=Path("/tmp"),
+        terrain=None, watershed=None, peak_flows=None, hydro_set=None,
+        project=None, job_ids=[], results={}, duration_sec=0, status="complete",
+        errors=[],
+    )
+    assert r.storm_qc_result is None
+    assert r.report_path is None
+    assert r.workspace_report is None
+    assert r.precip_result is None
+
+
+def test_run_watershed_stage8_precipitation_mock(tmp_path):
+    """Stage 8 populates precip_result when precip_mode='aorc' in mock mode."""
+    import pandas as pd
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project = _make_project(tmp_path)
+
+    fake_job_ids = ["job-10", "job-50", "job-100"]
+    counter = {"n": 0}
+
+    def fake_enqueue(**kwargs):
+        idx = counter["n"]; counter["n"] += 1
+        return fake_job_ids[idx]
+
+    def fake_run_queue(**kwargs):
+        pass
+
+    def fake_get_job(job_id, db_path=None):
+        idx = fake_job_ids.index(job_id)
+        hdf = project.project_dir / f"template.p{idx+1:02d}.hdf"
+        hdf.write_bytes(b"\x00")
+        return {"id": job_id, "status": "complete", "plan_hdf": str(hdf)}
+
+    mock_catalog = pd.DataFrame([{
+        "storm_id": 1001, "total_depth_in": 3.8, "rank": 1, "year": 2022,
+        "start_time": pd.Timestamp("2022-08-03 06:00"),
+        "end_time": pd.Timestamp("2022-08-03 18:00"),
+        "sim_start": pd.Timestamp("2022-08-03 00:00"),
+        "sim_end": pd.Timestamp("2022-08-04 00:00"),
+        "peak_intensity_in_hr": 1.2, "duration_hours": 12, "wet_hours": 10,
+    }])
+    mock_precip_result = {10: "mock_result_10", 100: "mock_result_100"}
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
+         patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
+         patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
+         patch("orchestrator._results.export_results", return_value={}), \
+         patch("orchestrator._precipitation.catalog_storms", return_value=mock_catalog), \
+         patch("orchestrator._precipitation.run_precipitation_stage", return_value=mock_precip_result):
+
+        result = run_watershed(
+            pour_point_lon=-89.5, pour_point_lat=40.5,
+            output_dir=tmp_path, ras_exe_dir=None,
+            precip_mode="aorc",
+            workflow_config={"aep_years": [10, 50, 100], "mock": True},
+        )
+
+    assert result.precip_result is not None
+    assert result.precip_result == mock_precip_result
+
+
+def test_run_watershed_stage8_skip_default(tmp_path):
+    """Stage 8 is skipped when precip_mode='skip' (default)."""
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project = _make_project(tmp_path)
+
+    fake_job_ids = ["job-10", "job-50", "job-100"]
+    counter = {"n": 0}
+
+    def fake_enqueue(**kwargs):
+        idx = counter["n"]; counter["n"] += 1
+        return fake_job_ids[idx]
+
+    def fake_run_queue(**kwargs):
+        pass
+
+    def fake_get_job(job_id, db_path=None):
+        idx = fake_job_ids.index(job_id)
+        hdf = project.project_dir / f"template.p{idx+1:02d}.hdf"
+        hdf.write_bytes(b"\x00")
+        return {"id": job_id, "status": "complete", "plan_hdf": str(hdf)}
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
+         patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
+         patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
+         patch("orchestrator._results.export_results", return_value={}):
+
+        result = run_watershed(
+            pour_point_lon=-89.5, pour_point_lat=40.5,
+            output_dir=tmp_path, ras_exe_dir=None,
+            workflow_config={"aep_years": [10, 50, 100], "mock": True},
+        )
+
+    assert result.precip_result is None
+
+
+def test_run_watershed_stage9_storm_qc_mock(tmp_path):
+    """Stage 9 populates storm_qc_result when enabled with mock catalog."""
+    import pandas as pd
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project = _make_project(tmp_path)
+
+    fake_job_ids = ["job-10", "job-50", "job-100"]
+    counter = {"n": 0}
+
+    def fake_enqueue(**kwargs):
+        idx = counter["n"]; counter["n"] += 1
+        return fake_job_ids[idx]
+
+    def fake_run_queue(**kwargs):
+        pass
+
+    def fake_get_job(job_id, db_path=None):
+        idx = fake_job_ids.index(job_id)
+        hdf = project.project_dir / f"template.p{idx+1:02d}.hdf"
+        hdf.write_bytes(b"\x00")
+        return {"id": job_id, "status": "complete", "plan_hdf": str(hdf)}
+
+    mock_catalog = pd.DataFrame([{
+        "storm_id": 1001, "total_depth_in": 3.8, "rank": 1, "year": 2022,
+        "start_time": pd.Timestamp("2022-08-03 06:00"),
+        "end_time": pd.Timestamp("2022-08-03 18:00"),
+        "sim_start": pd.Timestamp("2022-08-03 00:00"),
+        "sim_end": pd.Timestamp("2022-08-04 00:00"),
+        "peak_intensity_in_hr": 1.2, "duration_hours": 12, "wet_hours": 10,
+    }])
+
+    compared_df = mock_catalog.copy()
+    compared_df["ghcnd_depth_in"] = [3.4]
+    compared_df["ghcnd_stations_used"] = [2]
+    compared_df["depth_ratio"] = compared_df["total_depth_in"] / compared_df["ghcnd_depth_in"]
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
+         patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
+         patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
+         patch("orchestrator._results.export_results", return_value={}), \
+         patch("orchestrator._precipitation.catalog_storms", return_value=mock_catalog), \
+         patch("orchestrator._precipitation.run_precipitation_stage", return_value={}), \
+         patch("orchestrator._storm_qc.compare_storm_depths", return_value=compared_df):
+
+        result = run_watershed(
+            pour_point_lon=-89.5, pour_point_lat=40.5,
+            output_dir=tmp_path, ras_exe_dir=None,
+            precip_mode="aorc",
+            storm_qc_enabled=True,
+            workflow_config={"aep_years": [10, 50, 100], "mock": True},
+        )
+
+    assert result.storm_qc_result is not None
+    assert len(result.storm_qc_result) == 1
+    assert result.storm_qc_result[0]["qc_flag"] == "ok"
+    assert result.storm_qc_result[0]["storm_id"] == 1001
+
+
+def test_run_watershed_stage9_skipped_without_catalog(tmp_path):
+    """Stage 9 is skipped when precip_mode='skip' even if storm_qc_enabled=True."""
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project = _make_project(tmp_path)
+
+    fake_job_ids = ["job-10", "job-50", "job-100"]
+    counter = {"n": 0}
+
+    def fake_enqueue(**kwargs):
+        idx = counter["n"]; counter["n"] += 1
+        return fake_job_ids[idx]
+
+    def fake_run_queue(**kwargs):
+        pass
+
+    def fake_get_job(job_id, db_path=None):
+        idx = fake_job_ids.index(job_id)
+        hdf = project.project_dir / f"template.p{idx+1:02d}.hdf"
+        hdf.write_bytes(b"\x00")
+        return {"id": job_id, "status": "complete", "plan_hdf": str(hdf)}
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
+         patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
+         patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
+         patch("orchestrator._results.export_results", return_value={}):
+
+        result = run_watershed(
+            pour_point_lon=-89.5, pour_point_lat=40.5,
+            output_dir=tmp_path, ras_exe_dir=None,
+            storm_qc_enabled=True,
+            workflow_config={"aep_years": [10, 50, 100], "mock": True},
+        )
+
+    assert result.storm_qc_result is None
+
+
+def test_run_watershed_stage8_failure_non_fatal(tmp_path):
+    """Stage 8 failure is non-fatal — pipeline continues to Stage 9/10."""
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project = _make_project(tmp_path)
+
+    fake_job_ids = ["job-10", "job-50", "job-100"]
+    counter = {"n": 0}
+
+    def fake_enqueue(**kwargs):
+        idx = counter["n"]; counter["n"] += 1
+        return fake_job_ids[idx]
+
+    def fake_run_queue(**kwargs):
+        pass
+
+    def fake_get_job(job_id, db_path=None):
+        idx = fake_job_ids.index(job_id)
+        hdf = project.project_dir / f"template.p{idx+1:02d}.hdf"
+        hdf.write_bytes(b"\x00")
+        return {"id": job_id, "status": "complete", "plan_hdf": str(hdf)}
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
+         patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
+         patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
+         patch("orchestrator._results.export_results", return_value={}), \
+         patch("orchestrator._precipitation.catalog_storms", side_effect=RuntimeError("S3 timeout")):
+
+        result = run_watershed(
+            pour_point_lon=-89.5, pour_point_lat=40.5,
+            output_dir=tmp_path, ras_exe_dir=None,
+            precip_mode="aorc",
+            workflow_config={"aep_years": [10, 50, 100], "mock": True},
+        )
+
+    assert result.status == "partial"
+    assert any("Stage 8" in e for e in result.errors)
+    assert result.precip_result is None
+    assert result.storm_qc_result is None
+
+
+def test_run_watershed_stage10_report_path(tmp_path):
+    """Stage 10 sets report_path when report generation succeeds."""
+    terrain_result = _make_terrain_result(tmp_path)
+    ws_result = _make_watershed_result(tmp_path)
+    peak_flows = _make_peak_flows()
+    hydro_set = _make_hydro_set()
+    project = _make_project(tmp_path)
+
+    fake_job_ids = ["job-10", "job-50", "job-100"]
+    counter = {"n": 0}
+
+    def fake_enqueue(**kwargs):
+        idx = counter["n"]; counter["n"] += 1
+        return fake_job_ids[idx]
+
+    def fake_run_queue(**kwargs):
+        pass
+
+    def fake_get_job(job_id, db_path=None):
+        idx = fake_job_ids.index(job_id)
+        hdf = project.project_dir / f"template.p{idx+1:02d}.hdf"
+        hdf.write_bytes(b"\x00")
+        return {"id": job_id, "status": "complete", "plan_hdf": str(hdf)}
+
+    expected_report = tmp_path / "report.html"
+
+    with patch("orchestrator._terrain.get_terrain", return_value=terrain_result.dem_path), \
+         patch("orchestrator._watershed.delineate_watershed", return_value=ws_result), \
+         patch("orchestrator._streamstats.get_peak_flows", return_value=peak_flows), \
+         patch("orchestrator._hydrograph.generate_hydrograph_set", return_value=hydro_set), \
+         patch("orchestrator._model_builder.build_model", return_value=project), \
+         patch("orchestrator._runner.enqueue_job", side_effect=fake_enqueue), \
+         patch("orchestrator._runner.run_queue", side_effect=fake_run_queue), \
+         patch("orchestrator._runner.get_job", side_effect=fake_get_job), \
+         patch("orchestrator._results.export_results", return_value={}), \
+         patch.dict("sys.modules", {"report": SimpleNamespace(generate_report=lambda r: expected_report)}):
+
+        result = run_watershed(
+            pour_point_lon=-89.5, pour_point_lat=40.5,
+            output_dir=tmp_path, ras_exe_dir=None,
+            write_report=True,
+            workflow_config={"aep_years": [10, 50, 100], "mock": True},
+        )
+
+    assert result.report_path == expected_report
+
+
+def test_cli_new_args():
+    """CLI --help includes the new Stage 8-10 arguments."""
+    orchestrator_path = Path(__file__).parent.parent / "pipeline" / "orchestrator.py"
+    env = os.environ.copy()
+    for key in ("GDAL_DATA", "PROJ_LIB", "PROJ_DATA"):
+        env.pop(key, None)
+    proc = subprocess.run(
+        [sys.executable, str(orchestrator_path), "--help"],
+        capture_output=True, text=True, env=env,
+    )
+    assert proc.returncode == 0
+    assert "--precip-mode" in proc.stdout
+    assert "--storm-qc" in proc.stdout
+    assert "--workspace-dir" in proc.stdout

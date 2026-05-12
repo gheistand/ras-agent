@@ -243,6 +243,10 @@ def run_batch(
     dry_run: bool = False,
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
     workflow_config: Optional[Any] = None,
+    precip_mode: str = "skip",
+    storm_qc_enabled: bool = False,
+    noaa_cdo_token: Optional[str] = None,
+    workspace_dir: Optional[Path] = None,
 ) -> BatchResult:
     """
     Run full pipeline for each watershed in input_file.
@@ -366,7 +370,11 @@ def run_batch(
             allow_low_detail_screening=allow_low_detail_screening,
             ras_exe_dir=ras_exe_dir,
             name=spec.name,
+            precip_mode=precip_mode,
             workflow_config=workflow_config,
+            storm_qc_enabled=storm_qc_enabled,
+            noaa_cdo_token=noaa_cdo_token,
+            workspace_dir=workspace_dir,
         )
         dur = time.monotonic() - t_start
         _write_run_metadata(spec, result, dur, boundary_condition_mode)

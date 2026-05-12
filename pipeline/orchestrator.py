@@ -2,13 +2,16 @@
 orchestrator.py — End-to-end RAS Agent pipeline runner
 
 Chains all pipeline phases into a single run_watershed() call:
-  Stage 1: Terrain acquisition (terrain.py)
-  Stage 2: Watershed delineation (watershed.py)
-  Stage 3: Peak flow estimation (streamstats.py)
-  Stage 4: Hydrograph generation (hydrograph.py)
-  Stage 5: HEC-RAS model build (model_builder.py)
-  Stage 6: Job queue + execution (runner.py)
-  Stage 7: Results export (results.py)
+  Stage 1:  Terrain acquisition (terrain.py)
+  Stage 2:  Watershed delineation (watershed.py)
+  Stage 3:  Peak flow estimation (streamstats.py)
+  Stage 4:  Hydrograph generation (hydrograph.py)
+  Stage 5:  HEC-RAS model build (model_builder.py)
+  Stage 6:  Job queue + execution (runner.py)
+  Stage 7:  Results export (results.py)
+  Stage 8:  Precipitation retrieval (precipitation.py)
+  Stage 9:  Storm QC / GHCND cross-validation (storm_qc.py)
+  Stage 10: Report packaging (report.py, workspace.py)
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -103,6 +106,20 @@ except ImportError:
     HandResult = Any
     _has_hand = False
 
+# Optional: storm QC (GHCND cross-validation)
+try:
+    import storm_qc as _storm_qc
+    _has_storm_qc = True
+except ImportError:
+    _has_storm_qc = False
+
+# Optional: workspace report packaging
+try:
+    import workspace as _workspace
+    _has_workspace = True
+except ImportError:
+    _has_workspace = False
+
 
 # ── Data Structures ───────────────────────────────────────────────────────────
 
@@ -133,7 +150,10 @@ class OrchestratorResult:
     pre_run_readiness: Optional[list[dict]] = None
     water_source: dict = field(default_factory=dict)
     workflow_config: Optional[dict] = None
-    precip_result: Optional[dict] = None  # {rp: PrecipitationResult} from Stage 4.5
+    precip_result: Optional[dict] = None  # {rp: PrecipitationResult} from Stage 8
+    storm_qc_result: Optional[list] = None  # Stage 9: list of {storm_id, qc_flag, depth_ratio}
+    report_path: Optional[Path] = None  # Stage 10: path to written report.html
+    workspace_report: Optional[dict] = None  # Stage 10: workspace report artifact paths
 
 
 class OrchestratorError(RuntimeError):
@@ -372,6 +392,9 @@ def run_watershed(
     r2_config=None,             # Optional R2Config for cloud upload
     slurm_config=None,      # Optional[SlurmConfig] — see pipeline/slurm.py
     workflow_config: Optional[Any] = None,
+    storm_qc_enabled: bool = False,
+    noaa_cdo_token: Optional[str] = None,
+    workspace_dir: Optional[Path] = None,
 ) -> OrchestratorResult:
     """
     Run the full RAS Agent pipeline for a pour point.
@@ -413,6 +436,12 @@ def run_watershed(
         workflow_config:   Optional RoG workflow config mapping, dataclass, or
                            JSON/YAML path. Serialized into OrchestratorResult
                            for audit trails.
+        storm_qc_enabled:  Enable Stage 9 GHCND station cross-validation
+                           (requires precip_mode != "skip")
+        noaa_cdo_token:    NOAA CDO API token for station discovery; falls back
+                           to NOAA_CDO_TOKEN env var
+        workspace_dir:     If set, Stage 10 also writes a workspace report
+                           package to this directory
 
     Returns:
         OrchestratorResult with full provenance and output paths
@@ -456,13 +485,13 @@ def run_watershed(
 
     # ── Stage 1: Terrain ──────────────────────────────────────────────────────
     logger.info(
-        f"[Stage 1/7] {'(mock) ' if mock else ''}Fetching terrain for pour point "
+        f"[Stage 1/10] {'(mock) ' if mock else ''}Fetching terrain for pour point "
         f"({pour_point_lon:.4f}, {pour_point_lat:.4f}) …"
     )
     try:
         if mock:
             result.terrain = _mock_terrain(output_dir, pour_point_lon, pour_point_lat)
-            logger.info("[Stage 1/7] Terrain complete — synthetic DEM (mock mode)")
+            logger.info("[Stage 1/10] Terrain complete — synthetic DEM (mock mode)")
         else:
             bbox = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
             terrain_dir = output_dir / "terrain"
@@ -471,7 +500,7 @@ def run_watershed(
             result.terrain = TerrainResult(dem_path=dem_path)
             size_mb = dem_path.stat().st_size / 1e6 if dem_path.exists() else 0
             logger.info(
-                f"[Stage 1/7] Terrain complete — DEM at {dem_path} "
+                f"[Stage 1/10] Terrain complete — DEM at {dem_path} "
                 f"({size_mb:.1f} MB)"
             )
     except Exception as exc:
@@ -482,7 +511,7 @@ def run_watershed(
 
     # ── Stage 2: Watershed delineation ───────────────────────────────────────
     logger.info(
-        f"[Stage 2/7] {'(mock) ' if mock else ''}Delineating watershed at "
+        f"[Stage 2/10] {'(mock) ' if mock else ''}Delineating watershed at "
         f"({pour_point_lon:.3f}, {pour_point_lat:.3f}) …"
     )
     try:
@@ -490,7 +519,7 @@ def run_watershed(
             result.watershed = _mock_watershed(pour_point_lon, pour_point_lat)
             chars = result.watershed.characteristics
             logger.info(
-                f"[Stage 2/7] Watershed complete — "
+                f"[Stage 2/10] Watershed complete — "
                 f"{chars.drainage_area_km2:.1f} km² (mock mode)"
             )
         else:
@@ -503,7 +532,7 @@ def run_watershed(
             result.watershed = ws_result
             chars = ws_result.characteristics
             logger.info(
-                f"[Stage 2/7] Watershed complete — "
+                f"[Stage 2/10] Watershed complete — "
                 f"{chars.drainage_area_km2:.1f} km² "
                 f"({chars.drainage_area_mi2:.1f} mi²)"
             )
@@ -555,13 +584,13 @@ def run_watershed(
 
     # ── Stage 3: Peak flow estimation ─────────────────────────────────────────
     logger.info(
-        f"[Stage 3/7] {'(mock) ' if mock else ''}Estimating peak flows …"
+        f"[Stage 3/10] {'(mock) ' if mock else ''}Estimating peak flows …"
     )
     try:
         if mock:
             result.peak_flows = _mock_peak_flows(pour_point_lon, pour_point_lat)
             logger.info(
-                f"[Stage 3/7] Peak flows complete — "
+                f"[Stage 3/10] Peak flows complete — "
                 f"Q100={result.peak_flows.Q100:.0f} cfs (mock mode)"
             )
         else:
@@ -575,11 +604,11 @@ def run_watershed(
             )
             result.peak_flows = peak_flows
             logger.info(
-                f"[Stage 3/7] Peak flows complete — "
+                f"[Stage 3/10] Peak flows complete — "
                 f"source={peak_flows.source}, "
                 f"Q100={peak_flows.Q100:.0f} cfs"
                 if peak_flows.Q100 else
-                f"[Stage 3/7] Peak flows complete — source={peak_flows.source}"
+                f"[Stage 3/10] Peak flows complete — source={peak_flows.source}"
             )
     except Exception as exc:
         err = f"Stage 3 (peak flows) failed: {exc}"
@@ -590,7 +619,7 @@ def run_watershed(
 
     # ── Stage 4: Hydrograph generation ───────────────────────────────────────
     logger.info(
-        f"[Stage 4/7] Generating hydrographs for return periods "
+        f"[Stage 4/10] Generating hydrographs for return periods "
         f"{return_periods} …"
     )
     try:
@@ -605,7 +634,7 @@ def run_watershed(
         )
         result.hydro_set = hydro_set
         logger.info(
-            f"[Stage 4/7] Hydrographs complete — "
+            f"[Stage 4/10] Hydrographs complete — "
             f"{len(hydro_set.hydrographs)} generated, "
             f"Tc={hydro_set.time_of_concentration_hr:.2f} hr"
         )
@@ -616,32 +645,9 @@ def run_watershed(
         result.duration_sec = time.monotonic() - t0
         return result
 
-    # ── Stage 4.5: Precipitation (optional AORC rain-on-grid) ─────────────────
-    precip_result = None
-    if precip_mode == "aorc" and _has_precip:
-        try:
-            logger.info("[Stage 4.5] Downloading AORC precipitation catalog …")
-            bounds_wgs84 = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
-            precip_result = _precipitation.run_precipitation_stage(
-                bounds=bounds_wgs84,
-                output_dir=output_dir,
-                target_return_periods=return_periods,
-                mock=mock,
-            )
-            logger.info(
-                f"[Stage 4.5] Precipitation stage complete — "
-                f"{sum(v is not None for v in precip_result.values())}/{len(precip_result)} return periods matched"
-            )
-        except Exception as exc:
-            err = f"Stage 4.5 (precipitation) failed: {exc}"
-            logger.warning(err)
-            result.errors.append(err)
-
-    result.precip_result = precip_result
-
     # ── Stage 5: Model build ──────────────────────────────────────────────────
     logger.info(
-        f"[Stage 5/7] Building HEC-RAS model "
+        f"[Stage 5/10] Building HEC-RAS model "
         f"(strategy={mesh_strategy}, bc_mode={boundary_condition_mode}) …"
     )
     try:
@@ -662,7 +668,7 @@ def run_watershed(
         result.project = project
         result.water_source = project.metadata.get("water_source", {})
         logger.info(
-            f"[Stage 5/7] Model build complete — "
+            f"[Stage 5/10] Model build complete — "
             f"project at {project.project_dir}"
         )
     except Exception as exc:
@@ -695,7 +701,7 @@ def run_watershed(
         return result
 
     logger.info(
-        f"[Stage 6/7] Enqueueing {len(return_periods)} jobs "
+        f"[Stage 6/10] Enqueueing {len(return_periods)} jobs "
         f"(mock={mock}) …"
     )
     try:
@@ -723,7 +729,7 @@ def run_watershed(
                 if not report.ready:
                     raise readiness_mod.HecRasReadinessError(report)
                 logger.info(
-                    f"[Stage 6/7] Pre-run readiness T={rp}yr — {report.status}"
+                    f"[Stage 6/10] Pre-run readiness T={rp}yr — {report.status}"
                 )
             result.pre_run_readiness = readiness_reports
             result.project.metadata["pre_run_readiness"] = readiness_reports
@@ -754,7 +760,7 @@ def run_watershed(
             run_queue_kwargs["pre_run_gate"] = False
         runner_mod.run_queue(**run_queue_kwargs)
         logger.info(
-            f"[Stage 6/7] Execution complete — "
+            f"[Stage 6/10] Execution complete — "
             f"{len(result.job_ids)} jobs processed"
         )
     except Exception as exc:
@@ -765,7 +771,7 @@ def run_watershed(
         return result
 
     # ── Stage 7: Results export ───────────────────────────────────────────────
-    logger.info("[Stage 7/7] Exporting results …")
+    logger.info("[Stage 7/10] Exporting results …")
     n_files_total = 0
     try:
         runner_mod = _require_module(_runner, "runner")
@@ -806,7 +812,7 @@ def run_watershed(
                 result.errors.append(err)
 
         logger.info(
-            f"[Stage 7/7] Results exported — "
+            f"[Stage 7/10] Results exported — "
             f"{len(result.results)} return periods, "
             f"{n_files_total} output files"
         )
@@ -838,6 +844,87 @@ def run_watershed(
     elif mock:
         logger.debug("[Stage 7b] Skipped — mock mode")
 
+    # ── Stage 8: Precipitation (AORC rain-on-grid) ───────────────────────────
+    _precip_catalog_df = None
+    if precip_mode != "skip" and _has_precip:
+        logger.info(
+            f"[Stage 8/10] Retrieving {precip_mode.upper()} precipitation catalog …"
+        )
+        try:
+            bounds_wgs84 = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
+            _precip_catalog_df = _precipitation.catalog_storms(
+                bounds_wgs84,
+                years=None,
+                mock=mock,
+            )
+            precip_result = _precipitation.run_precipitation_stage(
+                bounds=bounds_wgs84,
+                output_dir=output_dir,
+                target_return_periods=return_periods,
+                mock=mock,
+            )
+            result.precip_result = precip_result
+            matched = sum(v is not None for v in precip_result.values())
+            logger.info(
+                f"[Stage 8/10] Precipitation complete — "
+                f"{matched}/{len(precip_result)} return periods matched"
+            )
+        except Exception as exc:
+            _precip_catalog_df = None
+            err = f"Stage 8 (precipitation) failed: {exc}"
+            logger.warning(err)
+            result.errors.append(err)
+    elif precip_mode != "skip" and not _has_precip:
+        logger.warning(
+            "[Stage 8/10] precip_mode=%s but precipitation module not importable — skipped",
+            precip_mode,
+        )
+    else:
+        logger.debug("[Stage 8/10] Skipped — precip_mode='skip'")
+
+    # ── Stage 9: Storm QC (GHCND cross-validation) ───────────────────────────
+    if storm_qc_enabled and _has_storm_qc and _precip_catalog_df is not None:
+        logger.info("[Stage 9/10] Running GHCND station cross-validation …")
+        try:
+            import pandas as pd
+            bounds_wgs84 = _bbox_from_pour_point(pour_point_lon, pour_point_lat)
+            qc_df = _storm_qc.compare_storm_depths(
+                _precip_catalog_df,
+                bounds_wgs84,
+                noaa_token=noaa_cdo_token,
+                mock=mock,
+            )
+            flags = []
+            for _, row in qc_df.iterrows():
+                ghcnd = row["ghcnd_depth_in"]
+                if np.isnan(ghcnd):
+                    flags.append("no_obs")
+                elif row["depth_ratio"] < 0.6:
+                    flags.append("low")
+                elif row["depth_ratio"] > 1.6:
+                    flags.append("high")
+                else:
+                    flags.append("ok")
+            qc_df["qc_flag"] = flags
+            records = qc_df[["storm_id", "qc_flag", "depth_ratio"]].copy()
+            records["depth_ratio"] = records["depth_ratio"].where(pd.notna(records["depth_ratio"]), None)
+            result.storm_qc_result = records.to_dict("records")
+            ok_count = sum(1 for f in flags if f == "ok")
+            logger.info(
+                f"[Stage 9/10] Storm QC complete — "
+                f"{ok_count}/{len(flags)} storms flagged 'ok'"
+            )
+        except Exception as exc:
+            err = f"Stage 9 (storm QC) failed: {exc}"
+            logger.warning(err)
+            result.errors.append(err)
+    elif storm_qc_enabled and not _has_storm_qc:
+        logger.warning("[Stage 9/10] storm_qc_enabled=True but storm_qc not importable — skipped")
+    elif storm_qc_enabled and _precip_catalog_df is None:
+        logger.debug("[Stage 9/10] Skipped — no precipitation catalog available")
+    else:
+        logger.debug("[Stage 9/10] Skipped — storm_qc_enabled=False")
+
     # ── Finalise ──────────────────────────────────────────────────────────────
     result.duration_sec = time.monotonic() - t0
     result.status = "complete" if not result.errors else "partial"
@@ -850,13 +937,30 @@ def run_watershed(
         for err in result.errors:
             logger.warning(f"  Non-fatal error: {err}")
 
-    # ── Report generation ─────────────────────────────────────────────────────
+    # ── Stage 10: Report packaging ───────────────────────────────────────────
     if write_report and result.status != "failed":
+        logger.info("[Stage 10/10] Generating reports …")
         try:
             import report as _report  # lazy import — avoids circular dependency
-            _report.generate_report(result)
+            report_path = _report.generate_report(result)
+            result.report_path = report_path
+            logger.info(f"[Stage 10/10] Run report written to {report_path}")
         except Exception as exc:
-            logger.warning(f"[Report] Report generation failed (non-fatal): {exc}")
+            logger.warning(f"[Stage 10/10] Report generation failed (non-fatal): {exc}")
+
+        if workspace_dir is not None and _has_workspace:
+            try:
+                workspace_dir = Path(workspace_dir)
+                ws_report = _workspace.build_report_package(workspace_dir)
+                result.workspace_report = {k: str(v) for k, v in ws_report.items()}
+                logger.info(
+                    f"[Stage 10/10] Workspace report written — "
+                    f"{len(ws_report)} artifacts"
+                )
+            except Exception as exc:
+                logger.warning(
+                    f"[Stage 10/10] Workspace report failed (non-fatal): {exc}"
+                )
 
     # ── Notification ──────────────────────────────────────────────────────────
     if notify_config is not None:
@@ -928,6 +1032,28 @@ if __name__ == "__main__":
         default=None,
         help="JSON/YAML RoG workflow config for audit metadata and default AEPs",
     )
+    parser.add_argument(
+        "--precip-mode",
+        default="skip",
+        choices=["skip", "aorc", "mrms"],
+        help="Precipitation retrieval mode (default: skip)",
+    )
+    parser.add_argument(
+        "--storm-qc",
+        action="store_true",
+        help="Enable GHCND storm QC cross-validation (Stage 9)",
+    )
+    parser.add_argument(
+        "--noaa-cdo-token",
+        default=None,
+        help="NOAA CDO API token for GHCND station discovery",
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=None,
+        help="Workspace directory for report package generation (Stage 10)",
+    )
     args = parser.parse_args()
 
     notify_config = None
@@ -955,8 +1081,12 @@ if __name__ == "__main__":
         allow_low_detail_screening=args.low_detail_screening,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         name=args.name,
+        precip_mode=args.precip_mode,
         notify_config=notify_config,
         workflow_config=args.workflow_config,
+        storm_qc_enabled=args.storm_qc,
+        noaa_cdo_token=args.noaa_cdo_token,
+        workspace_dir=args.workspace_dir,
     )
     print(f"Status:   {result.status}")
     print(f"Duration: {result.duration_sec:.1f}s")
