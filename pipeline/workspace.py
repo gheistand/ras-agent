@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import context_layers
+import precip_qaqc
 import report
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,34 @@ def refresh_context_layers(
     )
 
 
+def write_station_precip_qaqc_artifacts(
+    workspace_dir: Path,
+    *,
+    stations: list[dict],
+    event_start,
+    event_end,
+    gridded_source: str,
+    gridded_depth_in: Optional[float] = None,
+    noaa_token_available: Optional[bool] = True,
+    search_radius_mi: Optional[float] = None,
+    accumulation_window: Optional[str] = None,
+    include_figure: bool = True,
+) -> dict:
+    """Write station precipitation QAQC evidence into the workspace report folder."""
+    return precip_qaqc.build_station_precip_qaqc(
+        stations=stations,
+        output_dir=Path(workspace_dir) / "08_report",
+        event_start=event_start,
+        event_end=event_end,
+        gridded_source=gridded_source,
+        gridded_depth_in=gridded_depth_in,
+        noaa_token_available=noaa_token_available,
+        search_radius_mi=search_radius_mi,
+        accumulation_window=accumulation_window,
+        include_figure=include_figure,
+    )
+
+
 def _resolve_hms_gauge_study_builder():
     try:
         from hms_commander import HmsGaugeStudy
@@ -191,6 +220,21 @@ def _build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--workspace-dir", required=True)
     report_parser.add_argument("--no-map", action="store_true")
 
+    precip_parser = subparsers.add_parser(
+        "write-station-precip-qaqc",
+        help="Write GHCND/station precipitation QAQC artifacts from a station-summary JSON file",
+    )
+    precip_parser.add_argument("--workspace-dir", required=True)
+    precip_parser.add_argument("--stations-json", required=True)
+    precip_parser.add_argument("--event-start", required=True)
+    precip_parser.add_argument("--event-end", required=True)
+    precip_parser.add_argument("--gridded-source", default="AORC")
+    precip_parser.add_argument("--gridded-depth-in", type=float)
+    precip_parser.add_argument("--search-radius-mi", type=float)
+    precip_parser.add_argument("--accumulation-window")
+    precip_parser.add_argument("--no-noaa-token", action="store_true")
+    precip_parser.add_argument("--no-figure", action="store_true")
+
     gap_parser = subparsers.add_parser("generate-gap-analysis", help="Generate only data_gap_analysis.json")
     gap_parser.add_argument("--workspace-dir", required=True)
     gap_parser.add_argument("--output-path")
@@ -231,6 +275,26 @@ def main() -> int:
     if args.command == "build-report-package":
         outputs = build_report_package(Path(args.workspace_dir), include_map=not args.no_map)
         print(json.dumps({key: str(value) for key, value in outputs.items()}, indent=2))
+        return 0
+
+    if args.command == "write-station-precip-qaqc":
+        payload = json.loads(Path(args.stations_json).read_text(encoding="utf-8"))
+        stations = payload.get("stations", payload) if isinstance(payload, dict) else payload
+        if not isinstance(stations, list):
+            raise ValueError("--stations-json must be a JSON list or an object with a 'stations' list")
+        result = write_station_precip_qaqc_artifacts(
+            Path(args.workspace_dir),
+            stations=stations,
+            event_start=args.event_start,
+            event_end=args.event_end,
+            gridded_source=args.gridded_source,
+            gridded_depth_in=args.gridded_depth_in,
+            noaa_token_available=False if args.no_noaa_token else True,
+            search_radius_mi=args.search_radius_mi,
+            accumulation_window=args.accumulation_window,
+            include_figure=not args.no_figure,
+        )
+        print(json.dumps(result.get("artifacts", {}), indent=2))
         return 0
 
     if args.command == "generate-gap-analysis":

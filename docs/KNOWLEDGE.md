@@ -204,6 +204,9 @@ Immediate boundary-condition direction:
 
 - Use Spring Creek as the first runnable headwater pilot for BLE-style data
   generation and gauge calibration/validation.
+- Generated headwater models must validate a defensible water source before
+  production execution: AORC/MRMS rain-on-grid, an external/generated
+  hydrograph boundary, or explicit mock/low-detail screening mode.
 - Implement rain-on-grid setup first through `ras-commander` AORC/MRMS support.
 - Continue HMS modeling in parallel through `hms-commander`, then build the
   HMS-linked boundary-construction workflow once the HMS path is complete enough

@@ -135,6 +135,24 @@ def test_report_contains_peak_flows(tmp_path):
     assert "2,530" in html
 
 
+def test_report_contains_water_source_status(tmp_path):
+    result = make_mock_result(tmp_path)
+    result.water_source = {
+        "mode": "mock_screening",
+        "contract_status": "screening_only",
+        "production_ready": False,
+        "screening_only": True,
+        "provenance": {"source": "mock_screening"},
+        "diagnostics": [],
+        "warnings": ["screening only"],
+    }
+    path = _report.generate_report(result, include_plots=False)
+    html = path.read_text(encoding="utf-8")
+    assert "Water Source Readiness" in html
+    assert "mock_screening" in html
+    assert "screening_only" in html
+
+
 def test_report_self_contained(tmp_path):
     """Report has no external file references (no http URLs in src/href attributes)."""
     result = make_mock_result(tmp_path)

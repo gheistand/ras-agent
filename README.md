@@ -101,6 +101,31 @@ The long-term goal: continuous automated modeling of all stream reaches in Illin
 
 ---
 
+- `report.html`
+- `report.json`
+- `data_gap_analysis.json`
+- `manifest.json`
+- `analysis_extent.geojson`
+- `analysis_extent_5070.geojson`
+- `analysis_extent_summary.json`
+
+Use [`pipeline/workspace.py`](pipeline/workspace.py) for the current command surface:
+
+```bash
+python pipeline/workspace.py validate-workspace --workspace-dir "workspace/Spring Creek Springfield IL"
+python pipeline/workspace.py refresh-context-layers --workspace-dir "workspace/Spring Creek Springfield IL"
+python pipeline/workspace.py write-station-precip-qaqc --workspace-dir "workspace/Spring Creek Springfield IL" --stations-json station_precip_summary.json --event-start 2024-07-14T00:00 --event-end 2024-07-15T00:00 --gridded-source AORC --gridded-depth-in 4.25
+python pipeline/workspace.py build-report-package --workspace-dir "workspace/Spring Creek Springfield IL"
+```
+
+Design rules:
+
+- The HTML report must remain self-contained with inline figures and inline MapLibre assets.
+- Station precipitation QAQC is review evidence for rain-on-grid forcing; missing NOAA token, no nearby stations, missing observations, and station/grid disagreement are recorded as report/data-gap flags rather than automatic recalibration instructions.
+- Informational downloads should derive from one shared buffered analysis extent instead of dataset-specific buffering.
+- Workspace gap analysis should point to upstream GitHub issues in `hms-commander` or `ras-commander` when the missing capability belongs there.
+- `ras-agent` keeps the Illinois-specific integration layer; reusable watershed and HEC-RAS primitives belong upstream.
+
 ## Architecture
 
 ### Linux Geometry Preprocessing (as of 2026-03)

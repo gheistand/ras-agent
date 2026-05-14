@@ -77,12 +77,31 @@ try:
 except ImportError:
     _results = None
 
+try:
+    from rog_config import (
+        load_config as _load_rog_workflow_config,
+        validate_config as _validate_rog_workflow_config,
+    )
+except ImportError:
+    _load_rog_workflow_config = None
+    _validate_rog_workflow_config = None
+
 # Optional: precipitation stage
 try:
     import precipitation as _precipitation
     _has_precip = True
 except ImportError:
     _has_precip = False
+
+# Optional: HAND computation
+try:
+    import hand as _hand
+    from hand import HandResult
+    _has_hand = True
+except ImportError:
+    _hand = None
+    HandResult = Any
+    _has_hand = False
 
 
 # ── Data Structures ───────────────────────────────────────────────────────────
@@ -109,8 +128,11 @@ class OrchestratorResult:
     duration_sec: float
     status: str                  # "complete" | "partial" | "failed"
     errors: list                 # non-fatal errors encountered
+    hand: Optional[HandResult] = None     # HAND raster (Stage 2.5)
     archive_dir: Optional[Path] = None  # ras2cng GeoParquet archive (Stage 7b)
     pre_run_readiness: Optional[list[dict]] = None
+    water_source: dict = field(default_factory=dict)
+    workflow_config: Optional[dict] = None
     precip_result: Optional[dict] = None  # {rp: PrecipitationResult} from Stage 4.5
 
 
@@ -168,6 +190,63 @@ def _require_module(module, name: str):
             f"Install the pipeline requirements before running non-mock workflows."
         )
     return module
+
+
+def _water_source_from_validation(validation: dict) -> dict:
+    """Return the compact water-source metadata carried by run/batch reports."""
+    if not isinstance(validation, dict):
+        return {}
+
+    water_source = {
+        "schema_version": validation.get("schema_version"),
+        "mode": validation.get("mode", "unknown"),
+        "requested_mode": validation.get("requested_mode"),
+        "contract_status": validation.get("contract_status", "not_recorded"),
+        "production_ready": bool(validation.get("production_ready", False)),
+        "screening_only": bool(validation.get("screening_only", False)),
+        "provenance": validation.get("provenance") or {},
+        "diagnostics": validation.get("diagnostics") or [],
+        "warnings": validation.get("warnings") or [],
+    }
+
+    project_dir = None
+    file_evidence = validation.get("file_evidence") or {}
+    for key in ("plan_files", "flow_files"):
+        for record in file_evidence.get(key, []) or []:
+            path_value = record.get("path")
+            if path_value:
+                project_dir = Path(path_value).parent
+                break
+        if project_dir is not None:
+            break
+    if project_dir is not None:
+        water_source["validation_path"] = str(
+            project_dir / "water_source_validation.json"
+        )
+        water_source["metadata_path"] = str(
+            project_dir / "ras_agent_model_metadata.json"
+        )
+
+    return water_source
+
+
+def _resolve_workflow_config(workflow_config: Any):
+    """Return a validated RoG workflow config dataclass."""
+    if _validate_rog_workflow_config is None:
+        raise ImportError(
+            "rog_config is not available. Ensure pipeline/rog_config.py is present "
+            "before using RoG workflow configuration."
+        )
+    if workflow_config is None:
+        return _validate_rog_workflow_config(None)
+    if isinstance(workflow_config, (str, Path)):
+        if _load_rog_workflow_config is None:
+            raise ImportError(
+                "rog_config is not available. Ensure pipeline/rog_config.py is present "
+                "before loading RoG workflow configuration files."
+            )
+        return _load_rog_workflow_config(workflow_config)
+    return _validate_rog_workflow_config(workflow_config)
 
 
 # ── Mock Data Generators ─────────────────────────────────────────────────────
@@ -280,6 +359,9 @@ def run_watershed(
     mesh_strategy: str = "geometry_first",
     boundary_condition_mode: str = "headwater",
     nlcd_raster_path: Optional[Path] = None,
+    water_source_mode: Optional[str] = "auto",
+    water_source_provenance: Optional[dict] = None,
+    allow_low_detail_screening: bool = False,
     ras_exe_dir: Optional[Path] = None,
     max_parallel: int = 2,
     name: Optional[str] = None,
@@ -289,6 +371,7 @@ def run_watershed(
     cloud_native: bool = True,  # If True, export GeoParquet archive via ras2cng (Stage 7b)
     r2_config=None,             # Optional R2Config for cloud upload
     slurm_config=None,      # Optional[SlurmConfig] — see pipeline/slurm.py
+    workflow_config: Optional[Any] = None,
 ) -> OrchestratorResult:
     """
     Run the full RAS Agent pipeline for a pour point.
@@ -297,7 +380,8 @@ def run_watershed(
         pour_point_lon:    Outlet longitude (WGS84 decimal degrees)
         pour_point_lat:    Outlet latitude (WGS84 decimal degrees)
         output_dir:        Root directory for all pipeline outputs
-        return_periods:    Return periods to model (default: [10, 50, 100])
+        return_periods:    Return periods to model. If omitted, uses the
+                           validated RoG workflow config aep_years.
         resolution_m:      DEM resolution in meters (default: 3.0)
         mesh_strategy:     HEC-RAS mesh build strategy (default: "geometry_first")
                            uses ras-commander GeomStorage to write .g## and
@@ -307,6 +391,15 @@ def run_watershed(
                            through this API but intentionally fails fast in the
                            builder until chained-basin implementation resumes.
         nlcd_raster_path:  Optional NLCD 2019 GeoTIFF for Manning's n
+        water_source_mode: "auto" | "rain_on_grid" | "external_hydrograph" |
+                           "mock_screening" | "none"; non-mock execution
+                           requires production-ready water-source validation.
+        water_source_provenance:
+                           Optional source/provenance payload for the selected
+                           water-source mode.
+        allow_low_detail_screening:
+                           Allow explicit screening output, but do not execute
+                           it as a production model.
         ras_exe_dir:       Path to RasUnsteady binary dir; None = mock mode
         max_parallel:      Maximum simultaneous HEC-RAS jobs
         name:              Run name; defaults to "watershed_{lon}_{lat}"
@@ -317,12 +410,18 @@ def run_watershed(
         slurm_config:      Optional SlurmConfig for submitting HEC-RAS jobs to the
                            NCSA Illinois Computes Campus Cluster via SLURM.
                            If None, jobs run locally (default).
+        workflow_config:   Optional RoG workflow config mapping, dataclass, or
+                           JSON/YAML path. Serialized into OrchestratorResult
+                           for audit trails.
 
     Returns:
         OrchestratorResult with full provenance and output paths
     """
+    resolved_workflow_config = _resolve_workflow_config(workflow_config)
     if return_periods is None:
-        return_periods = [10, 50, 100]
+        return_periods = list(resolved_workflow_config.aep_years)
+    else:
+        return_periods = list(return_periods)
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -330,7 +429,7 @@ def run_watershed(
     if name is None:
         name = f"watershed_{pour_point_lon:.4f}_{pour_point_lat:.4f}"
 
-    mock = (ras_exe_dir is None)
+    mock = bool(resolved_workflow_config.mock or ras_exe_dir is None)
     db_path = output_dir / "jobs.db"
     logs_dir = output_dir / "logs"
 
@@ -352,6 +451,7 @@ def run_watershed(
         status="partial",
         errors=[],
         pre_run_readiness=None,
+        workflow_config=resolved_workflow_config.to_audit_dict(),
     )
 
     # ── Stage 1: Terrain ──────────────────────────────────────────────────────
@@ -413,6 +513,46 @@ def run_watershed(
             "Check DEM coverage and pour point location."
         ) from exc
 
+    # ── Stage 2.5: HAND computation (non-fatal) ────────────────────────────────
+    if _has_hand:
+        try:
+            if mock:
+                result.hand = _hand.mock_hand(output_dir / "hand")
+                logger.info(
+                    "[Stage 2.5] HAND complete — "
+                    "mean=%.2f m (mock mode)", result.hand.mean_hand_m
+                )
+            else:
+                ws_artifacts = result.watershed.artifacts
+                fel = ws_artifacts.get("fel")
+                src = ws_artifacts.get("src")
+                if fel and src:
+                    basin_shape = result.watershed.basin.geometry.iloc[0]
+                    result.hand = _hand.compute_hand(
+                        fel_path=fel,
+                        src_path=src,
+                        output_dir=output_dir / "hand",
+                        watershed_shape=basin_shape,
+                    )
+                    logger.info(
+                        "[Stage 2.5] HAND complete — "
+                        "min=%.2f m, max=%.2f m, mean=%.2f m, "
+                        "stream_cells=%d",
+                        result.hand.min_hand_m,
+                        result.hand.max_hand_m,
+                        result.hand.mean_hand_m,
+                        result.hand.stream_cell_count,
+                    )
+                else:
+                    logger.warning(
+                        "[Stage 2.5] HAND skipped — watershed artifacts "
+                        "'fel' and/or 'src' not available"
+                    )
+        except Exception as exc:
+            err = f"Stage 2.5 (HAND) failed: {exc}"
+            logger.warning(err)
+            result.errors.append(err)
+
     # ── Stage 3: Peak flow estimation ─────────────────────────────────────────
     logger.info(
         f"[Stage 3/7] {'(mock) ' if mock else ''}Estimating peak flows …"
@@ -461,6 +601,7 @@ def run_watershed(
             channel_length_km=chars.main_channel_length_km,
             channel_slope_m_per_m=chars.main_channel_slope_m_per_m,
             return_periods=return_periods,
+            time_step_hr=resolved_workflow_config.precip_timestep_minutes / 60.0,
         )
         result.hydro_set = hydro_set
         logger.info(
@@ -513,21 +654,46 @@ def run_watershed(
             mesh_strategy=mesh_strategy,
             boundary_condition_mode=boundary_condition_mode,
             nlcd_raster_path=nlcd_raster_path,
+            water_source_mode=water_source_mode,
+            water_source_provenance=water_source_provenance,
+            allow_low_detail_screening=allow_low_detail_screening,
             mock=mock,
         )
         result.project = project
+        result.water_source = project.metadata.get("water_source", {})
         logger.info(
             f"[Stage 5/7] Model build complete — "
             f"project at {project.project_dir}"
         )
     except Exception as exc:
         err = f"Stage 5 (model build) failed: {exc}"
+        water_source_error_cls = getattr(
+            _model_builder,
+            "WaterSourceContractError",
+            None,
+        )
+        if water_source_error_cls is not None and isinstance(exc, water_source_error_cls):
+            result.water_source = _water_source_from_validation(
+                getattr(exc, "validation", {})
+            )
         logger.error(err)
         result.errors.append(err)
         result.duration_sec = time.monotonic() - t0
         return result
 
     # ── Stage 6: Job queue + execute ──────────────────────────────────────────
+    if not mock and not result.water_source.get("production_ready", False):
+        err = (
+            "Stage 6 (water-source readiness) failed: generated model is "
+            "not production-ready. Provide AORC/MRMS rain-on-grid or an "
+            "external/generated hydrograph source before HEC-RAS execution. "
+            f"Current water_source={result.water_source}"
+        )
+        logger.error(err)
+        result.errors.append(err)
+        result.duration_sec = time.monotonic() - t0
+        return result
+
     logger.info(
         f"[Stage 6/7] Enqueueing {len(return_periods)} jobs "
         f"(mock={mock}) …"
@@ -715,8 +881,8 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path,  required=True,
                         help="Output directory")
     parser.add_argument("--return-periods", type=int, nargs="+",
-                        default=[10, 50, 100],
-                        help="Return periods in years (default: 10 50 100)")
+                        default=None,
+                        help="Return periods in years (default: workflow config AEPs)")
     parser.add_argument("--resolution", type=float, default=3.0,
                         help="DEM resolution in meters (default: 3.0)")
     parser.add_argument(
@@ -730,6 +896,22 @@ if __name__ == "__main__":
         choices=["headwater", "downstream"],
         help="Boundary-condition mode scaffold (default: headwater)",
     )
+    parser.add_argument(
+        "--water-source-mode",
+        default="auto",
+        choices=["auto", "none", "rain_on_grid", "external_hydrograph", "mock_screening"],
+        help="Headwater water-source contract mode (default: auto)",
+    )
+    parser.add_argument(
+        "--water-source-provenance-json",
+        default=None,
+        help="JSON object describing water-source provenance",
+    )
+    parser.add_argument(
+        "--low-detail-screening",
+        action="store_true",
+        help="Allow explicit low-detail screening output; not production-ready",
+    )
     parser.add_argument("--ras-exe-dir", type=Path, default=None,
                         help="Path to RasUnsteady binary directory")
     parser.add_argument("--mock", action="store_true",
@@ -740,6 +922,12 @@ if __name__ == "__main__":
                         help="Webhook URL for completion notification")
     parser.add_argument("--notify-email", default=None,
                         help="Email address for completion notification")
+    parser.add_argument(
+        "--workflow-config",
+        type=Path,
+        default=None,
+        help="JSON/YAML RoG workflow config for audit metadata and default AEPs",
+    )
     args = parser.parse_args()
 
     notify_config = None
@@ -749,6 +937,10 @@ if __name__ == "__main__":
             webhook_url=args.webhook,
             email_to=args.notify_email,
         )
+    water_source_provenance = None
+    if args.water_source_provenance_json:
+        import json
+        water_source_provenance = json.loads(args.water_source_provenance_json)
 
     result = run_watershed(
         pour_point_lon=args.lon,
@@ -758,9 +950,13 @@ if __name__ == "__main__":
         resolution_m=args.resolution,
         mesh_strategy=args.strategy,
         boundary_condition_mode=args.bc_mode,
+        water_source_mode=args.water_source_mode,
+        water_source_provenance=water_source_provenance,
+        allow_low_detail_screening=args.low_detail_screening,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         name=args.name,
         notify_config=notify_config,
+        workflow_config=args.workflow_config,
     )
     print(f"Status:   {result.status}")
     print(f"Duration: {result.duration_sec:.1f}s")

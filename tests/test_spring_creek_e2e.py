@@ -247,6 +247,7 @@ class TestSpringCreekModelBuild:
             output_dir=tmp_path,
             return_periods=[100],
             nlcd_raster_path=nlcd,
+            water_source_mode="mock_screening",
             strategy="geometry_first",
         )
 
@@ -276,6 +277,7 @@ class TestSpringCreekModelBuild:
             hydro_set=hydro_set,
             output_dir=tmp_path,
             return_periods=[100],
+            water_source_mode="mock_screening",
             strategy="geometry_first",
         )
 
@@ -300,6 +302,7 @@ class TestSpringCreekModelBuild:
             hydro_set=hydro_set,
             output_dir=tmp_path,
             return_periods=[100],
+            water_source_mode="mock_screening",
             strategy="geometry_first",
         )
 
@@ -320,6 +323,7 @@ class TestSpringCreekModelBuild:
             hydro_set=hydro_set,
             output_dir=tmp_path,
             return_periods=[100],
+            water_source_mode="mock_screening",
             strategy="geometry_first",
         )
 
@@ -343,6 +347,7 @@ class TestSpringCreekFlowFile:
             hydro_set=hydro_set,
             output_dir=tmp_path,
             return_periods=[100],
+            water_source_mode="mock_screening",
             strategy="geometry_first",
         )
 
