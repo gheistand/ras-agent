@@ -84,7 +84,7 @@ Web (Cloudflare Pages):
 
 ### Python Pipeline
 - `rasterio` — raster I/O, terrain processing, reprojection
-- `pysheds` — D8 flow direction, accumulation, watershed delineation
+- TauDEM CLI — authoritative D8 flow direction, contributing area, stream threshold, outlet snapping, and StreamNet watershed delineation
 - `gdal` — geospatial processing
 - `geopandas` / `shapely` — vector operations
 - `h5py` — HEC-RAS HDF5 results access
@@ -141,6 +141,7 @@ Web (Cloudflare Pages):
 | HITL/QAQC A | Foundation — HITLConfig, expert-liaison agent, 4 rules | ✅ Done | .claude/rules/*.md, .claude/agents/expert-liaison/ |
 | HITL/QAQC B | Validation engine — qaqc-validator, /ask-expert, /validate-run | ✅ Done | .claude/agents/qaqc-validator/, .claude/skills/ |
 | HITL/QAQC C | Proactive review + hooks — hydro-reviewer, transparency/range hooks | ✅ Done | .claude/hooks/, .claude/agents/hydro-reviewer/ |
+| TauDEM QAQC | Delineation review bundle with maps, diagnostics, provenance, prompts, and signoff metadata | ✅ Done | pipeline/taudem_qaqc.py, tests/test_taudem_qaqc.py |
 | Windows Agent | Windows mesh interface + RasPreprocess integration | ✅ Done | pipeline/windows_agent.py, tests/test_windows_agent.py |
 
 **Test count: 334 passing** (334 combined after PR #13 merge — CLB branch + main morning commits integrated, as of 2026-05-02)
@@ -161,10 +162,18 @@ Web (Cloudflare Pages):
 - Output: LZW-compressed, tiled GeoTIFF, EPSG:5070
 
 ### watershed.py
-- `delineate_watershed(dem_path, pour_point_lon, pour_point_lat, snap_threshold_m=300, min_stream_area_km2=2.0)` → `WatershedResult`
-- Uses pysheds Grid: fill_pits → fill_depressions → resolve_flats → flowdir (D8) → accumulation → catchment → polygonize
-- `BasinCharacteristics`: drainage_area_km2/mi2, mean_elevation_m, relief_m, main_channel_length_km, main_channel_slope_m_per_m, centroid/pour_point lat/lon
+- `delineate_watershed(dem_path, pour_point_lon, pour_point_lat, snap_threshold_m=300, min_stream_area_km2=2.0, working_dir=None, taudem_executable_dir=None, taudem_processes=1, emit_qaqc_bundle=True, qaqc_detail_level="first_pass", qaqc_output_dir=None)` → `WatershedResult`
+- Uses direct TauDEM CLI: PitRemove → D8FlowDir → AreaD8 → Threshold → MoveOutletsToStreams → Gridnet → StreamNet
+- Preserves TauDEM intermediate artifacts including filled DEM, flow direction/slope grids, contributing area grid, stream source grid, order grids, snapped outlet, StreamNet vector network, tree/coordinate tables, and watershed grid
+- Emits `qaqc_bundle/` by default with `qaqc_report.html`, `diagnostics.json`, `review_prompts.md`, `signoff.json`, `command_log.json`, SVG maps, CSV tables, and `manifest.json`
+- `BasinCharacteristics`: drainage_area_km2/mi2, mean_elevation_m, relief_m, main_channel_length_km, main_channel_slope_m_per_m, centroid/pour_point lat/lon, and TauDEM processing metadata in `extra`
 - `save_watershed(result, output_dir)` → GeoPackage files (watershed_boundary.gpkg, stream_network.gpkg)
+
+### taudem_qaqc.py
+- `generate_taudem_qaqc_bundle(watershed, output_dir, detail_level="first_pass", ...)` writes a self-contained delineation review package beside TauDEM outputs
+- Diagnostics cover outlet snapping, stream threshold, stream order, drainage area, subbasin geometry, slope, low-relief risk, and DEM boundary effects
+- `record_taudem_qaqc_signoff()` records reviewer metadata after human review
+- `require_taudem_qaqc_signoff()` blocks production promotion until `signoff.json` records approval
 
 ### streamstats.py
 - `get_peak_flows(pour_point_lon, pour_point_lat, drainage_area_mi2, channel_slope_m_per_m, region='IL')` → `PeakFlowEstimates`
