@@ -1874,6 +1874,37 @@ def _build_geometry_first(
         except Exception as exc:
             logger.warning("Mesh generation failed: %s", exc)
 
+    mesh_point_count = _text_mesh_point_count(geom_file, area_name)
+
+    mesh_qa_package = None
+    try:
+        from pipeline.mesh_qa import build_mesh_qa_package
+
+        mesh_qa_package = build_mesh_qa_package(
+            geom_file,
+            output_dir=project_dir / "qa" / "mesh",
+            area_name=area_name,
+            regenerated_hdf_path=geom_file.with_suffix(geom_file.suffix + ".hdf"),
+            target_cell_size_m=cell_size_m,
+            mesh_result=mesh_result,
+        )
+    except ImportError:
+        try:
+            from mesh_qa import build_mesh_qa_package
+
+            mesh_qa_package = build_mesh_qa_package(
+                geom_file,
+                output_dir=project_dir / "qa" / "mesh",
+                area_name=area_name,
+                regenerated_hdf_path=geom_file.with_suffix(geom_file.suffix + ".hdf"),
+                target_cell_size_m=cell_size_m,
+                mesh_result=mesh_result,
+            )
+        except Exception as exc:
+            logger.warning("Mesh QA package generation failed: %s", exc)
+    except Exception as exc:
+        logger.warning("Mesh QA package generation failed: %s", exc)
+
     flow_file = project_dir / f"{project_name}.u01"
     plan_file = project_dir / f"{project_name}.p01"
     plan_hdf = project_dir / f"{project_name}.p01.hdf"
@@ -1891,8 +1922,11 @@ def _build_geometry_first(
         "dem_clipped": str(getattr(watershed, "dem_clipped", "")),
         "centerline_count": _centerline_count(watershed),
         "breakline_count": len(bl) if (bl := _linework_5070(getattr(watershed, "breaklines", None))) is not None else 0,
-        "mesh_cells": mesh_result.cell_count if mesh_result and mesh_result.ok else 0,
+        "mesh_cells": mesh_result.cell_count if mesh_result and mesh_result.ok else mesh_point_count,
         "mesh_status": mesh_result.status if mesh_result else "deferred",
+        "mesh_qa_status": mesh_qa_package.get("status") if mesh_qa_package else "failed",
+        "mesh_qa_artifacts": mesh_qa_package.get("artifacts") if mesh_qa_package else {},
+        "mesh_qa_flag_count": len(mesh_qa_package.get("flags", [])) if mesh_qa_package else 0,
         "artifact_keys": sorted(list(getattr(watershed, "artifacts", {}).keys())),
     }
 
