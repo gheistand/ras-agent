@@ -18,6 +18,75 @@ import pandas as pd
 from loguru import logger
 
 
+# ── Depth-Frequency Sources ───────────────────────────────────────────────────
+
+VALID_DEPTH_SOURCES = ("bulletin_75", "atlas_14")
+
+# ISWS Bulletin 75 (Huff & Angel, 1992) — point precipitation frequency for Illinois.
+# Depths in inches for standard return periods (statewide median values).
+# For production, look up by lat/lon from the Bulletin 75 isopluvial maps;
+# these statewide medians are suitable for central IL (40°N) and serve as
+# the default when site-specific lookup is not yet implemented.
+_BULLETIN_75_DEPTHS_IN: dict[int, float] = {
+    2:   2.9,
+    5:   3.6,
+    10:  4.2,
+    25:  5.0,
+    50:  5.7,
+    100: 6.4,
+    500: 8.1,
+}
+
+# NOAA Atlas 14 Vol. 2 (Bonnin et al., 2006) — 24-hour point depths for central IL.
+# Used as a selectable alternative. Same caveat: site-specific PFDS lookup
+# should replace these representative values in production.
+_ATLAS_14_DEPTHS_IN: dict[int, float] = {
+    2:   2.8,
+    5:   3.5,
+    10:  4.1,
+    25:  5.1,
+    50:  5.8,
+    100: 6.6,
+    500: 8.5,
+}
+
+_DEPTH_TABLES: dict[str, dict[int, float]] = {
+    "bulletin_75": _BULLETIN_75_DEPTHS_IN,
+    "atlas_14": _ATLAS_14_DEPTHS_IN,
+}
+
+
+def get_design_depth(
+    return_period_yr: int,
+    depth_source: str = "bulletin_75",
+) -> float:
+    """Look up 24-hour design depth for a return period from the given source.
+
+    Args:
+        return_period_yr: Return period in years (e.g. 2, 10, 100).
+        depth_source:     One of "bulletin_75" (default) or "atlas_14".
+
+    Returns:
+        Design depth in inches.
+
+    Raises:
+        ValueError: If depth_source is invalid or return_period_yr is not in table.
+    """
+    if depth_source not in VALID_DEPTH_SOURCES:
+        raise ValueError(
+            f"Invalid depth_source={depth_source!r}. "
+            f"Valid options: {VALID_DEPTH_SOURCES}"
+        )
+    table = _DEPTH_TABLES[depth_source]
+    if return_period_yr not in table:
+        available = sorted(table.keys())
+        raise ValueError(
+            f"Return period {return_period_yr}yr not in {depth_source} table. "
+            f"Available: {available}"
+        )
+    return table[return_period_yr]
+
+
 # ── Data Structures ───────────────────────────────────────────────────────────
 
 @dataclass
@@ -287,29 +356,42 @@ def run_precipitation_stage(
     output_dir,
     target_return_periods: Optional[list] = None,
     years: Optional[list] = None,
+    depth_source: str = "bulletin_75",
     mock: bool = False,
 ) -> dict:
     """Run the full precipitation stage for a set of return periods.
 
-    Catalogs AORC storms, selects design events matching rough IL depth
-    targets, and downloads NetCDF files.
+    Catalogs AORC storms, selects design events whose total depth best
+    matches the design depth for each return period from the given source.
 
     Args:
         bounds:                (west, south, east, north) in WGS84.
         output_dir:            Root output directory.
         target_return_periods: Return periods in years (default: [2, 10, 100]).
         years:                 Calendar years to search (default: last 5 years).
+        depth_source:          Precipitation frequency source for design depths.
+                               "bulletin_75" (default, ISWS standard) or "atlas_14".
         mock:                  If True, run without network or S3 access.
 
     Returns:
         Dict mapping each return period (int) to a PrecipitationResult, or
         None if no matching storm was found for that period.
     """
+    if depth_source not in VALID_DEPTH_SOURCES:
+        raise ValueError(
+            f"Invalid depth_source={depth_source!r}. "
+            f"Valid options: {VALID_DEPTH_SOURCES}"
+        )
     if target_return_periods is None:
         target_return_periods = [2, 10, 100]
     if years is None:
         now = datetime.now()
         years = list(range(now.year - 5, now.year))
+
+    logger.info(
+        f"[CALC] Precipitation depth source: {depth_source} "
+        f"(RPs: {target_return_periods})"
+    )
 
     catalog_df = catalog_storms(bounds, years, mock=mock)
 
@@ -317,8 +399,11 @@ def run_precipitation_stage(
     results: dict = {}
 
     for rp in target_return_periods:
-        # Rough Illinois placeholder: depth (in) ~ rp * 0.5
-        target_depth = rp * 0.5
+        target_depth = get_design_depth(rp, depth_source)
+        logger.info(
+            f"[CALC] Design depth: T={rp}yr → {target_depth:.1f}in "
+            f"(source: {depth_source}) [VALID]"
+        )
         storm_row = select_design_storm(catalog_df, target_depth)
 
         if storm_row is None:

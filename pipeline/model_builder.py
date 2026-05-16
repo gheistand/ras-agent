@@ -2034,7 +2034,7 @@ def _build_geometry_first(
         "cell_size_m": cell_size_m,
         "dem_clipped": str(getattr(watershed, "dem_clipped", "")),
         "centerline_count": _centerline_count(watershed),
-        "breakline_count": len(bl) if (bl := _linework_5070(getattr(watershed, "breaklines", None))) is not None else 0,
+        "breakline_count": len(breakline_defs),
         "boundary_condition_count": len(bc_set.bc_lines) if bc_set is not None else 0,
         "include_boundary_conditions": bool(include_boundary_conditions),
         "mesh_cells": mesh_result.cell_count if mesh_result and mesh_result.ok else mesh_point_count,
