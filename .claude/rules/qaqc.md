@@ -107,6 +107,20 @@ Post-run validation:
 - ✓ Flood extent < 40% of watershed area?
 - ✓ All return periods exported?
 
+### After Stage 8 (Precipitation)
+- ✓ AORC/MRMS catalog returned at least one storm per return period?
+- ✓ Gridded depths within plausible range for region (1–20 in for IL)?
+- ✓ Duration coverage matches requested AEPs?
+
+### After Stage 9 (Storm QC)
+- ✓ GHCND stations found within 50 km of watershed centroid?
+- ✓ depth_ratio (gridded/gauge) in [0.5, 2.0] for matched storms?
+- ✓ QC flags assigned — no unclassified storms?
+
+### After Stage 10 (Report)
+- ✓ report.html written and non-empty?
+- ✓ Workspace report (if requested) contains expected artifact paths?
+
 ---
 
 ## QAQC Report Format
@@ -128,6 +142,9 @@ Overall Status: PASS | PASS with WARNINGS | FAIL
 | Model build | ✅ | n coverage=100% | |
 | Runner | ✅ | 2400 sec, clean | |
 | Results | ✅ | max depth=2.1 ft | |
+| Precipitation | ✅ | 3/3 RPs matched | |
+| Storm QC | ⚠️ | 2/3 ok, 1 suspect | depth_ratio=0.48 |
+| Report | ✅ | report.html written | |
 
 ## Findings
 [WARN] Stage 3: API/regression peak flow discrepancy 18% — logged, expert notified

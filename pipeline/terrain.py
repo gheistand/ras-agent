@@ -1,9 +1,9 @@
 """
-terrain.py — ILHMP GeoTIFF terrain data pipeline
+terrain.py — ILHMP 1m LiDAR terrain data pipeline
 
-Downloads and mosaics LiDAR-derived GeoTIFFs from the Illinois Height
-Modernization Program (ILHMP) clearinghouse. Reprojects to EPSG:5070
-(Albers Equal Area, CONUS) — consistent datum for all pipeline operations.
+Downloads 1-meter LiDAR-derived DEMs from the Illinois Height Modernization
+Program (ILHMP) via ISGS ArcGIS ImageServer.  Hard-fails if 1m data cannot
+be obtained — coarser fallbacks mask a fixable data-acquisition problem.
 
 Copyright 2026 Glenn Heistand / CHAMP — Illinois State Water Survey
 Apache License 2.0
@@ -56,16 +56,12 @@ CHAMP_IMAGE_SERVICE_URLS = tuple(
     if url
 )
 
-# Legacy ILHMP clearinghouse — ArcGIS REST tile service for 1/3 arc-second DEM tiles
+# Legacy ILHMP clearinghouse — ArcGIS REST tile service for 1m LiDAR DEM tiles
 # Source: https://clearinghouse.isgs.illinois.edu/data/elevation/illinois-height-modernization-ilhmp
 ILHMP_TILE_INDEX_URL = (
     "https://clearinghouse.isgs.illinois.edu/arcgis/rest/services/"
     "Elevation/IL_Height_Modernization_DEM/MapServer/0/query"
 )
-
-# Fallback: USGS 3DEP 1/3 arc-second national coverage via The National Map
-USGS_3DEP_URL = "https://tnmapi.usgs.gov/api/products"
-USGS_3DEP_DATASET = "National Elevation Dataset (NED) 1/3 arc-second"
 
 
 # ── Tile Discovery ───────────────────────────────────────────────────────────
@@ -145,7 +141,7 @@ def export_champ_image_service_dem(
     *,
     metadata: Optional[dict] = None,
     target_crs: CRS = TARGET_CRS,
-    resolution_m: float = 3.0,
+    resolution_m: float = 1.0,
 ) -> Path:
     """
     Export a bbox-clipped DEM directly from a CHAMP / ILHMP ArcGIS ImageServer.
@@ -227,13 +223,20 @@ def find_ilhmp_tiles(bbox_wgs84: tuple[float, float, float, float]) -> list[dict
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as e:
-        logger.warning(f"ILHMP tile query failed: {e}. Falling back to USGS 3DEP.")
-        return find_usgs_3dep_tiles(bbox_wgs84)
+        raise TerrainError(
+            f"ILHMP tile query failed: {e}. "
+            "1m LiDAR DEM is required — check network connectivity to "
+            "clearinghouse.isgs.illinois.edu"
+        ) from e
 
     features = data.get("features", [])
     if not features:
-        logger.warning("No ILHMP tiles found for bbox. Falling back to USGS 3DEP.")
-        return find_usgs_3dep_tiles(bbox_wgs84)
+        raise TerrainError(
+            f"No ILHMP tiles found for bbox {bbox_wgs84}. "
+            "1m LiDAR DEM is required — verify the watershed is within "
+            "Illinois ILHMP coverage or add the correct ISGS ImageServer URL "
+            "via CHAMP_ILHMP_IMAGE_SERVICE_URL env var."
+        )
 
     tiles = []
     for f in features:
@@ -244,41 +247,6 @@ def find_ilhmp_tiles(bbox_wgs84: tuple[float, float, float, float]) -> list[dict
             tiles.append({"name": str(name), "download_url": url, "source": "ILHMP"})
 
     logger.info(f"Found {len(tiles)} ILHMP tiles")
-    return tiles
-
-
-def find_usgs_3dep_tiles(bbox_wgs84: tuple[float, float, float, float]) -> list[dict]:
-    """
-    Query the USGS National Map API for 1/3 arc-second DEM tiles.
-    Fallback when ILHMP data is unavailable (outside Illinois, etc.)
-    """
-    west, south, east, north = bbox_wgs84
-    logger.info("Querying USGS 3DEP tiles (fallback)")
-
-    params = {
-        "datasets": USGS_3DEP_DATASET,
-        "bbox": f"{west},{south},{east},{north}",
-        "outputFormat": "JSON",
-        "max": 50,
-    }
-
-    try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.get(USGS_3DEP_URL, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as e:
-        raise RuntimeError(f"USGS 3DEP tile query also failed: {e}") from e
-
-    items = data.get("items", [])
-    tiles = []
-    for item in items:
-        url = item.get("downloadURL")
-        title = item.get("title", "unknown")
-        if url:
-            tiles.append({"name": title, "download_url": url, "source": "USGS_3DEP"})
-
-    logger.info(f"Found {len(tiles)} USGS 3DEP tiles")
     return tiles
 
 
@@ -327,7 +295,7 @@ def download_tiles(tiles: list[dict], output_dir: Path) -> list[Path]:
 
 def mosaic_tiles(tile_paths: list[Path], output_path: Path,
                  target_crs: CRS = TARGET_CRS,
-                 resolution_m: float = 3.0) -> Path:
+                 resolution_m: float = 1.0) -> Path:
     """
     Merge multiple GeoTIFF tiles into a single mosaic, reproject to target CRS.
 
@@ -335,7 +303,7 @@ def mosaic_tiles(tile_paths: list[Path], output_path: Path,
         tile_paths:    List of input GeoTIFF paths
         output_path:   Output mosaic GeoTIFF path
         target_crs:    Target CRS (default: EPSG:5070 Albers)
-        resolution_m:  Output resolution in meters (default: 3m ≈ 1/3 arc-second)
+        resolution_m:  Output resolution in meters (default: 1m — native LiDAR)
 
     Returns:
         Path to the output mosaic GeoTIFF
@@ -459,7 +427,7 @@ def clip_to_watershed(dem_path: Path, watershed_geom, output_path: Path) -> Path
 def get_terrain(
     bbox_wgs84: tuple[float, float, float, float],
     output_dir: Path,
-    resolution_m: float = 3.0,
+    resolution_m: float = 1.0,
 ) -> Path:
     """
     Full terrain pipeline: discover tiles → download → mosaic → reproject.
@@ -492,17 +460,18 @@ def get_terrain(
             )
         except Exception as exc:
             logger.warning(
-                "CHAMP / ILHMP ImageServer export failed: "
-                f"{exc}. Falling back to legacy ILHMP tile discovery."
+                "CHAMP / ILHMP ImageServer export failed: %s — "
+                "trying legacy ILHMP tile discovery.", exc,
             )
 
     tiles = find_ilhmp_tiles(bbox_wgs84)
-    if not tiles:
-        raise RuntimeError("No terrain tiles found for the specified bounding box.")
 
     tile_paths = download_tiles(tiles, tiles_dir)
     if not tile_paths:
-        raise RuntimeError("All tile downloads failed.")
+        raise TerrainError(
+            "All ILHMP tile downloads failed. "
+            "1m LiDAR DEM is required — cannot proceed with coarser data."
+        )
 
     return mosaic_tiles(tile_paths, mosaic_path, resolution_m=resolution_m)
 
@@ -791,8 +760,8 @@ if __name__ == "__main__":
     parser.add_argument("--east",  type=float, required=True)
     parser.add_argument("--north", type=float, required=True)
     parser.add_argument("--output", type=str, default="data/terrain")
-    parser.add_argument("--resolution", type=float, default=3.0,
-                        help="Output DEM resolution in meters (default: 3.0)")
+    parser.add_argument("--resolution", type=float, default=1.0,
+                        help="Output DEM resolution in meters (default: 1.0)")
     args = parser.parse_args()
 
     result = get_terrain(

@@ -232,7 +232,7 @@ def run_batch(
     input_file: Path,
     output_dir: Path,
     max_workers: int = 3,
-    resolution_m: float = 3.0,
+    resolution_m: float = 1.0,
     mesh_strategy: str = "geometry_first",
     boundary_condition_mode: str = "headwater",
     water_source_mode: Optional[str] = "auto",
@@ -243,6 +243,10 @@ def run_batch(
     dry_run: bool = False,
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
     workflow_config: Optional[Any] = None,
+    precip_mode: str = "skip",
+    storm_qc_enabled: bool = False,
+    noaa_cdo_token: Optional[str] = None,
+    workspace_dir: Optional[Path] = None,
 ) -> BatchResult:
     """
     Run full pipeline for each watershed in input_file.
@@ -366,7 +370,11 @@ def run_batch(
             allow_low_detail_screening=allow_low_detail_screening,
             ras_exe_dir=ras_exe_dir,
             name=spec.name,
+            precip_mode=precip_mode,
             workflow_config=workflow_config,
+            storm_qc_enabled=storm_qc_enabled,
+            noaa_cdo_token=noaa_cdo_token,
+            workspace_dir=workspace_dir,
         )
         dur = time.monotonic() - t_start
         _write_run_metadata(spec, result, dur, boundary_condition_mode)
@@ -564,6 +572,28 @@ if __name__ == "__main__":
         default=None,
         help="JSON/YAML RoG workflow config for audit metadata and default AEPs",
     )
+    parser.add_argument(
+        "--precip-mode",
+        default="skip",
+        choices=["skip", "aorc", "mrms"],
+        help="Precipitation retrieval mode (default: skip)",
+    )
+    parser.add_argument(
+        "--storm-qc",
+        action="store_true",
+        help="Enable GHCND storm QC cross-validation (Stage 9)",
+    )
+    parser.add_argument(
+        "--noaa-cdo-token",
+        default=None,
+        help="NOAA CDO API token for station discovery",
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=None,
+        help="Workspace directory for report package generation (Stage 10)",
+    )
     args = parser.parse_args()
 
     notify_config = None
@@ -593,6 +623,10 @@ if __name__ == "__main__":
         dry_run=args.dry_run,
         notify_config=notify_config,
         workflow_config=args.workflow_config,
+        precip_mode=args.precip_mode,
+        storm_qc_enabled=args.storm_qc,
+        noaa_cdo_token=args.noaa_cdo_token,
+        workspace_dir=args.workspace_dir,
     )
     print(
         f"Batch complete: {result.completed} done, "
