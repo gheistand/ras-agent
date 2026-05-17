@@ -58,6 +58,40 @@ def test_refresh_context_layers_delegates_to_context_helper(tmp_path, monkeypatc
     assert result["analysis_extent_summary"] == tmp_path / "analysis_extent_summary.json"
 
 
+def test_build_2d_geometry_delegates_to_spring_creek_helper(tmp_path, monkeypatch):
+    captured = {}
+
+    def _fake_build(workspace_dir, **kwargs):
+        captured["workspace_dir"] = workspace_dir
+        captured.update(kwargs)
+        return {"artifacts": {"mesh_quality_report_json": tmp_path / "mesh_quality_report.json"}}
+
+    monkeypatch.setattr(
+        workspace.spring_creek_geometry,
+        "build_spring_creek_2d_geometry",
+        _fake_build,
+    )
+
+    result = workspace.build_2d_geometry(
+        tmp_path,
+        cell_size_m=125.0,
+        major_channel_min_length_m=2500.0,
+        gauge_refinement_radius_m=500.0,
+        gauge_cell_size_m=60.0,
+        try_generate_mesh=True,
+        mesh_max_wait=120,
+    )
+
+    assert captured["workspace_dir"] == tmp_path
+    assert captured["cell_size_m"] == 125.0
+    assert captured["major_channel_min_length_m"] == 2500.0
+    assert captured["gauge_refinement_radius_m"] == 500.0
+    assert captured["gauge_cell_size_m"] == 60.0
+    assert captured["try_generate_mesh"] is True
+    assert captured["mesh_max_wait"] == 120
+    assert result["artifacts"]["mesh_quality_report_json"].name == "mesh_quality_report.json"
+
+
 def test_write_station_precip_qaqc_artifacts_delegates_to_precip_helper(tmp_path, monkeypatch):
     captured = {}
 

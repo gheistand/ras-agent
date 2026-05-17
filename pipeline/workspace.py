@@ -16,6 +16,7 @@ from typing import Optional
 import context_layers
 import precip_qaqc
 import report
+import spring_creek_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,30 @@ def write_station_precip_qaqc_artifacts(
     )
 
 
+def build_2d_geometry(
+    workspace_dir: Path,
+    *,
+    output_dir: Optional[Path] = None,
+    cell_size_m: float = spring_creek_geometry.DEFAULT_CELL_SIZE_M,
+    major_channel_min_length_m: float = spring_creek_geometry.DEFAULT_MAJOR_CHANNEL_MIN_LENGTH_M,
+    gauge_refinement_radius_m: float = spring_creek_geometry.DEFAULT_GAUGE_REFINEMENT_RADIUS_M,
+    gauge_cell_size_m: float = spring_creek_geometry.DEFAULT_GAUGE_CELL_SIZE_M,
+    try_generate_mesh: bool = False,
+    mesh_max_wait: int = 600,
+) -> dict:
+    """Build the Spring Creek low-detail 2D geometry package."""
+    return spring_creek_geometry.build_spring_creek_2d_geometry(
+        Path(workspace_dir),
+        output_dir=output_dir,
+        cell_size_m=cell_size_m,
+        major_channel_min_length_m=major_channel_min_length_m,
+        gauge_refinement_radius_m=gauge_refinement_radius_m,
+        gauge_cell_size_m=gauge_cell_size_m,
+        try_generate_mesh=try_generate_mesh,
+        mesh_max_wait=mesh_max_wait,
+    )
+
+
 def _resolve_hms_gauge_study_builder():
     try:
         from hms_commander import HmsGaugeStudy
@@ -250,6 +275,31 @@ def _build_parser() -> argparse.ArgumentParser:
     refresh_parser.add_argument("--buffer-m", type=float, default=context_layers.DEFAULT_ANALYSIS_BUFFER_M)
     refresh_parser.add_argument("--nlcd-year", type=int, default=2021)
 
+    geometry_parser = subparsers.add_parser(
+        "build-2d-geometry",
+        help="Build the Spring Creek low-detail 2D HEC-RAS geometry package",
+    )
+    geometry_parser.add_argument("--workspace-dir", required=True)
+    geometry_parser.add_argument("--output-dir")
+    geometry_parser.add_argument("--cell-size-m", type=float, default=spring_creek_geometry.DEFAULT_CELL_SIZE_M)
+    geometry_parser.add_argument(
+        "--major-channel-min-length-m",
+        type=float,
+        default=spring_creek_geometry.DEFAULT_MAJOR_CHANNEL_MIN_LENGTH_M,
+    )
+    geometry_parser.add_argument(
+        "--gauge-refinement-radius-m",
+        type=float,
+        default=spring_creek_geometry.DEFAULT_GAUGE_REFINEMENT_RADIUS_M,
+    )
+    geometry_parser.add_argument(
+        "--gauge-cell-size-m",
+        type=float,
+        default=spring_creek_geometry.DEFAULT_GAUGE_CELL_SIZE_M,
+    )
+    geometry_parser.add_argument("--try-generate-mesh", action="store_true")
+    geometry_parser.add_argument("--mesh-max-wait", type=int, default=600)
+
     return parser
 
 
@@ -314,6 +364,20 @@ def main() -> int:
             nlcd_year=args.nlcd_year,
         )
         print(json.dumps({key: str(value) for key, value in outputs.items()}, indent=2))
+        return 0
+
+    if args.command == "build-2d-geometry":
+        summary = build_2d_geometry(
+            Path(args.workspace_dir),
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            cell_size_m=args.cell_size_m,
+            major_channel_min_length_m=args.major_channel_min_length_m,
+            gauge_refinement_radius_m=args.gauge_refinement_radius_m,
+            gauge_cell_size_m=args.gauge_cell_size_m,
+            try_generate_mesh=args.try_generate_mesh,
+            mesh_max_wait=args.mesh_max_wait,
+        )
+        print(json.dumps(_to_jsonable(summary), indent=2))
         return 0
 
     parser.error(f"Unknown command: {args.command}")

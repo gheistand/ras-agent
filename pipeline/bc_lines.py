@@ -792,7 +792,7 @@ def _generate_headwater_bcs(
     2. Perimeter  — Normal Depth covering rest of boundary (low slope)
     """
     bc_set = BCLineSet(area_name=area_name)
-    gap_fraction = 0.005
+    gap_fraction = 0.02
 
     # Outlet BC at the downstream stream crossing
     if outlet is not None:
