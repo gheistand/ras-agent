@@ -127,6 +127,7 @@ def test_geometry_first_builds_valid_project(tmp_path):
         watershed, hydro_set, tmp_path,
         return_periods=[100],
         mesh_strategy="geometry_first",
+        water_source_mode="mock_screening",
     )
 
     assert project.mesh_strategy == "geometry_first"
@@ -160,6 +161,7 @@ def test_geometry_first_hecras_preprocess(tmp_path):
         watershed, hydro_set, tmp_path,
         return_periods=[100],
         mesh_strategy="geometry_first",
+        water_source_mode="mock_screening",
     )
 
     from ras_commander import init_ras_project, RasCmdr

@@ -21,6 +21,9 @@ Built at the [Illinois State Water Survey (CHAMP Section)](https://isws.illinois
 - Rain-on-grid boundary setup should be implemented first; HMS modeling should
   proceed in parallel, with HMS-linked boundary construction added once that
   path is complete enough to trust.
+- Direct TauDEM is the authoritative watershed delineation path; real TauDEM
+  runs emit a reviewer QAQC bundle and require explicit human signoff before
+  production-quality model promotion.
 - Future calibration work should add precipitation-source QAQC for rain-on-grid
   events and reviewer-in-the-loop batched sensitivity runs that reserve
   high-resolution parameter exploration for the most influential parameters.
@@ -68,6 +71,18 @@ python3 pipeline/orchestrator.py --lon -88.578 --lat 40.021 --output ./output/te
 python3 -m pytest tests/ -v
 ```
 
+### TauDEM QAQC Bundle
+
+Real TauDEM delineation writes a first-pass review bundle by default after
+`StreamNet` under `qaqc_bundle/`. The bundle includes `qaqc_report.html`,
+`diagnostics.json`, `review_prompts.md`, `signoff.json`, `command_log.json`,
+SVG maps, CSV tables, and an artifact manifest.
+
+Use `--no-qaqc` to skip bundle generation for local diagnostics only, or
+`--qaqc-detail first_pass|production_review` and `--qaqc-output <dir>` to
+control review output. Production promotion remains blocked until
+`signoff.json` records human approval.
+
 ### SLURM (NCSA Illinois Computes Campus Cluster)
 
 To submit HEC-RAS jobs to the Illinois Computes cluster, set these environment variables:
@@ -89,7 +104,7 @@ All jobs default to local execution. SLURM submission requires `SLURM_USER` to b
 RAS Agent automates the full HEC-RAS 2D modeling workflow:
 
 1. **Terrain** — Downloads and mosaics LiDAR-derived GeoTIFFs from the [Illinois Height Modernization Program (ILHMP)](https://clearinghouse.isgs.illinois.edu/data/elevation/illinois-height-modernization-ilhmp) and other public sources
-2. **Watershed** — Delineates watershed boundaries and stream networks from DEMs
+2. **Watershed** — Delineates watershed boundaries and stream networks from DEMs with direct TauDEM, preserves intermediate artifacts, and emits reviewer QAQC/signoff outputs
 3. **Hydrology** — Queries the [USGS StreamStats API](https://streamstats.usgs.gov) for peak flow estimates; generates synthetic inflow hydrographs using the NRCS Unit Hydrograph method
 4. **Model Build** — Constructs HEC-RAS 6.6 input files (geometry, plan, unsteady flow, boundary conditions) using [RAS Commander](https://github.com/gpt-cmdr/ras-commander)
 5. **Mesh Generation** — Uses geometry-first, RASMapper-aligned `ras-commander` workflows to write watershed-derived 2D flow area geometry, breaklines, and mesh instructions through authoritative `.g##` text geometry
@@ -127,6 +142,32 @@ python pipeline/pilot_channel.py \
 ```
 
 ---
+
+- `report.html`
+- `report.json`
+- `data_gap_analysis.json`
+- `manifest.json`
+- `analysis_extent.geojson`
+- `analysis_extent_5070.geojson`
+- `analysis_extent_summary.json`
+
+Use [`pipeline/workspace.py`](pipeline/workspace.py) for the current command surface:
+
+```bash
+python pipeline/workspace.py validate-workspace --workspace-dir "workspace/Spring Creek Springfield IL"
+python pipeline/workspace.py refresh-context-layers --workspace-dir "workspace/Spring Creek Springfield IL"
+python pipeline/workspace.py write-station-precip-qaqc --workspace-dir "workspace/Spring Creek Springfield IL" --stations-json station_precip_summary.json --event-start 2024-07-14T00:00 --event-end 2024-07-15T00:00 --gridded-source AORC --gridded-depth-in 4.25
+python pipeline/workspace.py build-report-package --workspace-dir "workspace/Spring Creek Springfield IL"
+```
+
+Design rules:
+
+- The HTML report must remain self-contained with inline figures and inline MapLibre assets.
+- Station precipitation QAQC is review evidence for rain-on-grid forcing; missing NOAA token, no nearby stations, missing observations, and station/grid disagreement are recorded as report/data-gap flags rather than automatic recalibration instructions.
+- Informational downloads should derive from one shared buffered analysis extent instead of dataset-specific buffering.
+- Workspace gap analysis should point to upstream GitHub issues in `hms-commander` or `ras-commander` when the missing capability belongs there.
+- `ras-agent` keeps the Illinois-specific integration layer; reusable watershed and HEC-RAS primitives belong upstream.
+
 
 ## Architecture
 
@@ -231,6 +272,7 @@ Linux (Cloud VM — Rocky 8 / RHEL 8):
 | 10 | Cloud storage — Cloudflare R2 results upload, presigned download URLs | ✅ Done |
 | 11 | Perimeter writing — watershed boundary → .g## ASCII (HEC-RAS regenerates HDF on next open) | ✅ Done |
 | HITL/QAQC | Human-in-the-loop + autonomous QA/QC — expert liaison, bounds validation, transparency logging | ✅ Done |
+| TauDEM QAQC | Delineation bundle — maps, diagnostics, provenance, reviewer prompts, and signoff metadata | ✅ Done |
 | Windows Agent | Windows mesh interface — RasPreprocess API for .tmp.hdf/.b##/.x## generation | ✅ Done |
 | Linux Preprocessor | hecras-v66-linux integration — geometry compute on Linux, Windows dependency reduced to mesh creation only | ✅ Done |
 

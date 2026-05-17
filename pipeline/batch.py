@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 try:
     from loguru import logger
@@ -185,11 +185,28 @@ def _write_run_metadata(
         for fname, path in file_dict.items():
             output_files[f"{fname}_{rp}yr"] = str(path)
 
+    water_source = getattr(result, "water_source", None)
+    if not isinstance(water_source, dict):
+        water_source = None
+    project = getattr(result, "project", None)
+    project_metadata = getattr(project, "metadata", None)
+    if not water_source and isinstance(project_metadata, dict):
+        water_source = project_metadata.get("water_source", {})
+    water_source = water_source or {
+        "mode": "unknown",
+        "contract_status": "not_recorded",
+        "production_ready": False,
+    }
+    workflow_config = getattr(result, "workflow_config", None)
+    if hasattr(workflow_config, "to_audit_dict"):
+        workflow_config = workflow_config.to_audit_dict()
+
     metadata = {
         "name": spec.name,
         "pour_point": [spec.lon, spec.lat],
         "return_periods": spec.return_periods,
         "boundary_condition_mode": boundary_condition_mode,
+        "water_source": water_source,
         "status": result.status,
         "duration_sec": round(duration_sec, 2),
         "drainage_area_mi2": (
@@ -200,6 +217,8 @@ def _write_run_metadata(
         "ras_agent_commit": GIT_COMMIT,
         "run_timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    if isinstance(workflow_config, dict):
+        metadata["workflow_config"] = workflow_config
 
     meta_path = ws_dir / "run_metadata.json"
     with meta_path.open("w") as fh:
@@ -213,13 +232,21 @@ def run_batch(
     input_file: Path,
     output_dir: Path,
     max_workers: int = 3,
-    resolution_m: float = 3.0,
+    resolution_m: float = 1.0,
     mesh_strategy: str = "geometry_first",
     boundary_condition_mode: str = "headwater",
+    water_source_mode: Optional[str] = "auto",
+    water_source_provenance: Optional[dict] = None,
+    allow_low_detail_screening: bool = False,
     ras_exe_dir: Optional[Path] = None,
     resume: bool = True,
     dry_run: bool = False,
     notify_config=None,        # Optional[NotifyConfig] — see pipeline/notify.py
+    workflow_config: Optional[Any] = None,
+    precip_mode: str = "skip",
+    storm_qc_enabled: bool = False,
+    noaa_cdo_token: Optional[str] = None,
+    workspace_dir: Optional[Path] = None,
 ) -> BatchResult:
     """
     Run full pipeline for each watershed in input_file.
@@ -242,10 +269,20 @@ def run_batch(
                         "headwater" | "downstream". Downstream is scaffolded
                         through batch/orchestrator but still fails fast in the
                         builder until chained-basin implementation resumes.
+        water_source_mode:
+                        "auto" | "rain_on_grid" | "external_hydrograph" |
+                        "mock_screening" | "none".
+        water_source_provenance:
+                        Optional source/provenance payload for model metadata.
+        allow_low_detail_screening:
+                        Allow explicit non-production screening output.
         ras_exe_dir:    Path to RasUnsteady binary dir; None = mock mode
         resume:         Skip watersheds with existing completed output
         dry_run:        Load + validate specs, print plan, exit without running
         notify_config:  Optional NotifyConfig for per-watershed + batch notifications
+        workflow_config:
+                        Optional RoG workflow config mapping, dataclass, or
+                        JSON/YAML path forwarded into run_watershed.
 
     Returns:
         BatchResult with per-watershed results and summary CSV path
@@ -260,7 +297,8 @@ def run_batch(
         f"Batch: {total} watersheds from {input_file.name}, "
         f"output_dir={output_dir}, max_workers={max_workers}, "
         f"resume={resume}, dry_run={dry_run}, "
-        f"bc_mode={boundary_condition_mode}"
+        f"bc_mode={boundary_condition_mode}, "
+        f"water_source={water_source_mode}"
     )
 
     summary_csv = output_dir / "batch_summary.csv"
@@ -273,7 +311,8 @@ def run_batch(
             logger.info(
                 f"  [{i}/{total}] {spec.name}  "
                 f"lon={spec.lon}, lat={spec.lat}, "
-                f"rps={spec.return_periods}, bc_mode={boundary_condition_mode}{tag}"
+                f"rps={spec.return_periods}, bc_mode={boundary_condition_mode}, "
+                f"water_source={water_source_mode}{tag}"
             )
         logger.info("Dry-run complete — no execution.")
         return BatchResult(
@@ -326,8 +365,16 @@ def run_batch(
             resolution_m=resolution_m,
             mesh_strategy=mesh_strategy,
             boundary_condition_mode=boundary_condition_mode,
+            water_source_mode=water_source_mode,
+            water_source_provenance=water_source_provenance,
+            allow_low_detail_screening=allow_low_detail_screening,
             ras_exe_dir=ras_exe_dir,
             name=spec.name,
+            precip_mode=precip_mode,
+            workflow_config=workflow_config,
+            storm_qc_enabled=storm_qc_enabled,
+            noaa_cdo_token=noaa_cdo_token,
+            workspace_dir=workspace_dir,
         )
         dur = time.monotonic() - t_start
         _write_run_metadata(spec, result, dur, boundary_condition_mode)
@@ -496,6 +543,22 @@ if __name__ == "__main__":
         choices=["headwater", "downstream"],
         help="Boundary-condition mode scaffold (default: headwater)",
     )
+    parser.add_argument(
+        "--water-source-mode",
+        default="auto",
+        choices=["auto", "none", "rain_on_grid", "external_hydrograph", "mock_screening"],
+        help="Headwater water-source contract mode (default: auto)",
+    )
+    parser.add_argument(
+        "--water-source-provenance-json",
+        default=None,
+        help="JSON object describing water-source provenance",
+    )
+    parser.add_argument(
+        "--low-detail-screening",
+        action="store_true",
+        help="Allow explicit low-detail screening output; not production-ready",
+    )
     parser.add_argument("--no-resume", action="store_true",
                         help="Re-run even if output exists")
     parser.add_argument("--dry-run", action="store_true")
@@ -503,6 +566,34 @@ if __name__ == "__main__":
                         help="Webhook URL for completion notification")
     parser.add_argument("--notify-email", default=None,
                         help="Email address for completion notification")
+    parser.add_argument(
+        "--workflow-config",
+        type=Path,
+        default=None,
+        help="JSON/YAML RoG workflow config for audit metadata and default AEPs",
+    )
+    parser.add_argument(
+        "--precip-mode",
+        default="skip",
+        choices=["skip", "aorc", "mrms"],
+        help="Precipitation retrieval mode (default: skip)",
+    )
+    parser.add_argument(
+        "--storm-qc",
+        action="store_true",
+        help="Enable GHCND storm QC cross-validation (Stage 9)",
+    )
+    parser.add_argument(
+        "--noaa-cdo-token",
+        default=None,
+        help="NOAA CDO API token for station discovery",
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        type=Path,
+        default=None,
+        help="Workspace directory for report package generation (Stage 10)",
+    )
     args = parser.parse_args()
 
     notify_config = None
@@ -512,6 +603,11 @@ if __name__ == "__main__":
             webhook_url=args.webhook,
             email_to=args.notify_email,
         )
+    water_source_provenance = (
+        json.loads(args.water_source_provenance_json)
+        if args.water_source_provenance_json
+        else None
+    )
 
     result = run_batch(
         args.input_file,
@@ -519,10 +615,18 @@ if __name__ == "__main__":
         max_workers=args.workers,
         mesh_strategy=args.strategy,
         boundary_condition_mode=args.bc_mode,
+        water_source_mode=args.water_source_mode,
+        water_source_provenance=water_source_provenance,
+        allow_low_detail_screening=args.low_detail_screening,
         ras_exe_dir=None if args.mock else args.ras_exe_dir,
         resume=not args.no_resume,
         dry_run=args.dry_run,
         notify_config=notify_config,
+        workflow_config=args.workflow_config,
+        precip_mode=args.precip_mode,
+        storm_qc_enabled=args.storm_qc,
+        noaa_cdo_token=args.noaa_cdo_token,
+        workspace_dir=args.workspace_dir,
     )
     print(
         f"Batch complete: {result.completed} done, "

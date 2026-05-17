@@ -24,7 +24,7 @@ globs: pipeline/**
 ## Error Handling
 - Informative exception messages with context values
 - Never silently swallow exceptions in pipeline stages
-- Stages 1-2: raise OrchestratorError; Stages 3-7: append to errors list
+- Stages 1-2: raise OrchestratorError; Stages 3-10: append to errors list
 
 ## Imports
 - Standard library first, then third-party, then local

@@ -23,7 +23,7 @@ streamstats-access>=0.1
 dataretrieval>=1.0
 
 # Numerical
-numpy>=1.24
+numpy>=1.24,<2.0  # pysheds 0.5 uses np.in1d removed in NumPy 2.0; pin until pysheds fixes upstream
 scipy>=1.11
 pandas>=2.0
 matplotlib>=3.8
@@ -36,6 +36,8 @@ requests>=2.31
 pydantic>=2.0
 
 # Utilities
+jsonschema>=4.0
+PyYAML>=6.0
 python-dotenv>=1.0
 tqdm>=4.66
 click>=8.1

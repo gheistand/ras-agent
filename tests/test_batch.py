@@ -27,6 +27,7 @@ from batch import (
     run_batch,
     write_summary_csv,
 )
+from rog_config import RogWorkflowConfig
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -51,6 +52,13 @@ def _make_mock_orchestrator_result(name: str, lon: float, lat: float, ws_dir: Pa
     mock.peak_flows = None
     mock.results = {}
     mock.errors = []
+    mock.project = None
+    mock.workflow_config = None
+    mock.water_source = {
+        "mode": "mock_screening",
+        "contract_status": "screening_only",
+        "production_ready": False,
+    }
     return mock
 
 
@@ -270,21 +278,33 @@ def test_run_batch_forwards_boundary_condition_mode(tmp_path):
     def _fake_run_watershed(pour_point_lon, pour_point_lat, output_dir,
                              name=None, **kwargs):
         ws_dir = Path(output_dir)
-        return _make_mock_orchestrator_result(name, pour_point_lon,
-                                              pour_point_lat, ws_dir)
+        result = _make_mock_orchestrator_result(name, pour_point_lon,
+                                                pour_point_lat, ws_dir)
+        result.workflow_config = kwargs.get("workflow_config")
+        return result
 
     with patch("batch.run_watershed", side_effect=_fake_run_watershed) as mock_rw:
+        workflow_config = RogWorkflowConfig(
+            aep_years=[100],
+            durations_hours=[24],
+            mock=True,
+        )
         result = run_batch(
             csv_file,
             output_dir,
             max_workers=1,
             boundary_condition_mode="downstream",
+            workflow_config=workflow_config,
         )
 
     assert result.completed == 1
     assert mock_rw.call_args.kwargs["boundary_condition_mode"] == "downstream"
+    assert mock_rw.call_args.kwargs["workflow_config"] is workflow_config
     run_metadata = json.loads((output_dir / "Alpha" / "run_metadata.json").read_text())
     assert run_metadata["boundary_condition_mode"] == "downstream"
+    assert run_metadata["water_source"]["mode"] == "mock_screening"
+    assert run_metadata["workflow_config"]["plan_count"] == 1
+    assert run_metadata["workflow_config"]["mock"] is True
 
 
 # ── Tests: write_summary_csv ───────────────────────────────────────────────────
@@ -340,6 +360,45 @@ def test_write_summary_csv(tmp_path):
 
 
 # ── Tests: dry_run ─────────────────────────────────────────────────────────────
+
+def test_run_batch_forwards_precip_and_storm_qc(tmp_path):
+    """New precip/storm-QC/workspace params are forwarded to run_watershed."""
+    csv_file = tmp_path / "ws.csv"
+    _write_csv(
+        csv_file,
+        rows=[
+            {"name": "Alpha", "lon": "-88.578", "lat": "40.021",
+             "return_periods": "100", "notes": ""},
+        ],
+        fieldnames=["name", "lon", "lat", "return_periods", "notes"],
+    )
+    output_dir = tmp_path / "out"
+    ws_dir = tmp_path / "workspace"
+
+    def _fake_run_watershed(pour_point_lon, pour_point_lat, output_dir,
+                             name=None, **kwargs):
+        ws = Path(output_dir)
+        return _make_mock_orchestrator_result(name, pour_point_lon,
+                                              pour_point_lat, ws)
+
+    with patch("batch.run_watershed", side_effect=_fake_run_watershed) as mock_rw:
+        result = run_batch(
+            csv_file,
+            output_dir,
+            max_workers=1,
+            precip_mode="aorc",
+            storm_qc_enabled=True,
+            noaa_cdo_token="fake-token",
+            workspace_dir=ws_dir,
+        )
+
+    assert result.completed == 1
+    call_kw = mock_rw.call_args.kwargs
+    assert call_kw["precip_mode"] == "aorc"
+    assert call_kw["storm_qc_enabled"] is True
+    assert call_kw["noaa_cdo_token"] == "fake-token"
+    assert call_kw["workspace_dir"] == ws_dir
+
 
 def test_dry_run_no_execution(tmp_path):
     """dry_run=True should not call run_watershed at all."""

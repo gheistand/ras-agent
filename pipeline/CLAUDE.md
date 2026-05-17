@@ -6,7 +6,7 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 
 | Module | Role | Key types |
 |--------|------|-----------|
-| `orchestrator.py` | Chains 7 stages into `run_watershed()` | `OrchestratorResult` |
+| `orchestrator.py` | Chains 10 stages into `run_watershed()` | `OrchestratorResult` |
 | `terrain.py` | DEM download + mosaic + NLCD land cover | `get_terrain()`, `get_nlcd()` |
 | `watershed.py` | pysheds D8 delineation | `WatershedResult`, `BasinCharacteristics` |
 | `streamstats.py` | USGS StreamStats + IL regression fallback | `PeakFlowEstimates` |
@@ -27,7 +27,7 @@ Python backend for the RAS Agent modeling pipeline. All modules use bare imports
 
 - **Graceful degradation:** `model_builder.py` tries `ras-commander` first, falls back to `shutil`/`h5py`. `streamstats.py` tries API, falls back to regression equations. Never hard-fail on optional deps.
 - **Mock mode:** `runner.py` with `mock=True` creates fake HDF5 output. All downstream code handles this.
-- **Error handling:** `orchestrator.py` raises `OrchestratorError` for fatal stages (1-2), returns `status="partial"` with `errors` list for stages 3-7.
+- **Error handling:** `orchestrator.py` raises `OrchestratorError` for fatal stages (1-2), returns `status="partial"` with `errors` list for stages 3-10.
 - **Lazy imports:** `api.py` lazy-imports `runner`, `storage`, `report`, `notify` to avoid pulling heavy deps at module load time.
 - **Output structure:** `{output_dir}/terrain/`, `model/`, `results/{rp}yr/`, `logs/`, `jobs.db`, `report.html`
 
@@ -300,7 +300,7 @@ elif qaqc.status == "WARN":
 ```
 
 The pattern: **stage completes → validate → PASS continues → WARN logs → HITL routes to expert.**
-Stages 1–2 are fatal (raise `OrchestratorError` on HITL). Stages 3–7 use partial failure pattern.
+Stages 1–2 are fatal (raise `OrchestratorError` on HITL). Stages 3–10 use partial failure pattern.
 
 ### HITL Configuration
 

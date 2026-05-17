@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'pipeline'))
 
 import h5py
 import numpy as np
+import pandas as pd
 import pytest
 import rasterio
 import geopandas as gpd
@@ -27,13 +28,17 @@ from results import (
     extract_max_wse,
     extract_max_velocity,
     extract_flow_area_results,
+    extract_point_timeseries,
     cells_to_raster,
     extract_flood_extent,
     export_results,
     export_cloud_native,
+    export_filtered_rasters,
+    _parse_plan_from_hdf,
     detect_ras_version,
     FlowAreaGeometry,
     FlowAreaResults,
+    NODATA,
     TARGET_CRS,
 )
 
@@ -128,6 +133,44 @@ def make_fake_ras_2025_hdf(path: Path) -> Path:
         wse = (depths + 250.0).astype(np.float32)
         ts_grp.create_dataset("Water Surface", data=wse)
     return path
+
+
+def make_fake_point_timeseries_hdf(path: Path) -> tuple[Path, tuple[float, float]]:
+    """Create a small HDF with timestamps and a direct cell flow dataset."""
+    from pyproj import Transformer
+
+    lon_lat = (-89.6994167, 39.81541667)
+    x, y = Transformer.from_crs("EPSG:4326", "EPSG:5070", always_xy=True).transform(*lon_lat)
+    with h5py.File(str(path), "w") as hf:
+        area_grp = hf.create_group(f"Geometry/2D Flow Areas/{AREA_NAME}")
+        area_grp.create_dataset(
+            "Cells Center Coordinate",
+            data=np.array([[x + 500.0, y], [x + 2.0, y + 1.0]], dtype=np.float64),
+        )
+        area_grp.create_dataset("Cells Minimum Elevation", data=np.array([98.0, 100.0]))
+
+        ts_base = "Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series"
+        ts_grp = hf.create_group(ts_base)
+        ts_grp.create_dataset(
+            "Time Date Stamp (ms)",
+            data=np.array(
+                [
+                    b"17JUN2011 17:30:00:000",
+                    b"17JUN2011 18:30:00:000",
+                    b"17JUN2011 19:30:00:000",
+                ]
+            ),
+        )
+        area_ts = hf.create_group(f"{ts_base}/2D Flow Areas/{AREA_NAME}")
+        area_ts.create_dataset(
+            "Water Surface",
+            data=np.array([[110.0, 120.0], [111.0, 122.0], [112.0, 124.0]], dtype=np.float32),
+        )
+        area_ts.create_dataset(
+            "Flow",
+            data=np.array([[10.0, 20.0], [11.0, 22.0], [12.0, 24.0]], dtype=np.float32),
+        )
+    return path, lon_lat
 
 
 @pytest.fixture(scope="module")
@@ -304,6 +347,29 @@ class TestExtractMaxVelocity:
             ts.create_dataset("Depth", data=np.ones((2, 3), dtype=np.float32))
         with pytest.raises(KeyError):
             extract_max_velocity(hdf, AREA_NAME)
+
+
+# ── Point Time-Series Extraction ──────────────────────────────────────────────
+
+class TestExtractPointTimeseries:
+    def test_extracts_nearest_cell_stage_and_flow(self, tmp_path):
+        hdf_path, (lon, lat) = make_fake_point_timeseries_hdf(tmp_path / "point.hdf")
+
+        frame = extract_point_timeseries(hdf_path, AREA_NAME, lon, lat)
+
+        assert list(frame.columns) == [
+            "flow_cfs",
+            "stage_ft",
+            "water_surface_ft",
+            "depth_ft",
+        ]
+        assert frame.index.name == "datetime_utc"
+        assert frame.index[0] == pd.Timestamp("2011-06-17T17:30:00Z")
+        assert frame["flow_cfs"].tolist() == pytest.approx([20.0, 22.0, 24.0])
+        assert frame["stage_ft"].tolist() == pytest.approx([120.0, 122.0, 124.0])
+        assert frame["depth_ft"].tolist() == pytest.approx([20.0, 22.0, 24.0])
+        assert frame.attrs["cell_index"] == 1
+        assert frame.attrs["flow_source"] == "cell_dataset"
 
 
 # ── FlowAreaResults Dataclass ─────────────────────────────────────────────────
@@ -665,3 +731,225 @@ class TestExportCloudNative:
             include_results=True,
             include_terrain=True,
         )
+
+
+# ── Filtered Raster Export (RasProcess) ──────────────────────────────────────
+
+
+def _make_synthetic_rasters(tmp_dir: Path, rows: int = 50, cols: int = 50):
+    """Create aligned depth and WSE GeoTIFFs with known values for testing.
+
+    Depth: gradient from 0 m (top) to ~1.5 m (bottom).
+    WSE: depth + 100 m (fake ground elevation).
+    Both share the same grid, transform, and CRS — just like RASMapper output.
+    """
+    from rasterio.transform import from_bounds
+
+    transform = from_bounds(300_000, 200_000, 301_000, 201_000, cols, rows)
+    profile = {
+        "driver": "GTiff",
+        "height": rows,
+        "width": cols,
+        "count": 1,
+        "dtype": np.float32,
+        "crs": CRS.from_epsg(5070),
+        "transform": transform,
+        "nodata": NODATA,
+    }
+
+    depth_vals = np.linspace(0, 1.5, rows * cols, dtype=np.float32).reshape(rows, cols)
+    wse_vals = (depth_vals + 100.0).astype(np.float32)
+
+    depth_path = tmp_dir / "Depth (Max).Terrain.tif"
+    wse_path = tmp_dir / "WSE (Max).Terrain.tif"
+
+    for path, data in [(depth_path, depth_vals), (wse_path, wse_vals)]:
+        with rasterio.open(str(path), "w", **profile) as dst:
+            dst.write(data, 1)
+
+    return depth_path, wse_path, depth_vals, wse_vals
+
+
+class TestParsePlanFromHdf:
+    def test_standard_name(self, tmp_path):
+        hdf = tmp_path / "MyProject.p01.hdf"
+        hdf.touch()
+        project_dir, plan_num = _parse_plan_from_hdf(hdf)
+        assert project_dir == tmp_path
+        assert plan_num == "01"
+
+    def test_multi_dot_name(self, tmp_path):
+        hdf = tmp_path / "Spring.Creek.p03.hdf"
+        hdf.touch()
+        _, plan_num = _parse_plan_from_hdf(hdf)
+        assert plan_num == "03"
+
+    def test_invalid_name_raises(self, tmp_path):
+        hdf = tmp_path / "no_plan_number.hdf"
+        hdf.touch()
+        with pytest.raises(ValueError, match="Cannot parse plan number"):
+            _parse_plan_from_hdf(hdf)
+
+
+class TestExportFilteredRasters:
+    """Tests for export_filtered_rasters() — mocks ras_commander module."""
+
+    def _mock_store_maps(self, tmp_dir):
+        """Return a side_effect for store_maps that produces synthetic rasters."""
+        depth_path, wse_path, _, _ = _make_synthetic_rasters(tmp_dir)
+
+        def fake_store_maps(*, plan_number, output_path, **kwargs):
+            import shutil as _shutil
+            out = Path(output_path)
+            out.mkdir(parents=True, exist_ok=True)
+            d = out / depth_path.name
+            w = out / wse_path.name
+            _shutil.copy2(depth_path, d)
+            _shutil.copy2(wse_path, w)
+            return {"depth": [d], "wse": [w]}
+
+        return fake_store_maps
+
+    def _run_with_mocked_ras(self, staging, fake_store, call_fn):
+        """Inject a fake ras_commander module and run call_fn."""
+        fake_rc = mock.MagicMock()
+        fake_rc.RasProcess.store_maps.side_effect = fake_store
+        fake_rc.init_ras_project.return_value = mock.MagicMock()
+        with mock.patch.dict("sys.modules", {"ras_commander": fake_rc}):
+            return call_fn()
+
+    def test_basic_filtering(self, tmp_path):
+        """Cells below threshold are NODATA in both depth and WSE outputs."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=1.0,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        assert "filtered_depth" in outputs
+        assert "filtered_wse" in outputs
+        assert outputs["filtered_depth"].exists()
+        assert outputs["filtered_wse"].exists()
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+            assert src.nodata == NODATA
+            n_nodata = np.sum(np.isclose(depth, NODATA))
+            assert n_nodata > 0, "Expected some cells filtered out"
+            assert n_nodata < depth.size, "Expected some cells to survive filter"
+
+        with rasterio.open(str(outputs["filtered_wse"])) as src:
+            wse = src.read(1)
+            wse_nodata = np.sum(np.isclose(wse, NODATA))
+            assert wse_nodata == n_nodata
+
+    def test_mask_alignment(self, tmp_path):
+        """The same pixels are masked in both depth and WSE."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=0.5,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+        with rasterio.open(str(outputs["filtered_wse"])) as src:
+            wse = src.read(1)
+
+        depth_mask = np.isclose(depth, NODATA)
+        wse_mask = np.isclose(wse, NODATA)
+        assert np.array_equal(depth_mask, wse_mask), "Depth and WSE masks must be identical"
+
+    def test_zero_threshold_keeps_all(self, tmp_path):
+        """A threshold of 0 ft should keep all non-zero cells."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=0.0,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+        n_filtered = np.sum(np.isclose(depth, NODATA))
+        assert n_filtered <= depth.shape[1], "At most one row at zero depth"
+
+    def test_negative_threshold_raises(self, tmp_path):
+        """Negative min_depth_ft should be rejected."""
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        with pytest.raises(ValueError, match="non-negative"):
+            export_filtered_rasters(
+                hdf_path=hdf, output_dir=tmp_path / "out", min_depth_ft=-1.0,
+            )
+
+    def test_cog_metadata_tags(self, tmp_path):
+        """Filtered rasters should include threshold and source metadata."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=0.5,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        for key in ("filtered_depth", "filtered_wse"):
+            with rasterio.open(str(outputs[key])) as src:
+                tags = src.tags()
+                assert tags["min_depth_threshold_ft"] == "0.5"
+                assert tags["source_hdf"] == "TestProj.p01.hdf"
+                assert tags["source_plan"] == "p01"
+
+    def test_high_threshold_filters_all(self, tmp_path):
+        """A threshold higher than any depth should produce all-NODATA rasters."""
+        staging = tmp_path / "staging"
+        staging.mkdir()
+        hdf = tmp_path / "TestProj.p01.hdf"
+        hdf.touch()
+        output_dir = tmp_path / "filtered_out"
+
+        fake_store = self._mock_store_maps(staging)
+
+        def run():
+            return export_filtered_rasters(
+                hdf_path=hdf, output_dir=output_dir, min_depth_ft=100.0,
+            )
+
+        outputs = self._run_with_mocked_ras(staging, fake_store, run)
+
+        with rasterio.open(str(outputs["filtered_depth"])) as src:
+            depth = src.read(1)
+        assert np.all(np.isclose(depth, NODATA)), "All cells should be NODATA"
