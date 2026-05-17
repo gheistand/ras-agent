@@ -10,7 +10,7 @@ RAS Agent automates end-to-end 2D HEC-RAS hydraulic modeling: terrain ingestion,
 
 ### Python pipeline (from repo root)
 ```bash
-python -m pytest tests/ -v                    # all 415 tests
+python -m pytest tests/ -v                    # all 474 tests
 python -m pytest tests/test_runner.py -v      # single module
 python -m pytest tests/test_api.py::test_health -v  # single test
 
